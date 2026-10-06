@@ -12,9 +12,27 @@ export class PedalStream {
   readonly history: FrameHistory;
   private readonly listeners = new Set<BatchListener>();
   private batchArrivalTimes: number[] = [];
+  // Sample clock (Rust, µs) vs UI clock (performance.now, ms): see `dataNowUs`.
+  private lastSampleUs = 0;
+  private lastArrivalMs = 0;
+  private lastDataNowUs = 0;
+  private hasData = false;
 
   constructor(history = new FrameHistory()) {
     this.history = history;
+  }
+
+  /**
+   * "Now" on the sample clock, for drawing. Frame timestamps come from the Rust input
+   * thread, not `performance.now()`, so this extrapolates from the newest frame by the UI
+   * time since its batch arrived. It never goes backwards, so the graph scrolls smoothly
+   * even though batches arrive with some jitter.
+   */
+  dataNowUs(nowMs = performance.now()): number {
+    if (!this.hasData) return nowMs * 1000;
+    const estimate = this.lastSampleUs + (nowMs - this.lastArrivalMs) * 1000;
+    this.lastDataNowUs = Math.max(this.lastDataNowUs, estimate);
+    return this.lastDataNowUs;
   }
 
   ingest(batch: PedalFrame[]): void {
@@ -27,6 +45,9 @@ export class PedalStream {
     this.pruneBatchArrivalTimes(now);
 
     this.history.pushMany(batch);
+    this.lastSampleUs = batch[batch.length - 1].t;
+    this.lastArrivalMs = now;
+    this.hasData = true;
 
     for (const listener of this.listeners) {
       listener(batch);
@@ -111,6 +132,10 @@ export class PedalStream {
   clear(): void {
     this.history.clear();
     this.batchArrivalTimes = [];
+    this.lastSampleUs = 0;
+    this.lastArrivalMs = 0;
+    this.lastDataNowUs = 0;
+    this.hasData = false;
   }
 
   private pruneBatchArrivalTimes(now: number): void {

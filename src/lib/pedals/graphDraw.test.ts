@@ -47,13 +47,15 @@ describe("graphDraw pure math and decimation", () => {
   });
 
   describe("computeHorizontalGridLines", () => {
-    it("returns 25%, 50%, and 75% grid lines", () => {
+    it("returns 0% to 100% grid lines with solid boundaries", () => {
       const lines = computeHorizontalGridLines(200, 0, 0);
-      expect(lines).toHaveLength(3);
-      expect(lines.map((l) => l.fraction)).toEqual([0.25, 0.5, 0.75]);
-      expect(lines.map((l) => l.label)).toEqual(["25%", "50%", "75%"]);
-      // At fraction 0.5 in 200px: y = 100
-      expect(lines[1].y).toBe(100);
+      expect(lines.map((l) => l.fraction)).toEqual([0, 0.25, 0.5, 0.75, 1]);
+      expect(lines.map((l) => l.label)).toEqual(["0%", "25%", "50%", "75%", "100%"]);
+      expect(lines.map((l) => l.boundary)).toEqual([true, false, false, false, true]);
+      // 100% is the top of the plot, 0% the bottom, 50% the middle.
+      expect(lines[4].y).toBe(0);
+      expect(lines[0].y).toBe(200);
+      expect(lines[2].y).toBe(100);
     });
   });
 

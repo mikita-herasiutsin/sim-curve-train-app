@@ -4,6 +4,7 @@
   import { isTauri } from "@tauri-apps/api/core";
   import { pedalStream, type PedalStream } from "$lib/pedals/stream";
   import { startMockSource } from "$lib/pedals/mockSource";
+  import { startRealSource, type SourceStatus } from "$lib/pedals/realSource";
   import { loadGraphWindow, saveGraphWindow } from "$lib/settings";
   import PedalBars from "$lib/components/PedalBars.svelte";
   import PedalGraph from "$lib/components/PedalGraph.svelte";
@@ -13,28 +14,22 @@
   let windowSeconds = $state(5);
   let latencyFlashEnabled = $state(false);
   let isDemoSource = $state(false);
+  let status = $state<SourceStatus>({ kind: "connecting" });
   let stopSource: (() => void) | null = null;
 
   /**
    * Connects the pedal stream to an input source.
-   * If Tauri is not running, or the Rust backend source is not yet wired up,
-   * falls back to the mock source and displays the Demo data badge.
-   *
-   * Later, the real source will deliver PedalFrame[] batches over a Tauri Channel.
+   * In the app: the calibrated frames of the first device with a saved profile.
+   * In a plain browser: the mock source, with the Demo data badge.
    */
   function connectSource(stream: PedalStream): () => void {
-    const runningInTauri = typeof window !== "undefined" && isTauri();
-    const hasRealSource = false; // Tauri Channel integration planned for next milestone
-
-    if (!runningInTauri || !hasRealSource) {
+    // Outside the app (plain `npm run dev` in a browser) there is no Rust backend.
+    if (typeof window === "undefined" || !isTauri()) {
       isDemoSource = true;
       return startMockSource(stream);
     }
-
     isDemoSource = false;
-    // Real source integration hook:
-    // return startTauriChannelSource(stream);
-    return () => {};
+    return startRealSource(stream, (next) => (status = next));
   }
 
   function handleWindowChange(event: Event): void {
@@ -64,6 +59,19 @@
       <h1 class="page-title">Live Pedal View</h1>
       {#if isDemoSource}
         <span class="badge-demo" data-testid="demo-badge">Demo data</span>
+      {/if}
+      {#if !isDemoSource}
+        <span class="source-status" data-testid="source-status" aria-live="polite">
+          {#if status.kind === "live"}
+            {status.device.name}
+          {:else if status.kind === "noProfile"}
+            No pedal profile yet. <a href={resolve("/devices")}>Set up your pedals</a>
+          {:else if status.kind === "error"}
+            <span class="source-error">Input error: {status.message}</span>
+          {:else}
+            Connecting…
+          {/if}
+        </span>
       {/if}
     </div>
 
@@ -118,6 +126,19 @@
 </div>
 
 <style>
+  .source-status {
+    color: var(--text-muted);
+    font-size: 0.875rem;
+  }
+
+  .source-status a {
+    color: var(--accent);
+  }
+
+  .source-error {
+    color: var(--brake);
+  }
+
   .live-page {
     display: flex;
     flex-direction: column;

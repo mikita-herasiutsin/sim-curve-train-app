@@ -10,6 +10,8 @@ export interface HorizontalGridLine {
   y: number;
   fraction: number;
   label: string;
+  /** 0% and 100% are solid boundaries, so a full or released pedal visibly sits on them. */
+  boundary: boolean;
 }
 
 export interface Point {
@@ -76,17 +78,18 @@ export class ColumnDecimator {
 }
 
 /**
- * Computes horizontal grid lines at 25%, 50%, and 75%.
+ * Computes horizontal grid lines at 0%, 25%, 50%, 75% and 100%.
  */
 export function computeHorizontalGridLines(
   height: number,
   paddingTop = 16,
   paddingBottom = 24,
 ): HorizontalGridLine[] {
-  return [0.25, 0.5, 0.75].map((fraction) => ({
+  return [0, 0.25, 0.5, 0.75, 1].map((fraction) => ({
     y: getGraphY(fraction, height, paddingTop, paddingBottom),
     fraction,
     label: `${Math.round(fraction * 100)}%`,
+    boundary: fraction === 0 || fraction === 1,
   }));
 }
 
@@ -204,22 +207,26 @@ export function drawGraph(
   ctx.font = '11px "Inter", system-ui, sans-serif';
   ctx.lineWidth = 1;
 
-  // Horizontal grid lines (25%, 50%, 75%)
+  // Horizontal grid lines: solid 0% and 100% boundaries, dashed 25%, 50%, 75%
   const hLines = computeHorizontalGridLines(height, paddingTop, paddingBottom);
   ctx.strokeStyle = theme.border;
   ctx.fillStyle = theme.textMuted;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
 
-  ctx.setLineDash([4, 4]);
   for (const line of hLines) {
+    ctx.setLineDash(line.boundary ? [] : [4, 4]);
+    ctx.strokeStyle = line.boundary ? theme.textMuted : theme.border;
     ctx.beginPath();
     ctx.moveTo(0, line.y);
     ctx.lineTo(width, line.y);
     ctx.stroke();
 
-    ctx.fillText(line.label, 8, line.y - 7);
+    // The 100% label goes below its line so it stays inside the plot.
+    ctx.fillText(line.label, 8, line.fraction === 1 ? line.y + 9 : line.y - 7);
   }
+  ctx.strokeStyle = theme.border;
+  ctx.setLineDash([4, 4]);
 
   // Vertical grid lines (every 1 second)
   const vLines = computeVerticalGridLines(nowUs, windowUs, width);
@@ -233,7 +240,8 @@ export function drawGraph(
     ctx.lineTo(line.x, height - paddingBottom);
     ctx.stroke();
 
-    ctx.fillText(line.label, line.x, height - 6);
+    // Centred labels at the very edges would be clipped.
+    if (line.x >= 16 && line.x <= width - 16) ctx.fillText(line.label, line.x, height - 6);
   }
   ctx.setLineDash([]);
 

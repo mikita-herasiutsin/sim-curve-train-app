@@ -98,4 +98,30 @@ describe("PedalStream", () => {
     expect(stream.sampleRateHz).toBe(0);
     expect(stream.batchIntervalStats).toEqual({ avgMs: 0, maxMs: 0 });
   });
+
+  describe("dataNowUs", () => {
+    it("falls back to the UI clock before any data", () => {
+      expect(new PedalStream().dataNowUs(10)).toBe(10_000);
+    });
+
+    it("extrapolates on the sample clock, not the UI clock", () => {
+      const stream = new PedalStream();
+      vi.spyOn(performance, "now").mockReturnValue(5_000);
+      // Rust timestamps start near zero when the input thread starts.
+      stream.ingest([{ t: 1_000_000, brake: 0.5, throttle: 0 }]);
+      expect(stream.dataNowUs(5_000)).toBe(1_000_000);
+      expect(stream.dataNowUs(5_004)).toBe(1_004_000);
+    });
+
+    it("never goes backwards when a batch arrives early", () => {
+      const stream = new PedalStream();
+      vi.spyOn(performance, "now").mockReturnValue(0);
+      stream.ingest([{ t: 1_000_000, brake: 0, throttle: 0 }]);
+      expect(stream.dataNowUs(10)).toBe(1_010_000);
+      // The next batch's newest sample is older than the extrapolated time.
+      stream.ingest([{ t: 1_008_000, brake: 0, throttle: 0 }]);
+      expect(stream.dataNowUs(0)).toBe(1_010_000);
+      expect(stream.dataNowUs(5)).toBe(1_013_000);
+    });
+  });
 });

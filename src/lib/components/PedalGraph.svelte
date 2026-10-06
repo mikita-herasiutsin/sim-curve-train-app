@@ -45,7 +45,7 @@
     ctx.save();
     ctx.scale(dpr, dpr);
 
-    const nowUs = performance.now() * 1000;
+    const nowUs = stream.dataNowUs();
     const winSec = Math.max(3, Math.min(10, windowSeconds));
     const windowUs = winSec * 1_000_000;
     const tMinUs = nowUs - windowUs;

@@ -45,3 +45,11 @@ Stream measured on this rig in `tauri dev`, with the raw monitor open:
 - **Sample rate:** 1000 Hz. This is the poll rate of the input thread; the pedals' own USB report rate may be lower, so consecutive samples can repeat a value.
 - **Batches:** age 7.1 ms when sent, 8.2 ms apart on average.
 - **CPU:** the app process uses 0.3% of a 16-thread machine. All WebView2 processes together use 1.4%, which is an upper bound because other apps' WebViews are included. Both are well under the 3% target.
+
+## Follow-up: live view (SCT-020, SCT-021)
+
+Live page in `tauri dev` on a 165 Hz monitor, with the VNM profile restored automatically after an app restart:
+
+- **Render:** 165 fps, frame time 6.1 ms avg / 6.2 ms max. The canvas keeps up with the refresh rate.
+- **Stream:** 1000 Hz. Batches arrive in the webview 8.5 ms apart on average (10.2 ms max).
+- Full brake and throttle presses reach the solid 100% line on the graph. Released pedals sit on 0% with the default 2% deadzones.

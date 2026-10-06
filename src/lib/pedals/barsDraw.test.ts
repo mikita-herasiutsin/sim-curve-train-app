@@ -1,0 +1,52 @@
+import { describe, expect, it, vi } from "vitest";
+import { computeBarsLayout, drawPedalBars } from "./barsDraw";
+import type { AppThemeColors } from "./theme";
+
+describe("barsDraw", () => {
+  it("computes reasonable column layout for pedal bars", () => {
+    const layout = computeBarsLayout(200, 400);
+
+    expect(layout.brake.width).toBeGreaterThan(0);
+    expect(layout.throttle.width).toBeGreaterThan(0);
+    expect(layout.throttle.x).toBeGreaterThan(layout.brake.x);
+    expect(layout.brake.barHeight).toBeGreaterThan(50);
+  });
+
+  it("draws pedal bars without error using mock context", () => {
+    const mockCtx = {
+      clearRect: vi.fn(),
+      fillRect: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      arcTo: vi.fn(),
+      closePath: vi.fn(),
+      fill: vi.fn(),
+      stroke: vi.fn(),
+      fillText: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      clip: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+
+    const theme: AppThemeColors = {
+      bg: "#000",
+      surface: "#111",
+      surfaceRaised: "#222",
+      border: "#333",
+      text: "#fff",
+      textMuted: "#888",
+      brake: "#f00",
+      throttle: "#0f0",
+      accent: "#00f",
+    };
+
+    expect(() => {
+      drawPedalBars(mockCtx, 150, 300, 0.75, 0.3, theme);
+    }).not.toThrow();
+
+    expect(mockCtx.clearRect).toHaveBeenCalled();
+    expect(mockCtx.fillText).toHaveBeenCalledWith("75%", expect.any(Number), expect.any(Number));
+    expect(mockCtx.fillText).toHaveBeenCalledWith("30%", expect.any(Number), expect.any(Number));
+  });
+});

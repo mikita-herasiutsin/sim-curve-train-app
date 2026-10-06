@@ -11,7 +11,10 @@
     let destroyed = false;
 
     // Subscribe before the first fetch so a hot-plug in between isn't missed.
-    onDevicesChanged((next) => (snapshot = next))
+    onDevicesChanged((next) => {
+      snapshot = next;
+      loadError = null;
+    })
       .then((fn) => (destroyed ? fn() : (unlisten = fn)))
       .catch((error: unknown) => console.error("Failed to watch devices", error));
 

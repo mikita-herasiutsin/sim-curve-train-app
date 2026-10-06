@@ -30,7 +30,9 @@ Create the app skeleton. The window title is "SimCurveTrainApp" and the window s
 
 ### SCT-002 · CI checks on push/PR ⬜ · S
 Add a GitHub Actions workflow on `windows-latest`. It runs fmt check, clippy (`-D warnings`), `cargo test`, `svelte-check`, the frontend unit tests (vitest) and a build.
-- **AC:** a PR with a lint error fails CI; a clean PR passes.
+- **AC:**
+  - A PR with a lint error fails CI; a clean PR passes.
+  - CI also runs a release build (`tauri build --no-bundle`). On desktop, `tauri dev` never applies the CSP, so CSP problems only show up in release builds.
 - **Deps:** SCT-001
 
 ### SCT-003 · Release workflow ⬜ · S
@@ -64,6 +66,7 @@ A dedicated Rust thread polls the selected device at about 1 kHz and timestamps 
 - **AC:**
   - The HUD shows ≥500 Hz with VNM pedals.
   - CPU use is under 3% while idle on the live view.
+  - A panic in the input thread is logged and does not kill the app silently. Revisit `panic = "abort"` and `strip = true` in the release profile.
   - The ring buffer has unit tests.
 - **Deps:** SCT-010
 

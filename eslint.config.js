@@ -15,7 +15,7 @@ export default defineConfig(
   svelte.configs.prettier,
   {
     languageOptions: {
-      globals: { ...globals.browser, ...globals.node },
+      globals: globals.browser,
     },
     rules: {
       // TypeScript already reports undefined identifiers.
@@ -23,10 +23,16 @@ export default defineConfig(
     },
   },
   {
+    // Tooling configs run in Node, not in the WebView.
+    files: ["*.config.js", "*.config.ts"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+  {
     files: ["**/*.svelte", "**/*.svelte.ts", "**/*.svelte.js"],
     languageOptions: {
       parserOptions: {
-        projectService: true,
         extraFileExtensions: [".svelte"],
         parser: ts.parser,
         svelteConfig,

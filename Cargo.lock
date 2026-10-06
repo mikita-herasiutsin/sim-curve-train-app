@@ -2697,8 +2697,6 @@ name = "sim-curve-train-app"
 version = "0.1.0"
 dependencies = [
  "sct-core",
- "serde",
- "serde_json",
  "tauri",
  "tauri-build",
 ]

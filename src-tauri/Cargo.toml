@@ -13,16 +13,17 @@ publish = false
 # The `_lib` suffix avoids a lib/bin name clash on Windows,
 # see https://github.com/rust-lang/cargo/issues/8519
 name = "sim_curve_train_app_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop-only app: no staticlib/cdylib needed (those are for mobile targets).
+crate-type = ["rlib"]
 
+# Keep `tauri` on the same major.minor as the `@tauri-apps/api` npm package;
+# the Tauri CLI refuses to build when they differ.
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "~2.6", features = [] }
 
 [dependencies]
 sct-core.workspace = true
-tauri = { version = "2", features = [] }
-serde.workspace = true
-serde_json.workspace = true
+tauri = { version = "~2.11", features = [] }
 
 [lints]
 workspace = true

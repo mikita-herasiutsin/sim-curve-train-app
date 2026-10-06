@@ -2,7 +2,10 @@ use sct_core::AppInfo;
 
 /// Returns the app name and version for the UI header.
 #[tauri::command]
-#[allow(clippy::needless_pass_by_value)] // Tauri injects command arguments by value.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
 fn app_info(app: tauri::AppHandle) -> AppInfo {
     AppInfo::new(app.package_info().version.to_string())
 }

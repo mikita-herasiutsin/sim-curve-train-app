@@ -1,7 +1,6 @@
 import { defineConfig } from "vitest/config";
 import { sveltekit } from "@sveltejs/kit/vite";
 import { svelteTesting } from "@testing-library/svelte/vite";
-// @ts-expect-error type error without @types/node package
 import process from "node:process";
 const host = process.env.TAURI_DEV_HOST;
 
@@ -13,8 +12,6 @@ export default defineConfig(() => ({
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
-  // Svelte 5: resolve the client build of svelte (not SSR) under Vitest
-  resolve: process.env.VITEST ? { conditions: ["browser"] } : undefined,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,
@@ -28,8 +25,8 @@ export default defineConfig(() => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. tell Vite to ignore watching `src-tauri` and the Cargo workspace build output
+      ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**"],
     },
   },
 

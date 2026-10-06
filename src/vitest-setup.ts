@@ -3,5 +3,6 @@ import { clearMocks } from "@tauri-apps/api/mocks";
 import { afterEach } from "vitest";
 
 afterEach(() => {
-  clearMocks();
+  // Tauri IPC mocks live on `window`; node-environment tests have none.
+  if (typeof window !== "undefined") clearMocks();
 });

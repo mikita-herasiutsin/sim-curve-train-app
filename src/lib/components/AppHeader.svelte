@@ -8,7 +8,10 @@
   onMount(() => {
     getAppInfo()
       .then((result) => (info = result))
-      .catch(() => (failed = true));
+      .catch((error: unknown) => {
+        console.error("Failed to load app info", error);
+        failed = true;
+      });
   });
 </script>
 

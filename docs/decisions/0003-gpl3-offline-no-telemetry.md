@@ -13,7 +13,7 @@
 - **License:** GPL-3.0-only.
 - **No network calls at runtime.** The one exception would be an optional update check, which is post-MVP and must be opt-in.
 - **No analytics and no crash reporting.**
-- **All data stays local.** It lives in SQLite under `%APPDATA%\SimCurveTrainApp`.
+- **All data stays local.** It lives in SQLite in the Tauri app data dir, `%APPDATA%\com.mikitah.simcurvetrainapp`. That path comes from the bundle identifier, so the identifier must not change after the first release.
 
 ## Consequences
 

@@ -29,3 +29,9 @@ tools/**/data/
 Thumbs.db
 *.log
 .env
+
+# Local AI agent setup (machine-specific, not for contributors)
+CLAUDE.local.md
+.agents/
+.claude/agents/
+.claude/settings.local.json

@@ -1,0 +1,48 @@
+name: Bug report
+description: Something doesn't work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for reporting! Please fill in as much as you can, because hardware details matter a lot for pedal input bugs.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Press ...
+        3. See ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: Shown in the top-right corner of the app (e.g. v0.1.0).
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Pedals / wheel
+      description: Brand and model, plus the firmware or software version if you know it.
+      placeholder: e.g. VNM pedals (fw x.y), Simucube 2 Pro
+  - type: input
+    id: os
+    attributes:
+      label: Windows version
+      placeholder: e.g. Windows 11 24H2
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics / logs
+      description: Paste the output of "Copy diagnostics" from Settings when it's available, or any error messages.
+      render: text

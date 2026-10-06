@@ -1,0 +1,7 @@
+# Normalize to LF everywhere (Windows CI runners default to core.autocrlf=true,
+# which would make `prettier --check` fail on CRLF checkouts).
+* text=auto eol=lf
+
+*.png binary
+*.ico binary
+*.icns binary

@@ -1,8 +1,11 @@
 # SimCurveTrainApp
 
+[![CI](https://github.com/mikita-herasiutsin/sim-curve-train-app/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mikita-herasiutsin/sim-curve-train-app/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+
 Free, open-source Windows app for sim racers to train brake and throttle **muscle memory**. Pick a car class, follow a target pressure or a telemetry-like pedal trace with your real pedals, and get an instant score.
 
-> Status: **pre-development**. Investigation and MVP backlog are done; code has not started yet.
+> Status: **pre-alpha**. The app skeleton is in place (SCT-001); see the [MVP backlog](docs/backlog/mvp-tickets.md) for what comes next.
 
 ## Goals
 
@@ -18,6 +21,41 @@ Free, open-source Windows app for sim racers to train brake and throttle **muscl
 
 Tauri 2 (Rust core) with a Svelte + TypeScript UI. See [ADR-0001](docs/decisions/0001-tech-stack-tauri-rust.md).
 
+## Development
+
+### Prerequisites (Windows)
+
+- [Rust](https://rustup.rs/) stable (MSVC toolchain), 1.85 or newer
+- [Node.js](https://nodejs.org/) 24 (see `.nvmrc`; 22.22.2+ also works), with npm
+- Visual Studio Build Tools with the "Desktop development with C++" workload
+- WebView2 runtime (preinstalled on Windows 11)
+
+### Commands
+
+```sh
+npm install          # install frontend deps
+npm run tauri dev    # run the app with hot reload
+npm run tauri build  # release build: target/release/SimCurveTrainApp.exe + NSIS installer
+
+npm run verify       # run every check below (what CI will run)
+npm run check        # svelte-check (TypeScript + Svelte)
+npm run lint         # eslint + prettier --check
+npm run format       # prettier --write
+npm test             # vitest (frontend unit/component tests)
+npm run rust:fmt     # cargo fmt --check
+npm run rust:lint    # cargo clippy -D warnings (pedantic)
+npm run rust:test    # cargo test --workspace
+```
+
+### Layout
+
+```
+crates/core/   sct-core: logic that doesn't depend on the UI (input, drills, scoring, storage)
+src-tauri/     Tauri app shell: commands wiring the core to the UI
+src/           SvelteKit (SPA) + Svelte 5 frontend
+docs/          investigations, decisions, open questions, backlog
+```
+
 ## Documentation
 
 See [`docs/`](docs/README.md):
@@ -26,6 +64,10 @@ See [`docs/`](docs/README.md):
 - [Decisions](docs/decisions/): decision log and ADRs
 - [Open questions](docs/open-questions.md)
 - [MVP backlog](docs/backlog/mvp-tickets.md)
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately ([SECURITY.md](SECURITY.md)).
 
 ## License
 

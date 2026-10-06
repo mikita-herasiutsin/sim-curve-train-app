@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: Lint & test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: npm ci
+
+      # svelte-check, eslint + prettier, vitest, cargo fmt / clippy (pedantic, -D warnings) / test
+      - run: npm run verify
+
+  # The Windows jobs use the Node in .nvmrc; this keeps the oldest supported line (see
+  # `engines` in package.json) working for the frontend toolchain.
+  frontend-min-node:
+    name: Frontend (Node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run check && npm run lint && npm run test
+
+  build:
+    name: Release build
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: npm ci
+
+      # Compiles the CSP into the exe (`tauri dev` skips it on desktop). CI doesn't launch the
+      # app, so smoke-test the uploaded exe by hand for CSP regressions.
+      - run: npx tauri build --no-bundle -- --locked
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: SimCurveTrainApp-${{ github.event.pull_request.head.sha || github.sha }}
+          path: target/release/SimCurveTrainApp.exe
+          if-no-files-found: error
+          retention-days: 14

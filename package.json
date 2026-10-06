@@ -1,0 +1,54 @@
+{
+  "name": "sim-curve-train-app",
+  "version": "0.1.0",
+  "description": "Sim racing pedal muscle-memory trainer",
+  "private": true,
+  "license": "GPL-3.0-only",
+  "type": "module",
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26"
+  },
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "prepare": "svelte-kit sync || echo ''",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "rust:fmt": "cargo fmt --all --check",
+    "rust:lint": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "rust:test": "cargo test --workspace --locked",
+    "verify": "npm run check && npm run lint && npm run test && npm run rust:fmt && npm run rust:lint && npm run rust:test",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "~2.11"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/kit": "^2.65.1",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tauri-apps/cli": "^2",
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/svelte": "^5.4.2",
+    "@types/node": "^24.19.1",
+    "eslint": "^10.12.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-svelte": "^3.23.0",
+    "globals": "^17.13.0",
+    "jsdom": "^30.1.2",
+    "prettier": "^3.9.9",
+    "prettier-plugin-svelte": "^4.1.1",
+    "svelte": "^5.56.3",
+    "svelte-check": "^4.6.0",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.71.1",
+    "vite": "^8.0.16",
+    "vitest": "^5.0.3"
+  }
+}

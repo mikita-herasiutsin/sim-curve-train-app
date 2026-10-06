@@ -123,5 +123,17 @@ describe("PedalStream", () => {
       expect(stream.dataNowUs(0)).toBe(1_010_000);
       expect(stream.dataNowUs(5)).toBe(1_013_000);
     });
+
+    it("stops extrapolating when batches stop", () => {
+      const stream = new PedalStream();
+      vi.spyOn(performance, "now").mockReturnValue(0);
+      stream.ingest([{ t: 1_000_000, brake: 0, throttle: 0 }]);
+      // 15 s without data: "now" stays 250 ms past the newest frame.
+      expect(stream.dataNowUs(15_000)).toBe(1_250_000);
+      // After clear() (device change), the next stream's clock is used as-is.
+      stream.clear();
+      stream.ingest([{ t: 400_000, brake: 0, throttle: 0 }]);
+      expect(stream.dataNowUs(0)).toBe(400_000);
+    });
   });
 });

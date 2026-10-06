@@ -8,6 +8,9 @@ export interface BatchIntervalStats {
   maxMs: number;
 }
 
+/** How far `dataNowUs` may run past the newest frame when batches stop arriving. */
+const MAX_EXTRAPOLATION_MS = 250;
+
 export class PedalStream {
   readonly history: FrameHistory;
   private readonly listeners = new Set<BatchListener>();
@@ -26,11 +29,13 @@ export class PedalStream {
    * "Now" on the sample clock, for drawing. Frame timestamps come from the Rust input
    * thread, not `performance.now()`, so this extrapolates from the newest frame by the UI
    * time since its batch arrived. It never goes backwards, so the graph scrolls smoothly
-   * even though batches arrive with some jitter.
+   * even though batches arrive with some jitter. If batches stop, it stops after
+   * `MAX_EXTRAPOLATION_MS` instead of running ahead of the data.
    */
   dataNowUs(nowMs = performance.now()): number {
     if (!this.hasData) return nowMs * 1000;
-    const estimate = this.lastSampleUs + (nowMs - this.lastArrivalMs) * 1000;
+    const sinceArrivalMs = Math.min(nowMs - this.lastArrivalMs, MAX_EXTRAPOLATION_MS);
+    const estimate = this.lastSampleUs + sinceArrivalMs * 1000;
     this.lastDataNowUs = Math.max(this.lastDataNowUs, estimate);
     return this.lastDataNowUs;
   }

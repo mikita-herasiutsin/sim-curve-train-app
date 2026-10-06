@@ -64,6 +64,8 @@
         <span class="source-status" data-testid="source-status" aria-live="polite">
           {#if status.kind === "live"}
             {status.device.name}
+          {:else if status.kind === "disconnected"}
+            <span class="source-error">{status.device.name} disconnected</span>
           {:else if status.kind === "noProfile"}
             No pedal profile yet. <a href={resolve("/devices")}>Set up your pedals</a>
           {:else if status.kind === "error"}
@@ -118,6 +120,22 @@
 
       <div class="graph-canvas-wrapper">
         <PedalGraph stream={pedalStream} {windowSeconds} />
+        {#if !isDemoSource && status.kind !== "live"}
+          <div class="graph-overlay" data-testid="graph-overlay" role="status">
+            {#if status.kind === "disconnected"}
+              <strong>{status.device.name} disconnected</strong>
+              <span>Plug it back in. The view reconnects by itself.</span>
+            {:else if status.kind === "noProfile"}
+              <strong>No pedals set up</strong>
+              <a href={resolve("/devices")}>Set up your pedals on the Devices page</a>
+            {:else if status.kind === "error"}
+              <strong>Input error</strong>
+              <span>{status.message}</span>
+            {:else}
+              <strong>Connecting…</strong>
+            {/if}
+          </div>
+        {/if}
       </div>
     </section>
   </main>
@@ -302,8 +320,31 @@
   }
 
   .graph-canvas-wrapper {
+    position: relative;
     flex: 1;
     display: flex;
     min-height: 0;
+  }
+
+  .graph-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    background: color-mix(in srgb, var(--bg) 70%, transparent);
+    color: var(--text-muted);
+    text-align: center;
+  }
+
+  .graph-overlay strong {
+    color: var(--text);
+    font-size: 1.25rem;
+  }
+
+  .graph-overlay a {
+    color: var(--accent);
   }
 </style>

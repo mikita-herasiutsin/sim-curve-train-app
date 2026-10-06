@@ -40,7 +40,7 @@ Tauri 2 (Rust core) with a Svelte + TypeScript UI. See [ADR-0001](docs/decisions
 
 ### Prerequisites (Windows)
 
-- [Rust](https://rustup.rs/) stable (MSVC toolchain), 1.85 or newer
+- [Rust](https://rustup.rs/) stable (MSVC toolchain), 1.88 or newer
 - [Node.js](https://nodejs.org/) 24 (see `.nvmrc`; 22.22.2+ also works), with npm
 - Visual Studio Build Tools with the "Desktop development with C++" workload
 - WebView2 runtime (preinstalled on Windows 11)

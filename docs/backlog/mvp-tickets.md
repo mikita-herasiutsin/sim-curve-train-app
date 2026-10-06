@@ -107,7 +107,7 @@ A full-screen flash appears when the brake crosses 50%. `docs/latency-test.md` e
 
 ## M2: First drill
 
-### SCT-030 · Drill/preset schema + loader ⬜ · S
+### SCT-030 · Drill/preset schema + loader ✅ · S
 Define a JSON schema for presets and drills (types: hold, trace, sequence later). A Rust loader with validation reads the bundled presets folder. One sample preset is included.
 - **AC:** an invalid preset gives a clear error; unit tests cover parsing and validation; `docs/preset-format.md` documents the format.
 - **Deps:** SCT-001

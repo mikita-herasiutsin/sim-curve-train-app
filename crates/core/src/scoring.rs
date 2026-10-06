@@ -22,7 +22,7 @@
 //! - **Smoothness (25% weight):** Evaluated over the settled part. Penalizes excursions beyond
 //!   the band ([`OVERSHOOT_PENALTY_FACTOR`]) and high-frequency jitter ([`JITTER_PENALTY_FACTOR`])
 //!   relative to a 50 ms time-weighted moving average. If the band is never entered, smoothness
-//!   defaults to 100 because accuracy and timing already penalize the rep.
+//!   is 0: a rep that never reaches the target earns nothing for holding still.
 //!
 //! All averages use sample-to-sample elapsed time weights (`dt`) to handle irregular sampling.
 
@@ -332,7 +332,7 @@ pub fn score_hold(
 
         (max_overshoot, jitter_val, smooth)
     } else {
-        (0.0, 0.0, 100.0)
+        (0.0, 0.0, 0.0)
     };
 
     // 5. Total and Grade
@@ -490,6 +490,9 @@ mod tests {
         assert_eq!(score.timing, 0.0);
         assert_eq!(score.time_to_band_ms, None);
         assert_eq!(score.grade, Grade::D);
+        // No points at all for a rep that never reaches the target.
+        assert!(score.smoothness.abs() < f32::EPSILON);
+        assert!(score.total.abs() < f32::EPSILON, "{}", score.total);
     }
 
     #[test]

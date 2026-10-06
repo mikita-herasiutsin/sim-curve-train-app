@@ -47,7 +47,7 @@ Pushing a `v*` tag runs `tauri-action`, which creates a draft GitHub Release wit
 
 ## M1: See my pedals
 
-### SCT-010 · List game controllers (SDL3) ⬜ · M
+### SCT-010 · List game controllers (SDL3) ✅ · M
 Devices screen lists every connected controller with its name, GUID, axis count and button count. The list updates on hot-plug.
 - **AC:**
   - **VNM pedals appear in the list.** This is the main risk check.
@@ -56,12 +56,12 @@ Devices screen lists every connected controller with its name, GUID, axis count 
   - Results for each tested device are written to `docs/investigations/`.
 - **Deps:** SCT-001
 
-### SCT-011 · Raw axis monitor ⬜ · S
+### SCT-011 · Raw axis monitor ✅ · S
 Select a device to see every axis as a live bar showing the raw value and the normalised value. This is for working out which axis is which.
 - **AC:** moving any pedal moves exactly one bar.
 - **Deps:** SCT-010
 
-### SCT-012 · 1 kHz input thread + sample stream ⬜ · M
+### SCT-012 · 1 kHz input thread + sample stream ✅ · M
 A dedicated Rust thread polls the selected device at about 1 kHz and timestamps each sample with QPC. Samples go into a ring buffer. A Tauri `Channel` streams them to the UI in batches every ≤8 ms. A debug HUD shows the actual sample rate (Hz) and the batch latency.
 - **AC:**
   - The HUD shows ≥500 Hz with VNM pedals.

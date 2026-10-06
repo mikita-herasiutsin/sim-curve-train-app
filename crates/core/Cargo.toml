@@ -9,9 +9,8 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+rusqlite.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
 
 [lints]

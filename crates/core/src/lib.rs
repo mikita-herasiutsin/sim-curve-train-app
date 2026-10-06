@@ -6,6 +6,7 @@
 pub mod axis_detect;
 pub mod calibration;
 pub mod device;
+pub mod drill_engine;
 pub mod dsp;
 pub mod input;
 pub mod preset;

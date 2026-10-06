@@ -5,6 +5,7 @@
 pub mod axis_detect;
 pub mod calibration;
 pub mod input;
+pub mod profile;
 pub mod ring_buffer;
 
 use serde::Serialize;

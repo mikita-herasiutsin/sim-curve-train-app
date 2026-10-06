@@ -2,6 +2,10 @@
 //!
 //! Everything that can be tested without a window (input processing, drill engine,
 //! scoring, storage) lives here; `src-tauri` only wires it to the UI.
+pub mod axis_detect;
+pub mod calibration;
+pub mod input;
+pub mod ring_buffer;
 
 use serde::Serialize;
 

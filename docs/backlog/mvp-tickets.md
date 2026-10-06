@@ -19,7 +19,7 @@ Status: ⬜ todo · 🟨 in progress · ✅ done
 
 ## M0: Foundation
 
-### SCT-001 · Scaffold Tauri 2 + Svelte app ⬜ · S
+### SCT-001 · Scaffold Tauri 2 + Svelte app ✅ · S
 Create the app skeleton. The window title is "SimCurveTrainApp" and the window shows the app version.
 - **AC:**
   - `npm run tauri dev` opens the window.

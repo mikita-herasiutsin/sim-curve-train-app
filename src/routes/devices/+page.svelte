@@ -1,10 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppHeader from "$lib/components/AppHeader.svelte";
+  import RawAxisMonitor from "$lib/components/RawAxisMonitor.svelte";
   import { formatUsbIds, listDevices, onDevicesChanged, type DevicesSnapshot } from "$lib/devices";
 
   let snapshot = $state<DevicesSnapshot | null>(null);
   let loadError = $state<string | null>(null);
+  let selectedId = $state<number | null>(null);
+  // Unplugging the selected device hides its monitor.
+  const selected = $derived(snapshot?.devices.find((d) => d.id === selectedId) ?? null);
 
   onMount(() => {
     let unlisten: (() => void) | undefined;
@@ -56,21 +60,39 @@
           <th scope="col" class="num">Buttons</th>
           <th scope="col" class="num">Hats</th>
           <th scope="col">GUID</th>
+          <th scope="col"><span class="visually-hidden">Monitor</span></th>
         </tr>
       </thead>
       <tbody>
         {#each snapshot.devices as device (device.id)}
-          <tr>
+          <tr class:selected={selectedId === device.id}>
             <td>{device.name}</td>
             <td class="mono">{formatUsbIds(device)}</td>
             <td class="num">{device.axisCount}</td>
             <td class="num">{device.buttonCount}</td>
             <td class="num">{device.hatCount}</td>
             <td class="mono guid">{device.guid}</td>
+            <td>
+              <button
+                type="button"
+                aria-pressed={selectedId === device.id}
+                onclick={() => (selectedId = selectedId === device.id ? null : device.id)}
+              >
+                {selectedId === device.id ? "Hide axes" : "Show axes"}
+              </button>
+            </td>
           </tr>
         {/each}
       </tbody>
     </table>
+
+    {#if selected}
+      <h3>{selected.name}</h3>
+      <p class="muted">Move one pedal at a time: exactly one bar should move.</p>
+      {#key selected.id}
+        <RawAxisMonitor deviceId={selected.id} />
+      {/key}
+    {/if}
   {/if}
 </main>
 
@@ -133,6 +155,34 @@
   .mono {
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
     font-size: 0.8125rem;
+  }
+
+  tr.selected td {
+    background: var(--surface-raised);
+  }
+
+  button {
+    padding: 0.25rem 0.625rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--surface-raised);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.8125rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  h3 {
+    margin: 2rem 0 0.25rem;
+  }
+
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
 
   .guid {

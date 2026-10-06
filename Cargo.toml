@@ -31,5 +31,7 @@ allow_attributes_without_reason = "warn"
 codegen-units = 1
 lto = true
 opt-level = 3
-panic = "abort"
+# Unwind (not abort) so a panic in the input thread is caught and shown in the UI
+# instead of killing the app silently (SCT-012).
+panic = "unwind"
 strip = true

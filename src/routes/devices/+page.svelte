@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppHeader from "$lib/components/AppHeader.svelte";
-  import RawAxisMonitor from "$lib/components/RawAxisMonitor.svelte";
+  import DevicePanel from "$lib/components/DevicePanel.svelte";
   import { formatUsbIds, listDevices, onDevicesChanged, type DevicesSnapshot } from "$lib/devices";
 
   let snapshot = $state<DevicesSnapshot | null>(null);
@@ -87,10 +87,8 @@
     </table>
 
     {#if selected}
-      <h3>{selected.name}</h3>
-      <p class="muted">Move one pedal at a time: exactly one bar should move.</p>
       {#key selected.id}
-        <RawAxisMonitor deviceId={selected.id} />
+        <DevicePanel device={selected} />
       {/key}
     {/if}
   {/if}
@@ -171,10 +169,6 @@
     font-size: 0.8125rem;
     cursor: pointer;
     white-space: nowrap;
-  }
-
-  h3 {
-    margin: 2rem 0 0.25rem;
   }
 
   .visually-hidden {

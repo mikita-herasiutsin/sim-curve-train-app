@@ -1,5 +1,7 @@
 //! Automatic detection of active pedal axes during configuration wizard sweeps.
 
+use serde::Serialize;
+
 use crate::input::MAX_AXES;
 
 /// Minimum axis travel (`max - min`) required for an axis movement to be considered.
@@ -8,7 +10,8 @@ use crate::input::MAX_AXES;
 pub const MIN_TRAVEL: u32 = 19_661;
 
 /// The outcome of an axis detection sweep.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Detection {
     /// No non-excluded axis reached [`MIN_TRAVEL`].
     NoMovement,
@@ -144,6 +147,23 @@ impl AxisDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn serializes_with_kind_tag() {
+        let axis = Detection::Axis {
+            index: 2,
+            rest: -32768,
+            min: -32768,
+            max: 32767,
+        };
+        assert_eq!(
+            serde_json::to_value(axis).unwrap(),
+            serde_json::json!({ "kind": "axis", "index": 2, "rest": -32768, "min": -32768, "max": 32767 })
+        );
+        assert_eq!(
+            serde_json::to_value(Detection::NoMovement).unwrap(),
+            serde_json::json!({ "kind": "noMovement" })
+        );
+    }
 
     #[test]
     fn no_samples_returns_no_movement() {

@@ -7,6 +7,8 @@ fn main() {
             "list_devices",
             "start_stream",
             "stop_stream",
+            "detect_axis",
+            "capture_range",
         ]),
     ))
     .expect("failed to run tauri-build");

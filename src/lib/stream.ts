@@ -39,3 +39,41 @@ export async function startStream(
 export function normaliseRaw(raw: number): number {
   return Math.min(1, Math.max(0, (raw + 32768) / 65535));
 }
+
+/**
+ * One device's sample stream shared by several consumers (raw monitor, axis wizard, …).
+ * Consumers read `latest` when they need it or subscribe to every batch.
+ */
+export class DeviceStream {
+  latest: RawSample | null = null;
+  stats: StreamStats | null = null;
+  private listeners = new Set<(batch: SampleBatch) => void>();
+  private stopFn: (() => Promise<void>) | undefined;
+  private stopped = false;
+
+  constructor(readonly deviceId: number) {}
+
+  /** Starts the Rust stream. Rejects if the device is gone. */
+  async start(): Promise<void> {
+    const stop = await startStream(this.deviceId, (batch) => {
+      const last = batch.samples.at(-1);
+      if (last) this.latest = last;
+      this.stats = batch.stats;
+      for (const listener of this.listeners) listener(batch);
+    });
+    if (this.stopped) await stop();
+    else this.stopFn = stop;
+  }
+
+  /** Calls `listener` for every batch; returns an unsubscribe function. */
+  subscribe(listener: (batch: SampleBatch) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.listeners.clear();
+    await this.stopFn?.();
+  }
+}

@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sct_core::axis_detect::{AxisDetector, Detection};
+use sct_core::calibration::RangeCapture;
 use sct_core::device::{DeviceInfo, DevicesSnapshot, usb_ids_from_guid};
 use sct_core::input::{MAX_AXES, RawSample};
 use sct_core::ring_buffer::RingBuffer;
@@ -117,6 +119,33 @@ impl InputService {
     /// Stops the active stream, if any.
     pub fn stop_stream(&self) -> Result<(), String> {
         self.send(Command::Stop)
+    }
+
+    /// Runs axis detection over the streamed samples taken at or after `since_us`.
+    ///
+    /// The first of those samples is the baseline, so the pedals must be at rest at `since_us`.
+    pub fn detect_axis(&self, since_us: u64, exclude: &[usize]) -> Detection {
+        let recent = lock(&self.recent);
+        let mut samples = recent.iter().filter(|s| s.t_us >= since_us).peekable();
+        let Some(first) = samples.peek() else {
+            return Detection::NoMovement;
+        };
+        let mut detector = AxisDetector::new(usize::from(first.axis_count));
+        for sample in samples {
+            detector.observe(sample.axes());
+        }
+        detector.result(exclude)
+    }
+
+    /// Returns the `(min, max)` raw range of `axis` over the samples taken at or after `since_us`.
+    pub fn capture_range(&self, axis: usize, since_us: u64) -> Option<(i16, i16)> {
+        let mut capture = RangeCapture::new();
+        for sample in lock(&self.recent).iter().filter(|s| s.t_us >= since_us) {
+            if let Some(&raw) = sample.axes().get(axis) {
+                capture.observe(raw);
+            }
+        }
+        capture.range()
     }
 
     fn send(&self, command: Command) -> Result<(), String> {

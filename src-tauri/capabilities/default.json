@@ -8,6 +8,8 @@
     "allow-list-devices",
     "allow-start-stream",
     "allow-stop-stream",
+    "allow-detect-axis",
+    "allow-capture-range",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

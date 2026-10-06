@@ -1,9 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { resolve } from "$app/paths";
+  import { page } from "$app/state";
   import { formatVersion, getAppInfo, type AppInfo } from "$lib/appInfo";
 
   let info = $state<AppInfo | null>(null);
   let failed = $state(false);
+
+  const current = (path: "/" | "/devices") =>
+    page.url.pathname === resolve(path) ? ("page" as const) : undefined;
 
   onMount(() => {
     getAppInfo()
@@ -20,6 +25,10 @@
     <span class="logo" aria-hidden="true"></span>
     <h1>{info?.name ?? "SimCurveTrainApp"}</h1>
   </div>
+  <nav aria-label="Main">
+    <a href={resolve("/")} aria-current={current("/")}>Home</a>
+    <a href={resolve("/devices")} aria-current={current("/devices")}>Devices</a>
+  </nav>
   {#if info}
     <span class="version" data-testid="app-version">{formatVersion(info.version)}</span>
   {:else if failed}
@@ -36,6 +45,26 @@
     padding: 1rem 1.5rem;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
+  }
+
+  nav {
+    display: flex;
+    gap: 0.25rem;
+    margin-right: auto;
+  }
+
+  nav a {
+    padding: 0.375rem 0.75rem;
+    border-radius: 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.9375rem;
+    text-decoration: none;
+  }
+
+  nav a:hover,
+  nav a[aria-current="page"] {
+    color: var(--text);
+    background: var(--surface-raised);
   }
 
   .brand {

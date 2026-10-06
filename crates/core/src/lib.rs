@@ -9,6 +9,8 @@ pub mod ring_buffer;
 
 use serde::Serialize;
 
+pub mod device;
+
 /// Human-readable product name, shown in the window title and the UI header.
 pub const APP_NAME: &str = "SimCurveTrainApp";
 

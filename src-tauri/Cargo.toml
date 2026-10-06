@@ -24,6 +24,8 @@ tauri-build = { version = "~2.6", features = [] }
 [dependencies]
 sct-core.workspace = true
 tauri = { version = "~2.11", features = [] }
+# Statically linked SDL3 (built from source with CMake), so the exe runs on its own (ADR-0002).
+sdl3 = { version = "0.20", features = ["build-from-source-static"] }
 
 [lints]
 workspace = true

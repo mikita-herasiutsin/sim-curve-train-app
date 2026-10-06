@@ -3,7 +3,7 @@ fn main() {
     // `capabilities/`, instead of every command being callable from the webview.
     tauri_build::try_build(
         tauri_build::Attributes::new()
-            .app_manifest(tauri_build::AppManifest::new().commands(&["app_info"])),
+            .app_manifest(tauri_build::AppManifest::new().commands(&["app_info", "list_devices"])),
     )
     .expect("failed to run tauri-build");
 }

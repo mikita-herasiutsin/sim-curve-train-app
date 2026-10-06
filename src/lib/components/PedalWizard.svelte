@@ -16,7 +16,14 @@
     stream,
     axisCount,
     assignments = $bindable({}),
-  }: { stream: DeviceStream; axisCount: number; assignments?: Assignments } = $props();
+    onchange,
+  }: {
+    stream: DeviceStream;
+    axisCount: number;
+    assignments?: Assignments;
+    /** Called with the final assignments when the wizard finishes or an axis is overridden. */
+    onchange?: (assignments: Assignments) => void;
+  } = $props();
 
   /** How often the wizard asks Rust for a detection while a step is active. */
   const POLL_MS = 200;
@@ -39,6 +46,7 @@
     if (index >= WIZARD_STEPS.length) {
       stepIndex = null;
       message = "Done. Check the assignments below.";
+      onchange?.(assignments);
       return;
     }
     stepIndex = index;
@@ -84,6 +92,7 @@
   function override(pedal: PedalName, value: string) {
     if (value === "") {
       assignments = unassign(assignments, pedal);
+      onchange?.(assignments);
       return;
     }
     // Manual choice: no sweep data yet, so assume the usual 'rest at minimum' range.
@@ -91,6 +100,13 @@
     const axis = Number(value);
     const raw = stream.latest?.axes[axis] ?? -32768;
     assignments = { ...assignments, [pedal]: { axis, rest: raw, min: -32768, max: 32767 } };
+    onchange?.(assignments);
+  }
+
+  function cancel() {
+    stopTimer();
+    stepIndex = null;
+    message = "Cancelled.";
   }
 
   function stopTimer() {
@@ -112,7 +128,7 @@
         <button type="button" onclick={skip}>Skip {step.pedal}</button>
       {/if}
       <button type="button" onclick={() => beginStep(stepIndex ?? 0)}>Restart step</button>
-      <button type="button" onclick={() => beginStep(WIZARD_STEPS.length)}>Cancel</button>
+      <button type="button" onclick={cancel}>Cancel</button>
     </div>
   {:else}
     <div class="actions">

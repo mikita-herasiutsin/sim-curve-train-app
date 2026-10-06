@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-profiled-devices"
+description = "Enables the profiled_devices command without any pre-configured scope."
+commands.allow = ["profiled_devices"]
+
+[[permission]]
+identifier = "deny-profiled-devices"
+description = "Denies the profiled_devices command without any pre-configured scope."
+commands.deny = ["profiled_devices"]

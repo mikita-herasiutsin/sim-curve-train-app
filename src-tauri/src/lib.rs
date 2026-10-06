@@ -3,7 +3,9 @@ mod input;
 use input::InputService;
 use sct_core::AppInfo;
 use sct_core::axis_detect::Detection;
+use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
+use sct_core::profile::{DeviceProfile, ProfileStore};
 use sct_core::stream::SampleBatch;
 use tauri::Manager;
 use tauri::ipc::Channel;
@@ -79,6 +81,84 @@ fn capture_range(
 ) -> Option<(i16, i16)> {
     input.capture_range(axis, since_us)
 }
+
+/// Builds a calibration from a pedal sweep: raw `min`/`max` seen and the released `rest` value.
+#[tauri::command]
+fn calibrate(
+    min: i16,
+    max: i16,
+    rest: i16,
+    deadzone_low: f32,
+    deadzone_high: f32,
+) -> Result<AxisCalibration, String> {
+    let mut capture = RangeCapture::new();
+    capture.observe(min);
+    capture.observe(max);
+    capture
+        .finish(rest, deadzone_low, deadzone_high)
+        .map_err(|e| e.to_string())
+}
+
+/// Returns the saved profile of a connected device, if any.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn load_profile(
+    device_id: u32,
+    input: tauri::State<'_, InputService>,
+) -> Result<Option<DeviceProfile>, String> {
+    input.load_profile(device_id)
+}
+
+/// Saves (and applies) a device's axis assignment and calibration.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn save_profile(
+    device_id: u32,
+    profile: DeviceProfile,
+    input: tauri::State<'_, InputService>,
+) -> Result<(), String> {
+    input.save_profile(device_id, profile)
+}
+
+/// Deletes a device's saved profile. Returns whether one existed.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn reset_profile(device_id: u32, input: tauri::State<'_, InputService>) -> Result<bool, String> {
+    input.reset_profile(device_id)
+}
+
+/// Ids of connected devices with a saved profile; the live view picks the first one.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn profiled_devices(input: tauri::State<'_, InputService>) -> Vec<u32> {
+    input.profiled_devices()
+}
+
+/// Opens the profile database in the app data directory. The app still runs without it.
+fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
+    let path = match app.path().app_data_dir() {
+        Ok(dir) => dir.join("profiles.db"),
+        Err(error) => {
+            eprintln!("no app data directory, profiles won't be saved: {error}");
+            return None;
+        }
+    };
+    ProfileStore::open(&path)
+        .inspect_err(|error| eprintln!("failed to open {}: {error}", path.display()))
+        .ok()
+}
 /// Builds and runs the Tauri application.
 ///
 /// # Panics
@@ -88,7 +168,8 @@ fn capture_range(
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
-            app.manage(InputService::spawn(app.handle().clone()));
+            let store = open_profile_store(app);
+            app.manage(InputService::spawn(app.handle().clone(), store));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -97,7 +178,12 @@ pub fn run() {
             start_stream,
             stop_stream,
             detect_axis,
-            capture_range
+            capture_range,
+            calibrate,
+            load_profile,
+            save_profile,
+            reset_profile,
+            profiled_devices
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

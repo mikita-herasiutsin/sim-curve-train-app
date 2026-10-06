@@ -20,8 +20,9 @@ use sct_core::axis_detect::{AxisDetector, Detection};
 use sct_core::calibration::RangeCapture;
 use sct_core::device::{DeviceInfo, DevicesSnapshot, usb_ids_from_guid};
 use sct_core::input::{MAX_AXES, RawSample};
+use sct_core::profile::{DeviceKey, DeviceProfile, Pedal, ProfileStore};
 use sct_core::ring_buffer::RingBuffer;
-use sct_core::stream::{RateMeter, SampleBatch, StreamStats};
+use sct_core::stream::{PedalFrame, RateMeter, SampleBatch, StreamStats};
 use sdl3::EventPump;
 use sdl3::JoystickSubsystem;
 use sdl3::event::Event;
@@ -58,16 +59,22 @@ pub struct InputService {
     snapshot: Arc<Mutex<DevicesSnapshot>>,
     recent: Arc<Mutex<RingBuffer<RawSample>>>,
     commands: Sender<Command>,
+    /// Saved device profiles; `None` if the database couldn't be opened.
+    store: Arc<Mutex<Option<ProfileStore>>>,
+    /// Profile applied to the streamed device's samples, with that device's id.
+    active_profile: Arc<Mutex<Option<(u32, DeviceProfile)>>>,
 }
 
 impl InputService {
     /// Spawns the input thread. Failures are reported through the snapshot's `error`.
-    pub fn spawn(app: AppHandle) -> Self {
+    pub fn spawn(app: AppHandle, store: Option<ProfileStore>) -> Self {
         let (commands, receiver) = mpsc::channel();
         let service = Self {
             snapshot: Arc::default(),
             recent: Arc::new(Mutex::new(RingBuffer::with_capacity(RECENT_CAPACITY))),
             commands,
+            store: Arc::new(Mutex::new(store)),
+            active_profile: Arc::default(),
         };
         let shared = service.clone();
         let spawned = thread::Builder::new()
@@ -113,7 +120,79 @@ impl InputService {
             return Err(format!("device {device_id} is not connected"));
         }
         lock(&self.recent).clear();
+        let profile = self.load_profile(device_id)?;
+        *lock(&self.active_profile) = profile.map(|p| (device_id, p));
         self.send(Command::Start { device_id, channel })
+    }
+
+    /// Loads the saved profile of a connected device.
+    pub fn load_profile(&self, device_id: u32) -> Result<Option<DeviceProfile>, String> {
+        let key = self.device_key(device_id)?;
+        match lock(&self.store).as_ref() {
+            Some(store) => store.load(&key).map_err(|e| e.to_string()),
+            None => Ok(None),
+        }
+    }
+
+    /// Saves a device's profile and applies it right away if that device is streaming.
+    pub fn save_profile(&self, device_id: u32, profile: DeviceProfile) -> Result<(), String> {
+        for pedal in Pedal::ALL {
+            if let Some(axis) = profile.get(pedal) {
+                axis.calibration
+                    .validate()
+                    .map_err(|e| format!("{pedal:?}: {e}"))?;
+            }
+        }
+        let key = self.device_key(device_id)?;
+        lock(&self.store)
+            .as_ref()
+            .ok_or("profile storage is unavailable")?
+            .save(&key, &profile)
+            .map_err(|e| e.to_string())?;
+        self.activate_if_streaming(device_id, Some(profile));
+        Ok(())
+    }
+
+    /// Deletes a device's saved profile. Returns whether one existed.
+    pub fn reset_profile(&self, device_id: u32) -> Result<bool, String> {
+        let key = self.device_key(device_id)?;
+        let deleted = lock(&self.store)
+            .as_ref()
+            .ok_or("profile storage is unavailable")?
+            .delete(&key)
+            .map_err(|e| e.to_string())?;
+        self.activate_if_streaming(device_id, None);
+        Ok(deleted)
+    }
+
+    /// Ids of connected devices that have a saved profile, in device-list order.
+    pub fn profiled_devices(&self) -> Vec<u32> {
+        let store = lock(&self.store);
+        let Some(store) = store.as_ref() else {
+            return Vec::new();
+        };
+        self.snapshot()
+            .devices
+            .iter()
+            .filter(|d| matches!(store.load(&key_of(d)), Ok(Some(_))))
+            .map(|d| d.id)
+            .collect()
+    }
+
+    fn device_key(&self, device_id: u32) -> Result<DeviceKey, String> {
+        self.snapshot()
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .map(key_of)
+            .ok_or_else(|| format!("device {device_id} is not connected"))
+    }
+
+    fn activate_if_streaming(&self, device_id: u32, profile: Option<DeviceProfile>) {
+        let mut active = lock(&self.active_profile);
+        if active.as_ref().is_none_or(|(id, _)| *id == device_id) {
+            *active = profile.map(|p| (device_id, p));
+        }
     }
 
     /// Stops the active stream, if any.
@@ -339,8 +418,17 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
     )]
     let batch_age_ms = now_us.saturating_sub(oldest.t_us) as f32 / 1000.0;
     lock(&service.recent).extend_from_slice(&stream.pending);
+    let frames = match lock(&service.active_profile).as_ref() {
+        Some((id, profile)) if *id == stream.device_id => stream
+            .pending
+            .iter()
+            .map(|s| PedalFrame::from_sample(profile, s))
+            .collect(),
+        _ => Vec::new(),
+    };
     let batch = SampleBatch {
         samples: std::mem::take(&mut stream.pending),
+        frames,
         stats: StreamStats {
             sample_rate_hz: stream.rate.rate_hz(),
             batch_age_ms,
@@ -394,4 +482,8 @@ fn snapshot_of(open: &HashMap<u32, Joystick>) -> DevicesSnapshot {
         devices,
         error: None,
     }
+}
+
+fn key_of(device: &DeviceInfo) -> DeviceKey {
+    DeviceKey::new(device.guid.clone(), device.axis_count, device.button_count)
 }

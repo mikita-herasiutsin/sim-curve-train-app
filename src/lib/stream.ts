@@ -15,9 +15,19 @@ export interface StreamStats {
   batchAgeMs: number;
 }
 
+/** Mirrors `sct_core::stream::PedalFrame`: calibrated positions, each 0..1. */
+export interface PedalFrame {
+  tUs: number;
+  throttle: number;
+  brake: number;
+  clutch: number;
+}
+
 /** Mirrors `sct_core::stream::SampleBatch`. */
 export interface SampleBatch {
   samples: RawSample[];
+  /** The samples with the device profile applied; empty while the device has none. */
+  frames: PedalFrame[];
   stats: StreamStats;
 }
 
@@ -46,6 +56,8 @@ export function normaliseRaw(raw: number): number {
  */
 export class DeviceStream {
   latest: RawSample | null = null;
+  /** Newest calibrated frame; null until the device has a profile. */
+  latestFrame: PedalFrame | null = null;
   stats: StreamStats | null = null;
   private listeners = new Set<(batch: SampleBatch) => void>();
   private stopFn: (() => Promise<void>) | undefined;
@@ -58,6 +70,7 @@ export class DeviceStream {
     const stop = await startStream(this.deviceId, (batch) => {
       const last = batch.samples.at(-1);
       if (last) this.latest = last;
+      this.latestFrame = batch.frames.at(-1) ?? null;
       this.stats = batch.stats;
       for (const listener of this.listeners) listener(batch);
     });

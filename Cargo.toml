@@ -5,7 +5,7 @@ members = ["crates/core", "src-tauri"]
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "GPL-3.0-only"
 repository = "https://github.com/mikita-herasiutsin/sim-curve-train-app"
 authors = ["Mikita Herasiutsin"]

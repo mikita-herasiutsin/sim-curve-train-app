@@ -28,7 +28,7 @@ Create the app skeleton. The window title is "SimCurveTrainApp" and the window s
   - The README has a "Development" section.
 - **Deps:** none
 
-### SCT-002 · CI checks on push/PR ⬜ · S
+### SCT-002 · CI checks on push/PR ✅ · S
 Add a GitHub Actions workflow on `windows-latest`. It runs fmt check, clippy (`-D warnings`), `cargo test`, `svelte-check`, the frontend unit tests (vitest) and a build.
 - **AC:**
   - A PR with a lint error fails CI; a clean PR passes.

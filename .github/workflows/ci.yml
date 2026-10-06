@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: Lint & test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: npm ci
+
+      # svelte-check, eslint + prettier, vitest, cargo fmt / clippy (pedantic, -D warnings) / test
+      - run: npm run verify
+
+  build:
+    name: Release build
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - run: npm ci
+
+      # A release build is the only place the CSP is applied (`tauri dev` skips it on desktop).
+      - run: npx tauri build --no-bundle
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: SimCurveTrainApp-${{ github.sha }}
+          path: target/release/SimCurveTrainApp.exe
+          retention-days: 14

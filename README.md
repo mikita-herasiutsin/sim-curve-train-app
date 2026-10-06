@@ -1,5 +1,8 @@
 # SimCurveTrainApp
 
+[![CI](https://github.com/mikita-herasiutsin/sim-curve-train-app/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mikita-herasiutsin/sim-curve-train-app/actions/workflows/ci.yml)
+[![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+
 Free, open-source Windows app for sim racers to train brake and throttle **muscle memory**. Pick a car class, follow a target pressure or a telemetry-like pedal trace with your real pedals, and get an instant score.
 
 > Status: **pre-alpha**. The app skeleton is in place (SCT-001); see the [MVP backlog](docs/backlog/mvp-tickets.md) for what comes next.
@@ -61,6 +64,10 @@ See [`docs/`](docs/README.md):
 - [Decisions](docs/decisions/): decision log and ADRs
 - [Open questions](docs/open-questions.md)
 - [MVP backlog](docs/backlog/mvp-tickets.md)
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately ([SECURITY.md](SECURITY.md)).
 
 ## License
 

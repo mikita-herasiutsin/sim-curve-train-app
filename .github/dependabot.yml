@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # The Tauri CLI refuses to build when the npm API and the Rust crate differ in
+      # major.minor, so Tauri packages are bumped together (and kept in sync with cargo).
+      tauri:
+        patterns: ["@tauri-apps/*"]
+      dev-tooling:
+        dependency-type: development
+        exclude-patterns: ["@tauri-apps/*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      tauri:
+        patterns: ["tauri", "tauri-*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

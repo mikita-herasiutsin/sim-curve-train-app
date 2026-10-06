@@ -43,7 +43,11 @@
 
   const step = $derived(stepIndex === null ? null : WIZARD_STEPS[stepIndex]);
 
+  // Assignments from before "Detect pedals", restored on Cancel (the saved profile stays as is).
+  let beforeWizard: Assignments = {};
+
   function start() {
+    beforeWizard = assignments;
     assignments = {};
     beginStep(0);
   }
@@ -123,7 +127,8 @@
     stopTimer();
     stepToken += 1;
     stepIndex = null;
-    message = "Cancelled.";
+    assignments = beforeWizard;
+    message = "Cancelled. Nothing was changed.";
   }
 
   function stopTimer() {

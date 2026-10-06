@@ -1,0 +1,31 @@
+# Rust / Tauri
+/target/
+src-tauri/target/
+src-tauri/gen/
+
+# Node / frontend
+node_modules/
+dist/
+build/
+.svelte-kit/
+*.tsbuildinfo
+
+# Tooling
+.venv/
+__pycache__/
+*.pyc
+
+# Local data / telemetry (never commit raw .ibt or exported laps)
+*.ibt
+tools/**/data/
+*.sqlite
+*.db
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+.env

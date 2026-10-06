@@ -2,7 +2,7 @@
 
 Preset files define collections of sim-racing pedal drills (such as threshold braking, trail-off traces, or throttle modulation) with configurable repetitions, preparation countdowns, and tolerances.
 
-Files use JSON and are located in the application presets directory or imported from custom directories. All keys use `camelCase`. Values are expressed in human-readable units: pedal travel is given in percent (`0` to `100`) and durations in milliseconds (`ms`). Unknown keys are strictly rejected.
+Files use JSON. The app ships its presets in the bundled `presets/` folder (importing your own files is planned, see SCT-081). All keys use `camelCase`. Values are expressed in human-readable units: pedal travel is given in percent (`0` to `100`) and durations in milliseconds (`ms`). Unknown keys are strictly rejected.
 
 ## Top-Level Preset Fields
 
@@ -28,7 +28,7 @@ Every drill shares a set of common fields, plus specific fields determined by th
 | `pedal` | string | Required | `"throttle"`, `"brake"`, `"clutch"` | Target pedal hardware axis to monitor. |
 | `reps` | integer | Optional (default: `5`) | `1` to `50` | Number of repetitions to complete the drill. |
 | `leadInMs` | integer | Optional (default: `3000`) | `0` to `10000` | Lead-in preparation countdown before each repetition in milliseconds. |
-| `tolerance` | number | Required | `0.5` to `50.0` | Allowed deviation margin around the target in percent. |
+| `tolerance` | number | Required | `0.5` to `50.0` | Half-width of the tolerance band in percentage points: `5` means the target ±5%. |
 
 ### Hold Drill Fields (`"type": "hold"`)
 

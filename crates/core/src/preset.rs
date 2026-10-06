@@ -515,8 +515,9 @@ fn validate_drill_unknown_fields(value: &serde_json::Value) -> Result<(), Preset
 /// Returns [`PresetError::Invalid`] if validation fails or unknown drill fields exist.
 pub fn parse_preset(json: &str) -> Result<Preset, PresetError> {
     let value: serde_json::Value = serde_json::from_str(json)?;
-    let preset: Preset = serde_json::from_str(json)?;
+    // Before the typed parse, so a typo reports "unknown field" rather than "missing field".
     validate_drill_unknown_fields(&value)?;
+    let preset: Preset = serde_json::from_value(value)?;
     preset.validate()?;
     Ok(preset)
 }
@@ -587,6 +588,12 @@ pub fn load_dir(dir: &Path) -> Result<Vec<Preset>, PresetError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typo_in_drill_field_reports_unknown_field() {
+        let json = r#"{"schemaVersion":1,"id":"p","name":"P","drills":[{"id":"d","name":"D","type":"hold","pedal":"brake","targt":70,"tolerance":5,"holdMs":2000}]}"#;
+        let err = parse_preset(json).unwrap_err().to_string();
+        assert_eq!(err, "drill 'd': unknown field 'targt'");
+    }
 
     struct TempDirGuard(PathBuf);
 

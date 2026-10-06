@@ -1,0 +1,9 @@
+build/
+.svelte-kit/
+target/
+src-tauri/target/
+src-tauri/gen/
+static/
+docs/
+package-lock.json
+LICENSE

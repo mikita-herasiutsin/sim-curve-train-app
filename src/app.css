@@ -1,0 +1,39 @@
+:root {
+  color-scheme: dark;
+  --bg: #0e1116;
+  --surface: #151a21;
+  --surface-raised: #1c222b;
+  --border: #2a313c;
+  --text: #e8ecf1;
+  --text-muted: #8b95a3;
+  --brake: #ff4d5e;
+  --throttle: #2ee59d;
+  --accent: #5b8cff;
+
+  font-family:
+    "Inter",
+    "Segoe UI Variable",
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+}

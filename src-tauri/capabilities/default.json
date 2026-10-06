@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Capability for the main window",
   "windows": ["main"],
-  "permissions": ["allow-app-info"]
+  "permissions": ["allow-app-info", "allow-list-devices", "core:event:allow-listen", "core:event:allow-unlisten"]
 }

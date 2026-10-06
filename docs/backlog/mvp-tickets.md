@@ -88,17 +88,17 @@ Store axis assignment and calibration in SQLite, keyed by device GUID. On launch
 - **AC:** after an app restart the pedals work without any setup; a "Reset profile" button clears it.
 - **Deps:** SCT-014
 
-### SCT-020 · Live pedal bars ⬜ · S
+### SCT-020 · Live pedal bars ✅ · S
 Main screen shows vertical bars for brake and throttle with large numbers from 0 to 100%, drawn on a canvas.
 - **AC:** visibly no lag; holds 144 fps on a 144 Hz monitor (frame-time HUD).
 - **Deps:** SCT-012, SCT-014
 
-### SCT-021 · Scrolling pedal graph ⬜ · M
+### SCT-021 · Scrolling pedal graph ✅ · M
 A canvas graph shows brake and throttle over the last N seconds, scrolling right to left. A slider sets the window from 3 to 10 s (default 5 s).
 - **AC:** smooth scrolling with no visible stutter; the window setting is persisted.
 - **Deps:** SCT-020
 
-### SCT-022 · Latency check mode ⬜ · S
+### SCT-022 · Latency check mode 🟨 · S
 A full-screen flash appears when the brake crosses 50%. `docs/latency-test.md` explains how to film it with a slow-motion phone camera and work out the latency.
 - **AC:** VNM pedals measured and the result recorded. **Target: <50 ms at 60 Hz, <20 ms at 144 Hz.**
 - **Deps:** SCT-020

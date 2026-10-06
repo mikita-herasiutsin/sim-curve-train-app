@@ -10,7 +10,7 @@
 
 <!-- Copy the ticket's AC from docs/backlog/mvp-tickets.md and tick each one. -->
 
-- [ ]
+- [ ] AC 1
 
 ## Testing
 

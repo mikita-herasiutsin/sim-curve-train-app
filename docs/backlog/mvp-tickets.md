@@ -32,7 +32,7 @@ Create the app skeleton. The window title is "SimCurveTrainApp" and the window s
 Add a GitHub Actions workflow on `windows-latest`. It runs fmt check, clippy (`-D warnings`), `cargo test`, `svelte-check`, the frontend unit tests (vitest) and a build.
 - **AC:**
   - A PR with a lint error fails CI; a clean PR passes.
-  - CI also runs a release build (`tauri build --no-bundle`). On desktop, `tauri dev` never applies the CSP, so CSP problems only show up in release builds.
+  - CI also runs a release build (`tauri build --no-bundle`) and uploads the exe. On desktop, `tauri dev` never applies the CSP, so CSP problems only show up in release builds; CI doesn't launch the app, so smoke-test that exe by hand.
 - **Deps:** SCT-001
 
 ### SCT-003 · Release workflow ⬜ · S

@@ -7,7 +7,8 @@ updates:
     open-pull-requests-limit: 5
     groups:
       # The Tauri CLI refuses to build when the npm API and the Rust crate differ in
-      # major.minor, so Tauri packages are bumped together (and kept in sync with cargo).
+      # major.minor. Groups are per ecosystem, so a Tauri minor bump opens one npm PR and
+      # one cargo PR; each fails the Release build on its own. Combine them into one PR.
       tauri:
         patterns: ["@tauri-apps/*"]
       dev-tooling:
@@ -21,6 +22,7 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     groups:
+      # Pairs with the npm `tauri` group above; see the note there.
       tauri:
         patterns: ["tauri", "tauri-*"]
 

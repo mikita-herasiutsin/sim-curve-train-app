@@ -21,6 +21,9 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# Enforce `#[expect(lint, reason = "...")]` over `#[allow]` (see CONTRIBUTING.md).
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
 
 # See https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

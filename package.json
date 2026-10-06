@@ -6,7 +6,7 @@
   "license": "GPL-3.0-only",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": "^22.22.2 || ^24.15.0 || >=26"
   },
   "scripts": {
     "dev": "vite dev",
@@ -19,8 +19,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "rust:fmt": "cargo fmt --all --check",
-    "rust:lint": "cargo clippy --workspace --all-targets -- -D warnings",
-    "rust:test": "cargo test --workspace",
+    "rust:lint": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "rust:test": "cargo test --workspace --locked",
     "verify": "npm run check && npm run lint && npm run test && npm run rust:fmt && npm run rust:lint && npm run rust:test",
     "tauri": "tauri"
   },

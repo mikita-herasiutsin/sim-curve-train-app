@@ -36,7 +36,7 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement at a private message to the maintainer ([@mikita-herasiutsin](https://github.com/mikita-herasiutsin)) or a [private security advisory report](https://github.com/mikita-herasiutsin/sim-curve-train-app/security/advisories/new). All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the community leaders responsible for enforcement by email to the maintainer, using the address listed on their GitHub profile ([@mikita-herasiutsin](https://github.com/mikita-herasiutsin)). All complaints will be reviewed and investigated promptly and fairly.
 
 All community leaders are obligated to respect the privacy and security of the reporter of any incident.
 

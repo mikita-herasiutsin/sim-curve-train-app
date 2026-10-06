@@ -7,11 +7,21 @@ import { describe, expect, it } from "vitest";
 // package.json must stay in sync so npm tooling and the app agree.
 const read = (path: string) => readFileSync(resolve(import.meta.dirname, "..", path), "utf8");
 
+/** Returns the body of a TOML table, up to the next `[header]` line. */
+function tomlTable(toml: string, header: string): string {
+  const start = toml.indexOf(`\n[${header}]\n`);
+  if (start === -1) return "";
+  const body = toml.slice(start + header.length + 4);
+  const next = body.search(/^\[/m);
+  return next === -1 ? body : body.slice(0, next);
+}
+
+const majorMinor = (version: string | undefined) => version?.split(".").slice(0, 2).join(".");
+
 describe("version sync", () => {
   it("package.json version matches the Cargo workspace version", () => {
-    const cargoVersion = /\[workspace\.package\][^[]*?^version\s*=\s*"([^"]+)"/m.exec(
-      read("Cargo.toml"),
-    )?.[1];
+    const workspace = tomlTable(read("Cargo.toml"), "workspace.package");
+    const cargoVersion = /^version\s*=\s*"([^"]+)"/m.exec(workspace)?.[1];
     const npmVersion = JSON.parse(read("package.json")).version;
 
     expect(cargoVersion).toBeDefined();
@@ -20,5 +30,16 @@ describe("version sync", () => {
 
   it("tauri.conf.json does not override the Cargo version", () => {
     expect(JSON.parse(read("src-tauri/tauri.conf.json"))).not.toHaveProperty("version");
+  });
+
+  // The Tauri CLI refuses to build when these differ, but only the slow release build runs it.
+  it("locked tauri crate and @tauri-apps/api share major.minor", () => {
+    const crateVersion = /^name = "tauri"\nversion = "([^"]+)"/m.exec(read("Cargo.lock"))?.[1];
+    const npmVersion = JSON.parse(read("package-lock.json")).packages[
+      "node_modules/@tauri-apps/api"
+    ]?.version;
+
+    expect(crateVersion).toBeDefined();
+    expect(majorMinor(npmVersion)).toBe(majorMinor(crateVersion));
   });
 });

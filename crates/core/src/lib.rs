@@ -2,14 +2,15 @@
 //!
 //! Everything that can be tested without a window (input processing, drill engine,
 //! scoring, storage) lives here; `src-tauri` only wires it to the UI.
+
 pub mod axis_detect;
 pub mod calibration;
+pub mod device;
 pub mod input;
 pub mod ring_buffer;
+pub mod stream;
 
 use serde::Serialize;
-
-pub mod device;
 
 /// Human-readable product name, shown in the window title and the UI header.
 pub const APP_NAME: &str = "SimCurveTrainApp";

@@ -6,6 +6,8 @@
   "permissions": [
     "allow-app-info",
     "allow-list-devices",
+    "allow-start-stream",
+    "allow-stop-stream",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

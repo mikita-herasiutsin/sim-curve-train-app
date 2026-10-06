@@ -26,3 +26,22 @@ The SDL joystick subsystem runs on its own thread with no SDL window. It needs t
 - **GUIDs are not unique per device.** The two "FANATEC Wheel" interfaces share one GUID but expose different axes and buttons. SCT-015 must not key profiles by GUID alone. Possible keys: GUID plus axis and button count, or GUID plus SDL device path. Pedal sets on this rig have unique GUIDs, so this doesn't block M1.
 - The VNM pedals report **4 axes** for 3 pedals. SCT-011 (raw axis monitor) will show which axis is which, and whether the fourth is unused or a handbrake input.
 - **Hot-plug works.** Unplugging and replugging the VNM pedals updated the Devices screen within about 1 s each way. SDL sends `JOYSTICK_ADDED`/`REMOVED` events, and the input thread waits on events with a 50 ms timeout.
+
+## Follow-up: raw axes and stream (SCT-011, SCT-012)
+
+VNM Pedal V1 axis mapping, from the raw axis monitor (each pedal moves exactly one bar):
+
+| Axis | Pedal | Notes |
+|---|---|---|
+| 0 | none | Probably the handbrake input, which isn't connected on this set. Rests at -32768. |
+| 1 | Throttle | |
+| 2 | Brake | |
+| 3 | Clutch | |
+
+All axes rest at -32768 (0%) and rise when pressed, so none of them needs inverting.
+
+Stream measured on this rig in `tauri dev`, with the raw monitor open:
+
+- **Sample rate:** 1000 Hz. This is the poll rate of the input thread; the pedals' own USB report rate may be lower, so consecutive samples can repeat a value.
+- **Batches:** age 7.1 ms when sent, 8.2 ms apart on average.
+- **CPU:** the app process uses 0.3% of a 16-thread machine. All WebView2 processes together use 1.4%, which is an upper bound because other apps' WebViews are included. Both are well under the 3% target.

@@ -6,12 +6,14 @@
 pub mod axis_detect;
 pub mod calibration;
 pub mod device;
+pub mod dsp;
 pub mod input;
 pub mod preset;
 pub mod profile;
 pub mod ring_buffer;
 pub mod scoring;
 pub mod stream;
+pub mod trace_scoring;
 
 use serde::Serialize;
 

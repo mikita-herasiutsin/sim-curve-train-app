@@ -1,12 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import AppHeader from "$lib/components/AppHeader.svelte";
-  import {
-    formatUsbIds,
-    listDevices,
-    onDevicesChanged,
-    type DevicesSnapshot,
-  } from "$lib/devices";
+  import { formatUsbIds, listDevices, onDevicesChanged, type DevicesSnapshot } from "$lib/devices";
 
   let snapshot = $state<DevicesSnapshot | null>(null);
   let loadError = $state<string | null>(null);

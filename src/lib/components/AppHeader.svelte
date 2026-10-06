@@ -1,15 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { resolve } from "$app/paths";
   import { page } from "$app/state";
   import { formatVersion, getAppInfo, type AppInfo } from "$lib/appInfo";
 
   let info = $state<AppInfo | null>(null);
   let failed = $state(false);
 
-  const links = [
-    { href: "/", label: "Home" },
-    { href: "/devices", label: "Devices" },
-  ];
+  const current = (path: "/" | "/devices") =>
+    page.url.pathname === resolve(path) ? ("page" as const) : undefined;
 
   onMount(() => {
     getAppInfo()
@@ -27,11 +26,8 @@
     <h1>{info?.name ?? "SimCurveTrainApp"}</h1>
   </div>
   <nav aria-label="Main">
-    {#each links as link (link.href)}
-      <a href={link.href} aria-current={page.url.pathname === link.href ? "page" : undefined}>
-        {link.label}
-      </a>
-    {/each}
+    <a href={resolve("/")} aria-current={current("/")}>Home</a>
+    <a href={resolve("/devices")} aria-current={current("/devices")}>Devices</a>
   </nav>
   {#if info}
     <span class="version" data-testid="app-version">{formatVersion(info.version)}</span>

@@ -23,17 +23,8 @@ const fn default_lead_in() -> u32 {
     DEFAULT_LEAD_IN_MS
 }
 
-/// Pedal targeted by a drill.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Pedal {
-    /// Throttle (accelerator) pedal.
-    Throttle,
-    /// Brake pedal.
-    Brake,
-    /// Clutch pedal.
-    Clutch,
-}
+/// Pedal targeted by a drill (the same type as in device profiles).
+pub use crate::profile::Pedal;
 
 /// Specific variant and target profile of a drill.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

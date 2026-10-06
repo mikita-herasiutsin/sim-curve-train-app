@@ -172,6 +172,10 @@ pub struct HoldScore {
 /// inside this interval are included in the scoring. Returns `None` if fewer than 2
 /// samples fall within the window, or if parameters are invalid.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "hold scoring pipeline evaluates all scoring pillars sequentially in one cohesive function"
+)]
 pub fn score_hold(
     samples: &[ValueSample],
     start_us: u64,
@@ -213,57 +217,12 @@ pub fn score_hold(
         dts.push(dt);
     }
 
-    let first_in_band_idx = window_samples
-        .iter()
-        .position(|s| (s.value - params.target).abs() <= params.tolerance);
+    let in_band = |val: f32| -> bool { (val - params.target).abs() <= params.tolerance };
 
-    let (time_to_band_ms, timing_score) =
-        compute_timing(&window_samples, start_us, first_in_band_idx);
+    let first_in_band_idx = window_samples.iter().position(|s| in_band(s.value));
 
-    let (settled_samples, settled_dts, entered_band) = match first_in_band_idx {
-        Some(idx) => (&window_samples[idx..], &dts[idx..], true),
-        None => (&window_samples[..], &dts[..], false),
-    };
-
-    let (in_band_fraction, rmse, accuracy, total_settled_weight) =
-        compute_accuracy(settled_samples, settled_dts, entered_band, params);
-
-    let (overshoot, jitter, smoothness) = compute_smoothness(
-        settled_samples,
-        settled_dts,
-        &window_samples,
-        &dts,
-        first_in_band_idx,
-        total_settled_weight,
-        params,
-    );
-
-    let total = (ACCURACY_TOTAL_WEIGHT * accuracy
-        + TIMING_TOTAL_WEIGHT * timing_score
-        + SMOOTHNESS_TOTAL_WEIGHT * smoothness)
-        .clamp(0.0, 100.0);
-    let grade = Grade::from_total(total);
-
-    Some(HoldScore {
-        total,
-        grade,
-        accuracy,
-        timing: timing_score,
-        smoothness,
-        time_in_band: in_band_fraction,
-        rmse,
-        time_to_band_ms,
-        overshoot,
-        jitter,
-    })
-}
-
-fn compute_timing(
-    window_samples: &[ValueSample],
-    start_us: u64,
-    first_in_band_idx: Option<usize>,
-) -> (Option<f32>, f32) {
-    match first_in_band_idx {
+    // 1. Timing score
+    let (time_to_band_ms, timing_score) = match first_in_band_idx {
         Some(idx) => {
             let t_first = window_samples[idx].t_us;
             let time_to_band_us = t_first.saturating_sub(start_us);
@@ -289,15 +248,15 @@ fn compute_timing(
             (Some(t_ms), score.clamp(0.0, 100.0))
         }
         None => (None, 0.0),
-    }
-}
+    };
 
-fn compute_accuracy(
-    settled_samples: &[ValueSample],
-    settled_dts: &[u64],
-    entered_band: bool,
-    params: &HoldParams,
-) -> (f32, f32, f32, f64) {
+    // 2. Settled slice
+    let (settled_samples, settled_dts, entered_band) = match first_in_band_idx {
+        Some(idx) => (&window_samples[idx..], &dts[idx..], true),
+        None => (&window_samples[..], &dts[..], false),
+    };
+
+    // 3. Accuracy on the settled part
     let mut total_settled_weight = 0.0_f64;
     let mut in_band_weight = 0.0_f64;
     let mut weighted_sq_err = 0.0_f64;
@@ -306,7 +265,7 @@ fn compute_accuracy(
         #[expect(clippy::cast_precision_loss, reason = "dt in microseconds fits in f64")]
         let w = dt as f64;
         total_settled_weight += w;
-        if (sample.value - params.target).abs() <= params.tolerance {
+        if in_band(sample.value) {
             in_band_weight += w;
         }
         let err = f64::from(sample.value) - f64::from(params.target);
@@ -334,27 +293,18 @@ fn compute_accuracy(
     let accuracy = (100.0
         * (ACCURACY_IN_BAND_WEIGHT * in_band_fraction + ACCURACY_RMSE_WEIGHT * rmse_norm))
         .clamp(0.0, 100.0);
+    let time_in_band = in_band_fraction;
 
-    (in_band_fraction, rmse, accuracy, total_settled_weight)
-}
-
-fn compute_smoothness(
-    settled_samples: &[ValueSample],
-    settled_dts: &[u64],
-    window_samples: &[ValueSample],
-    dts: &[u64],
-    first_in_band_idx: Option<usize>,
-    total_settled_weight: f64,
-    params: &HoldParams,
-) -> (f32, f32, f32) {
-    if let Some(idx) = first_in_band_idx {
+    // 4. Smoothness on the settled part
+    let (overshoot, jitter, smoothness) = if entered_band {
         let max_overshoot = settled_samples
             .iter()
             .map(|s| (s.value - params.target).abs() - params.tolerance)
             .fold(0.0_f32, f32::max);
 
-        let moving_avgs = calculate_moving_avg_50ms(window_samples, dts);
-        let settled_moving_avgs = &moving_avgs[idx..];
+        let moving_avgs = calculate_moving_avg_50ms(&window_samples, &dts);
+        let start_idx = first_in_band_idx.unwrap_or(0);
+        let settled_moving_avgs = &moving_avgs[start_idx..];
 
         let mut weighted_jitter_sq = 0.0_f64;
         for (sample, (&dt, &ma)) in settled_samples
@@ -383,7 +333,27 @@ fn compute_smoothness(
         (max_overshoot, jitter_val, smooth)
     } else {
         (0.0, 0.0, 100.0)
-    }
+    };
+
+    // 5. Total and Grade
+    let total = (ACCURACY_TOTAL_WEIGHT * accuracy
+        + TIMING_TOTAL_WEIGHT * timing_score
+        + SMOOTHNESS_TOTAL_WEIGHT * smoothness)
+        .clamp(0.0, 100.0);
+    let grade = Grade::from_total(total);
+
+    Some(HoldScore {
+        total,
+        grade,
+        accuracy,
+        timing: timing_score,
+        smoothness,
+        time_in_band,
+        rmse,
+        time_to_band_ms,
+        overshoot,
+        jitter,
+    })
 }
 
 /// Computes a 50 ms time-weighted moving average baseline using a two-pointer sliding window.

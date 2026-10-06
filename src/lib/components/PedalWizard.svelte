@@ -27,12 +27,19 @@
 
   /** How often the wizard asks Rust for a detection while a step is active. */
   const POLL_MS = 200;
+  /**
+   * With no movement for this long, the detection window restarts. Rust keeps only 10 s of
+   * samples, and the window must still start at a sample taken with the pedal released.
+   */
+  const IDLE_RESTART_US = 5_000_000;
 
   let stepIndex = $state<number | null>(null);
   let message = $state("");
   let timer: ReturnType<typeof setInterval> | undefined;
   let sinceUs = 0;
   let polling = false;
+  // Bumped whenever the step changes, so a poll that was in flight can tell its result is stale.
+  let stepToken = 0;
 
   const step = $derived(stepIndex === null ? null : WIZARD_STEPS[stepIndex]);
 
@@ -43,6 +50,7 @@
 
   function beginStep(index: number) {
     stopTimer();
+    stepToken += 1;
     if (index >= WIZARD_STEPS.length) {
       stepIndex = null;
       message = "Done. Check the assignments below.";
@@ -54,15 +62,23 @@
     // The detector's baseline is the first sample after this point, so the pedals must be at
     // rest now. Samples share Rust's clock, so take the start time from the stream.
     sinceUs = stream.latest?.tUs ?? 0;
-    timer = setInterval(() => void poll(WIZARD_STEPS[index].pedal), POLL_MS);
+    const token = stepToken;
+    timer = setInterval(() => void poll(index, token), POLL_MS);
   }
 
-  async function poll(pedal: PedalName) {
+  async function poll(index: number, token: number) {
     if (polling) return;
     polling = true;
+    const { pedal } = WIZARD_STEPS[index];
     try {
       const result = await detectAxis(sinceUs, assignedAxes(assignments, pedal));
-      if (result.kind === "ambiguous") {
+      // Skipped, restarted or cancelled while Rust was answering.
+      if (token !== stepToken) return;
+      const latestUs = stream.latest?.tUs ?? sinceUs;
+      if (result.kind === "noMovement" && latestUs - sinceUs > IDLE_RESTART_US) {
+        // Nothing moved past the threshold, so the pedal is still (near) released.
+        sinceUs = latestUs;
+      } else if (result.kind === "ambiguous") {
         message = `Several axes moved (${result.candidates.join(", ")}). Press only the ${pedal}.`;
         sinceUs = stream.latest?.tUs ?? sinceUs;
       } else if (result.kind === "axis") {
@@ -70,7 +86,7 @@
         if (raw !== undefined && isBackAtRest(result, raw)) {
           const { index: axis, rest, min, max } = result;
           assignments = { ...assignments, [pedal]: { axis, rest, min, max } };
-          beginStep((stepIndex ?? 0) + 1);
+          beginStep(index + 1);
         } else {
           message = `Axis ${result.index} moving. Now release the ${pedal}.`;
         }
@@ -105,6 +121,7 @@
 
   function cancel() {
     stopTimer();
+    stepToken += 1;
     stepIndex = null;
     message = "Cancelled.";
   }

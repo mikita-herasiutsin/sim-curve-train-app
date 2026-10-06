@@ -30,7 +30,8 @@ fn list_devices(input: tauri::State<'_, InputService>) -> DevicesSnapshot {
     input.snapshot()
 }
 
-/// Streams raw samples of one device to `on_batch` (about every 8 ms) until `stop_stream`.
+/// Streams raw samples of one device to `on_batch` (about every 8 ms) until `stop_stream`
+/// is called with the returned token.
 #[tauri::command]
 #[expect(
     clippy::needless_pass_by_value,
@@ -40,18 +41,18 @@ fn start_stream(
     device_id: u32,
     on_batch: Channel<SampleBatch>,
     input: tauri::State<'_, InputService>,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     input.start_stream(device_id, on_batch)
 }
 
-/// Stops the active sample stream, if any.
+/// Stops the stream started with `token`, unless a newer stream has replaced it.
 #[tauri::command]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri injects command arguments by value"
 )]
-fn stop_stream(input: tauri::State<'_, InputService>) -> Result<(), String> {
-    input.stop_stream()
+fn stop_stream(token: u64, input: tauri::State<'_, InputService>) -> Result<(), String> {
+    input.stop_stream(token)
 }
 
 /// Detects which axis moved during a wizard step that started at `since_us` (sample clock).

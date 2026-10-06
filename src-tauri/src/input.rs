@@ -47,10 +47,22 @@ const RECENT_CAPACITY: usize = 10_000;
 /// Requests from Tauri commands to the input thread.
 enum Command {
     Start {
+        token: u64,
         device_id: u32,
         channel: Channel<SampleBatch>,
     },
-    Stop,
+    /// Stops the stream only if it is still the one started with `token`, so a late stop
+    /// from a previous page can't kill a newer stream.
+    Stop { token: u64 },
+}
+
+/// The stream the UI last asked for, shared with the input thread.
+#[derive(Default)]
+struct ActiveStream {
+    token: u64,
+    device_id: Option<u32>,
+    /// Profile applied to this stream's samples.
+    profile: Option<DeviceProfile>,
 }
 
 /// Shared handle to the input thread's state, managed by Tauri.
@@ -61,8 +73,7 @@ pub struct InputService {
     commands: Sender<Command>,
     /// Saved device profiles; `None` if the database couldn't be opened.
     store: Arc<Mutex<Option<ProfileStore>>>,
-    /// Profile applied to the streamed device's samples, with that device's id.
-    active_profile: Arc<Mutex<Option<(u32, DeviceProfile)>>>,
+    active: Arc<Mutex<ActiveStream>>,
 }
 
 impl InputService {
@@ -74,7 +85,7 @@ impl InputService {
             recent: Arc::new(Mutex::new(RingBuffer::with_capacity(RECENT_CAPACITY))),
             commands,
             store: Arc::new(Mutex::new(store)),
-            active_profile: Arc::default(),
+            active: Arc::default(),
         };
         let shared = service.clone();
         let spawned = thread::Builder::new()
@@ -111,18 +122,29 @@ impl InputService {
     }
 
     /// Starts streaming samples of `device_id` to `channel`, replacing any active stream.
+    /// Returns a token that `stop_stream` needs, so a stale stop can't end a newer stream.
     pub fn start_stream(
         &self,
         device_id: u32,
         channel: Channel<SampleBatch>,
-    ) -> Result<(), String> {
-        if !self.snapshot().devices.iter().any(|d| d.id == device_id) {
-            return Err(format!("device {device_id} is not connected"));
-        }
-        lock(&self.recent).clear();
+    ) -> Result<u64, String> {
         let profile = self.load_profile(device_id)?;
-        *lock(&self.active_profile) = profile.map(|p| (device_id, p));
-        self.send(Command::Start { device_id, channel })
+        let token = {
+            let mut active = lock(&self.active);
+            let token = active.token + 1;
+            *active = ActiveStream {
+                token,
+                device_id: Some(device_id),
+                profile,
+            };
+            token
+        };
+        self.send(Command::Start {
+            token,
+            device_id,
+            channel,
+        })?;
+        Ok(token)
     }
 
     /// Loads the saved profile of a connected device.
@@ -189,15 +211,22 @@ impl InputService {
     }
 
     fn activate_if_streaming(&self, device_id: u32, profile: Option<DeviceProfile>) {
-        let mut active = lock(&self.active_profile);
-        if active.as_ref().is_none_or(|(id, _)| *id == device_id) {
-            *active = profile.map(|p| (device_id, p));
+        let mut active = lock(&self.active);
+        if active.device_id == Some(device_id) {
+            active.profile = profile;
         }
     }
 
-    /// Stops the active stream, if any.
-    pub fn stop_stream(&self) -> Result<(), String> {
-        self.send(Command::Stop)
+    /// Stops the stream started with `token`, if it is still the active one.
+    pub fn stop_stream(&self, token: u64) -> Result<(), String> {
+        {
+            let mut active = lock(&self.active);
+            if active.token == token {
+                active.device_id = None;
+                active.profile = None;
+            }
+        }
+        self.send(Command::Stop { token })
     }
 
     /// Runs axis detection over the streamed samples taken at or after `since_us`.
@@ -264,6 +293,7 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
 
 /// An active stream of one device's samples to the UI.
 struct Stream {
+    token: u64,
     device_id: u32,
     channel: Channel<SampleBatch>,
     pending: Vec<RawSample>,
@@ -272,8 +302,9 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(device_id: u32, channel: Channel<SampleBatch>) -> Self {
+    fn new(token: u64, device_id: u32, channel: Channel<SampleBatch>) -> Self {
         Self {
+            token,
             device_id,
             channel,
             pending: Vec::with_capacity(32),
@@ -315,11 +346,22 @@ fn run(
     loop {
         loop {
             match commands.try_recv() {
-                Ok(Command::Start { device_id, channel }) => {
-                    stream = Some(Stream::new(device_id, channel));
+                Ok(Command::Start {
+                    token,
+                    device_id,
+                    channel,
+                }) => {
+                    // Cleared here, not in `start_stream`, so no sample of the previous
+                    // stream can land after the clear.
+                    lock(&service.recent).clear();
+                    stream = Some(Stream::new(token, device_id, channel));
                     next_tick = Instant::now();
                 }
-                Ok(Command::Stop) => stream = None,
+                Ok(Command::Stop { token }) => {
+                    if stream.as_ref().is_some_and(|s| s.token == token) {
+                        stream = None;
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
                 // The service (and with it the app) is gone.
                 Err(TryRecvError::Disconnected) => return Ok(()),
@@ -418,13 +460,16 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
     )]
     let batch_age_ms = now_us.saturating_sub(oldest.t_us) as f32 / 1000.0;
     lock(&service.recent).extend_from_slice(&stream.pending);
-    let frames = match lock(&service.active_profile).as_ref() {
-        Some((id, profile)) if *id == stream.device_id => stream
-            .pending
-            .iter()
-            .map(|s| PedalFrame::from_sample(profile, s))
-            .collect(),
-        _ => Vec::new(),
+    let frames = {
+        let active = lock(&service.active);
+        match &active.profile {
+            Some(profile) if active.token == stream.token => stream
+                .pending
+                .iter()
+                .map(|s| PedalFrame::from_sample(profile, s))
+                .collect(),
+            _ => Vec::new(),
+        }
     };
     let batch = SampleBatch {
         samples: std::mem::take(&mut stream.pending),

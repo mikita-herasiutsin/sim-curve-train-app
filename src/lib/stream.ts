@@ -41,8 +41,8 @@ export async function startStream(
 ): Promise<() => Promise<void>> {
   const channel = new Channel<SampleBatch>();
   channel.onmessage = onBatch;
-  await invoke("start_stream", { deviceId, onBatch: channel });
-  return () => invoke<void>("stop_stream");
+  const token = await invoke<number>("start_stream", { deviceId, onBatch: channel });
+  return () => invoke<void>("stop_stream", { token });
 }
 
 /** Maps a raw SDL axis value to 0..1. */

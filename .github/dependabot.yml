@@ -1,32 +1,52 @@
+# Routine updates only: at most one grouped minor/patch PR per ecosystem each month.
+# Major upgrades (e.g. SvelteKit 3) need migration work, so they are done as tickets on
+# purpose rather than offered as PRs here.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    open-pull-requests-limit: 2
     groups:
-      # The Tauri CLI refuses to build when the npm API and the Rust crate differ in
-      # major.minor. Groups are per ecosystem, so a Tauri minor bump opens one npm PR and
-      # one cargo PR; each fails the Release build on its own. Combine them into one PR.
-      tauri:
-        patterns: ["@tauri-apps/*"]
-      dev-tooling:
-        dependency-type: development
-        exclude-patterns: ["@tauri-apps/*"]
+      npm-minor-patch:
+        patterns: ["*"]
         update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # The Tauri CLI refuses to build when @tauri-apps/api and the tauri crate differ in
+      # major.minor, and Dependabot can't bump npm and cargo in one PR. Do Tauri minor
+      # bumps by hand in a single PR (see src/version-sync.test.ts); patches still come.
+      - dependency-name: "@tauri-apps/*"
+        update-types: ["version-update:semver-minor"]
+      # Tracks the oldest supported Node line (`engines` in package.json), not the newest.
+      - dependency-name: "@types/node"
+        versions: [">=23"]
 
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+      interval: monthly
+    open-pull-requests-limit: 2
     groups:
-      # Pairs with the npm `tauri` group above; see the note there.
-      tauri:
-        patterns: ["tauri", "tauri-*"]
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+      # Pairs with the @tauri-apps/* rule above.
+      - dependency-name: "tauri"
+        update-types: ["version-update:semver-minor"]
+      - dependency-name: "tauri-*"
+        update-types: ["version-update:semver-minor"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ["*"]

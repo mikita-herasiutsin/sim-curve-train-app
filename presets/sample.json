@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "id": "sample",
+  "name": "Sample",
+  "description": "Sample threshold braking and throttle control drills.",
+  "drills": [
+    {
+      "id": "brake-hold-70",
+      "name": "Brake hold 70%",
+      "type": "hold",
+      "pedal": "brake",
+      "target": 70,
+      "tolerance": 5,
+      "holdMs": 2000,
+      "reps": 5,
+      "leadInMs": 3000
+    },
+    {
+      "id": "throttle-hold-50",
+      "name": "Throttle hold 50%",
+      "type": "hold",
+      "pedal": "throttle",
+      "target": 50,
+      "tolerance": 5,
+      "holdMs": 2000,
+      "reps": 5,
+      "leadInMs": 3000
+    },
+    {
+      "id": "hairpin",
+      "name": "Hairpin trace",
+      "type": "trace",
+      "pedal": "brake",
+      "tolerance": 6,
+      "reps": 5,
+      "leadInMs": 2000,
+      "points": [
+        [0, 0],
+        [150, 100],
+        [300, 95],
+        [600, 70],
+        [1000, 40],
+        [1500, 0]
+      ]
+    }
+  ]
+}

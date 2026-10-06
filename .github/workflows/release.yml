@@ -1,0 +1,95 @@
+name: Release
+
+# Pushing a `v*` tag builds the app and creates a *draft* GitHub Release with the NSIS
+# installer and the portable exe attached. Smoke-test the files, then publish the draft by
+# hand. See docs/releasing.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build & draft release
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write # create the release and upload its assets
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # Only release what passed CI: the tag must point at a commit on the protected main
+      # branch, and it must match the app version (Cargo workspace = package.json, see
+      # src/version-sync.test.ts) so the file names and the in-app version agree.
+      - name: Check tag
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the app version v$version"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag $GITHUB_REF_NAME points at a commit that is not on main"
+            exit 1
+          fi
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # No rust-cache here: release builds start clean so a stale artifact can't ship.
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@v1
+        id: tauri
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: SimCurveTrainApp ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generateReleaseNotes: true
+          releaseBody: |
+            ## Install
+
+            - **Installer:** `SimCurveTrainApp_${{ env.APP_VERSION }}_x64-setup.exe`
+            - **Portable:** `SimCurveTrainApp_windows_x64.exe` (needs WebView2, preinstalled on Windows 11)
+
+            The builds are not code-signed yet, so Windows SmartScreen warns on first run: click **More info**, then **Run anyway**. See the [install notes](https://github.com/${{ github.repository }}#install-windows).
+          # Also attach target/release/SimCurveTrainApp.exe, as SimCurveTrainApp_windows_x64.exe.
+          uploadPlainBinary: true
+          # The action runs `npm run tauri build --`, so this reaches cargo as `--locked`.
+          args: -- --locked
+
+      # tauri-action skips artifacts it can't find instead of failing, so check both arrived.
+      - name: Check release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: |
+          assets="$(gh api "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets" --jq '.[].name')"
+          echo "$assets"
+          for name in "SimCurveTrainApp_${APP_VERSION}_x64-setup.exe" "SimCurveTrainApp_windows_x64.exe"; do
+            if ! grep -qxF "$name" <<< "$assets"; then
+              echo "::error::Release asset $name is missing"
+              exit 1
+            fi
+          done

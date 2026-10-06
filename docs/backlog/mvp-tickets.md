@@ -35,7 +35,7 @@ Add a GitHub Actions workflow on `windows-latest`. It runs fmt check, clippy (`-
   - CI also runs a release build (`tauri build --no-bundle`) and uploads the exe. On desktop, `tauri dev` never applies the CSP, so CSP problems only show up in release builds; CI doesn't launch the app, so smoke-test that exe by hand.
 - **Deps:** SCT-001
 
-### SCT-003 · Release workflow ⬜ · S
+### SCT-003 · Release workflow 🟨 · S
 Pushing a `v*` tag runs `tauri-action`, which creates a draft GitHub Release with the NSIS installer and the portable `.exe` attached.
 - **AC:**
   - Tagging `v0.0.1` produces a release with both files.

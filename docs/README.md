@@ -6,6 +6,7 @@
 | [`decisions/`](decisions/) | Decision log ([index](decisions/README.md)) plus ADRs for decisions that change the architecture or the product. |
 | [`open-questions.md`](open-questions.md) | Unanswered questions. Once one is answered, move it into the decision log. |
 | [`backlog/mvp-tickets.md`](backlog/mvp-tickets.md) | MVP tickets: small, working slices with acceptance criteria. |
+| [`releasing.md`](releasing.md) | How to cut a release: version bump, tag, smoke test, publish. |
 
 ## Conventions
 

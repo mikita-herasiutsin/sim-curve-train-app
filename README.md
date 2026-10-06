@@ -17,6 +17,21 @@ Free, open-source Windows app for sim racers to train brake and throttle **muscl
 - **Offline, no account, no telemetry.** Licensed GPL-3.0.
 - **Easy install:** download the `.exe` from GitHub Releases.
 
+## Install (Windows)
+
+Requires Windows 10 or 11, 64-bit. The app is pre-alpha, so early releases only show the app skeleton.
+
+1. Open the [Releases page](https://github.com/mikita-herasiutsin/sim-curve-train-app/releases) and download one file:
+   - `SimCurveTrainApp_<version>_x64-setup.exe`: the installer. It installs for your user only, adds a Start menu entry, and can be removed from **Settings → Apps**.
+   - `SimCurveTrainApp_windows_x64.exe`: the portable version. No install, run it from any folder. It needs the Microsoft Edge WebView2 runtime, which Windows 11 already has; on Windows 10, use the installer, which fetches WebView2 for you.
+2. If Edge says the file "isn't commonly downloaded", choose **Keep**.
+3. The builds are not code-signed yet ([D-16](docs/decisions/README.md)), so on first run SmartScreen shows "Windows protected your PC". Click **More info**, then **Run anyway**. The warning appears because the file is unsigned and new, not because anything harmful was found.
+4. Optional: compare the file with the SHA-256 digest shown next to it on the release page, or [build from source](#development).
+
+   ```powershell
+   Get-FileHash .\SimCurveTrainApp_<version>_x64-setup.exe -Algorithm SHA256
+   ```
+
 ## Tech stack
 
 Tauri 2 (Rust core) with a Svelte + TypeScript UI. See [ADR-0001](docs/decisions/0001-tech-stack-tauri-rust.md).
@@ -64,6 +79,7 @@ See [`docs/`](docs/README.md):
 - [Decisions](docs/decisions/): decision log and ADRs
 - [Open questions](docs/open-questions.md)
 - [MVP backlog](docs/backlog/mvp-tickets.md)
+- [Releasing](docs/releasing.md)
 
 ## Contributing
 

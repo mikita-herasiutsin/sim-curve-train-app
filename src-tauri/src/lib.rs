@@ -1,9 +1,12 @@
+mod audio;
 mod input;
 mod window;
 
+use audio::AudioFeedback;
 use input::InputService;
 use sct_core::AppInfo;
 use sct_core::attempts::{Attempt, AttemptStore, NewAttempt};
+use sct_core::audio_map::ToneTarget;
 use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
@@ -277,6 +280,45 @@ fn abort_drill_run(token: u64, input: tauri::State<'_, InputService>) -> Result<
     input.abort_drill(token)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri commands require State by value"
+)]
+#[tauri::command]
+fn audio_test_tone(audio: tauri::State<'_, AudioFeedback>) {
+    let a = audio.inner().clone();
+    a.chime();
+    std::thread::spawn(move || {
+        a.update(ToneTarget {
+            frequency_hz: 600.0,
+            gain: 0.3,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        a.update(ToneTarget {
+            frequency_hz: 0.0,
+            gain: 0.0,
+        });
+    });
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri commands require State by value"
+)]
+#[tauri::command]
+fn audio_set_enabled(enabled: bool, audio: tauri::State<'_, AudioFeedback>) {
+    audio.set_enabled(enabled);
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri commands require State by value"
+)]
+#[tauri::command]
+fn audio_set_volume(volume: f32, audio: tauri::State<'_, AudioFeedback>) {
+    audio.set_volume(volume);
+}
+
 /// Opens the profile database in the app data directory. The app still runs without it.
 fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
     let path = match app.path().app_data_dir() {
@@ -320,6 +362,7 @@ pub fn run() {
 
             let attempt_store = open_attempt_store(app);
             app.manage(AttemptsService::new(attempt_store));
+            app.manage(AudioFeedback::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -339,7 +382,10 @@ pub fn run() {
             abort_drill_run,
             save_attempt,
             list_attempts,
-            best_total
+            best_total,
+            audio_test_tone,
+            audio_set_enabled,
+            audio_set_volume
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

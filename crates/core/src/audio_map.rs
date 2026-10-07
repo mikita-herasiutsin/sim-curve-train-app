@@ -1,0 +1,108 @@
+use crate::preset::DrillKind;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToneTarget {
+    pub frequency_hz: f32,
+    pub gain: f32,
+}
+
+const DEFAULT_GAIN: f32 = 0.2;
+const BASE_FREQ_HZ: f32 = 440.0;
+
+/// Maps pedal error to an audio tone target (frequency and gain).
+///
+/// * `error_pct` - Signed error in percent (actual - target). Positive means the pedal is pressed too far.
+/// * `in_band` - True if the pedal is currently within the acceptable tolerance band.
+/// * `drill_kind` - The type of drill currently active.
+#[must_use]
+pub fn map_tone(error_pct: f32, in_band: bool, drill_kind: &DrillKind) -> ToneTarget {
+    if in_band {
+        return ToneTarget {
+            frequency_hz: 0.0,
+            gain: 0.0,
+        };
+    }
+
+    match drill_kind {
+        DrillKind::Hold { .. } => {
+            let clamped_err = error_pct.clamp(-100.0, 100.0);
+
+            // Map -100..100% error to roughly 200..880 Hz
+            // BASE_FREQ_HZ is 440. We add up to 440 for positive, subtract up to 240 for negative.
+            let freq = BASE_FREQ_HZ + (clamped_err * 3.0);
+            let frequency_hz = freq.clamp(150.0, 1000.0);
+
+            ToneTarget {
+                frequency_hz,
+                gain: DEFAULT_GAIN,
+            }
+        }
+        DrillKind::Trace { .. } => {
+            // Trace drills just play a soft constant tone when out of band
+            ToneTarget {
+                frequency_hz: BASE_FREQ_HZ,
+                gain: DEFAULT_GAIN * 0.5,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dummy_hold() -> DrillKind {
+        DrillKind::Hold {
+            target: 50.0,
+            hold_ms: 1000,
+        }
+    }
+
+    fn dummy_trace() -> DrillKind {
+        DrillKind::Trace {
+            points: vec![(0, 0.0), (1000, 100.0)],
+        }
+    }
+
+    #[test]
+    fn silent_in_band() {
+        let t = map_tone(5.0, true, &dummy_hold());
+        assert_eq!(t.gain, 0.0);
+        let t = map_tone(-5.0, true, &dummy_trace());
+        assert_eq!(t.gain, 0.0);
+    }
+
+    #[test]
+    fn trace_out_of_band_constant_soft_tone() {
+        let t1 = map_tone(10.0, false, &dummy_trace());
+        let t2 = map_tone(-10.0, false, &dummy_trace());
+        assert_eq!(t1.frequency_hz, BASE_FREQ_HZ);
+        assert_eq!(t2.frequency_hz, BASE_FREQ_HZ);
+        assert!(t1.gain > 0.0 && t1.gain < DEFAULT_GAIN); // Softer than default
+    }
+
+    #[test]
+    fn hold_monotonic_pitch_vs_error() {
+        let t_low = map_tone(-20.0, false, &dummy_hold());
+        let t_high = map_tone(20.0, false, &dummy_hold());
+
+        assert!(t_low.frequency_hz < BASE_FREQ_HZ);
+        assert!(t_high.frequency_hz > BASE_FREQ_HZ);
+        assert_eq!(t_low.gain, DEFAULT_GAIN);
+        assert_eq!(t_high.gain, DEFAULT_GAIN);
+
+        let t_very_high = map_tone(50.0, false, &dummy_hold());
+        assert!(t_very_high.frequency_hz > t_high.frequency_hz);
+    }
+
+    #[test]
+    fn clamped_ranges() {
+        let t1 = map_tone(150.0, false, &dummy_hold());
+        let t2 = map_tone(100.0, false, &dummy_hold());
+        assert_eq!(t1.frequency_hz, t2.frequency_hz);
+
+        let t3 = map_tone(-150.0, false, &dummy_hold());
+        let t4 = map_tone(-100.0, false, &dummy_hold());
+        assert_eq!(t3.frequency_hz, t4.frequency_hz);
+    }
+}

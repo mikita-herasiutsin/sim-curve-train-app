@@ -26,6 +26,7 @@ sct-core.workspace = true
 tauri = { version = "~2.11", features = [] }
 # Statically linked SDL3 (built from source with CMake), so the exe runs on its own (ADR-0002).
 sdl3 = { version = "0.20", features = ["build-from-source-static"] }
+cpal = "0.18.2"
 
 [lints]
 workspace = true

@@ -133,7 +133,7 @@ A drill runs N reps (from the preset; default 5) with a short pause between reps
 - **AC:** you can abort mid-set; the summary shows the best, average and consistency.
 - **Deps:** SCT-032
 
-### SCT-038 · Audio feedback ⬜ · M
+### SCT-038 · Audio feedback ✅ · M
 Audio comes from the Rust side (`cpal`/`rodio`):
 - **Hold drills:** the pitch follows the signed error, and a "lock" chime plays once the pedal is held in the band.
 - **Trace drills:** a soft tone plays while out of the band (hooked up once SCT-034 is done).

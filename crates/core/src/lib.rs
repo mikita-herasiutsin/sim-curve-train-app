@@ -4,6 +4,7 @@
 //! scoring, storage) lives here; `src-tauri` only wires it to the UI.
 
 pub mod attempts;
+pub mod audio_map;
 pub mod axis_detect;
 pub mod calibration;
 pub mod db;

@@ -138,7 +138,7 @@ Audio comes from the Rust side (`cpal`/`rodio`):
 - **Hold drills:** the pitch follows the signed error, and a "lock" chime plays once the pedal is held in the band.
 - **Trace drills:** a soft tone plays while out of the band (hooked up once SCT-034 is done).
 
-Settings: on/off and volume.
+Settings: on/off and volume. Defaults follow [D-20](../decisions/README.md): on, silent inside the band, quiet volume.
 - **AC:** the tone responds within about 20 ms with no audible glitches; mute is persisted.
 - **Deps:** SCT-031
 
@@ -190,7 +190,7 @@ This is a developer tool only and is not shipped in the app.
 Five or six drills hand-tuned from your own GT3 laps:
 - Two brake holds (e.g. 70% and 90%)
 - Two brake traces (hairpin, medium corner)
-- One or two throttle drills (see Q-01)
+- One or two staged exit-throttle traces ([D-18](../decisions/README.md)), with GT3 thresholds and ramp rate
 - **AC:** every drill can be played and scored.
 - **Deps:** SCT-044, SCT-036
 
@@ -204,7 +204,7 @@ Same structure, using MX-5 traces (low grip, gentle threshold, early throttle).
 
 ### SCT-045 · Pre-race warm-up ⬜ · M
 One button on each preset card runs a 3–5 minute routine: a chain of the preset's drills with fewer reps. It ends with a summary.
-- **AC:** the routine is defined in the preset JSON (see Q-05); you can skip a drill; the summary shows a score per drill and an overall warm-up score.
+- **AC:** the routine is defined in the preset JSON ([D-19](../decisions/README.md)); you can skip a drill; the summary shows a score per drill and an overall warm-up score.
 - **Deps:** SCT-040, at least one preset
 
 ---

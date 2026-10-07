@@ -3,6 +3,7 @@
 use serde::Serialize;
 
 use crate::input::RawSample;
+use crate::profile::{DeviceProfile, Pedal};
 
 /// Live statistics about the input stream, shown in the debug HUD.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
@@ -14,11 +15,44 @@ pub struct StreamStats {
     pub batch_age_ms: f32,
 }
 
+/// Calibrated pedal positions for one sample, each 0..=1 (0 when the pedal isn't assigned).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PedalFrame {
+    pub t_us: u64,
+    pub throttle: f32,
+    pub brake: f32,
+    pub clutch: f32,
+}
+
+impl PedalFrame {
+    /// Applies `profile` (axis assignment and calibration) to a raw sample.
+    #[must_use]
+    pub fn from_sample(profile: &DeviceProfile, sample: &RawSample) -> Self {
+        let value = |pedal: Pedal| {
+            profile.get(pedal).map_or(0.0, |p| {
+                sample
+                    .axes()
+                    .get(usize::from(p.axis))
+                    .map_or(0.0, |&raw| p.calibration.normalise(raw))
+            })
+        };
+        Self {
+            t_us: sample.t_us,
+            throttle: value(Pedal::Throttle),
+            brake: value(Pedal::Brake),
+            clutch: value(Pedal::Clutch),
+        }
+    }
+}
+
 /// One batch of samples sent from the input thread to the UI.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SampleBatch {
     pub samples: Vec<RawSample>,
+    /// The same samples with the active profile applied; empty without a profile.
+    pub frames: Vec<PedalFrame>,
     pub stats: StreamStats,
 }
 
@@ -132,9 +166,39 @@ mod tests {
     }
 
     #[test]
+    fn frame_applies_profile() {
+        use crate::calibration::{AxisCalibration, FULL_RANGE};
+        use crate::profile::PedalAxis;
+
+        let brake = AxisCalibration {
+            min: 0,
+            max: 10_000,
+            ..FULL_RANGE
+        };
+        let profile = DeviceProfile {
+            brake: Some(PedalAxis {
+                axis: 2,
+                calibration: brake,
+            }),
+            throttle: Some(PedalAxis {
+                axis: 7,
+                calibration: FULL_RANGE,
+            }),
+            clutch: None,
+        };
+        let frame = PedalFrame::from_sample(&profile, &RawSample::new(42, &[0, 0, 5_000]));
+        assert_eq!(frame.t_us, 42);
+        assert!((frame.brake - 0.5).abs() < 1e-4, "{}", frame.brake);
+        // Axis 7 doesn't exist on this sample, clutch isn't assigned.
+        assert!(frame.throttle.abs() < f32::EPSILON);
+        assert!(frame.clutch.abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn batch_serializes_camel_case() {
         let batch = SampleBatch {
             samples: vec![RawSample::new(5, &[1, -2])],
+            frames: Vec::new(),
             stats: StreamStats {
                 sample_rate_hz: 1000.0,
                 batch_age_ms: 4.5,

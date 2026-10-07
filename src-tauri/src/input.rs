@@ -16,10 +16,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use sct_core::axis_detect::{AxisDetector, Detection};
+use sct_core::calibration::RangeCapture;
 use sct_core::device::{DeviceInfo, DevicesSnapshot, usb_ids_from_guid};
 use sct_core::input::{MAX_AXES, RawSample};
+use sct_core::profile::{DeviceKey, DeviceProfile, Pedal, ProfileStore};
 use sct_core::ring_buffer::RingBuffer;
-use sct_core::stream::{RateMeter, SampleBatch, StreamStats};
+use sct_core::stream::{PedalFrame, RateMeter, SampleBatch, StreamStats};
 use sdl3::EventPump;
 use sdl3::JoystickSubsystem;
 use sdl3::event::Event;
@@ -44,10 +47,22 @@ const RECENT_CAPACITY: usize = 10_000;
 /// Requests from Tauri commands to the input thread.
 enum Command {
     Start {
+        token: u64,
         device_id: u32,
         channel: Channel<SampleBatch>,
     },
-    Stop,
+    /// Stops the stream only if it is still the one started with `token`, so a late stop
+    /// from a previous page can't kill a newer stream.
+    Stop { token: u64 },
+}
+
+/// The stream the UI last asked for, shared with the input thread.
+#[derive(Default)]
+struct ActiveStream {
+    token: u64,
+    device_id: Option<u32>,
+    /// Profile applied to this stream's samples.
+    profile: Option<DeviceProfile>,
 }
 
 /// Shared handle to the input thread's state, managed by Tauri.
@@ -56,16 +71,21 @@ pub struct InputService {
     snapshot: Arc<Mutex<DevicesSnapshot>>,
     recent: Arc<Mutex<RingBuffer<RawSample>>>,
     commands: Sender<Command>,
+    /// Saved device profiles; `None` if the database couldn't be opened.
+    store: Arc<Mutex<Option<ProfileStore>>>,
+    active: Arc<Mutex<ActiveStream>>,
 }
 
 impl InputService {
     /// Spawns the input thread. Failures are reported through the snapshot's `error`.
-    pub fn spawn(app: AppHandle) -> Self {
+    pub fn spawn(app: AppHandle, store: Option<ProfileStore>) -> Self {
         let (commands, receiver) = mpsc::channel();
         let service = Self {
             snapshot: Arc::default(),
             recent: Arc::new(Mutex::new(RingBuffer::with_capacity(RECENT_CAPACITY))),
             commands,
+            store: Arc::new(Mutex::new(store)),
+            active: Arc::default(),
         };
         let shared = service.clone();
         let spawned = thread::Builder::new()
@@ -102,21 +122,138 @@ impl InputService {
     }
 
     /// Starts streaming samples of `device_id` to `channel`, replacing any active stream.
+    /// Returns a token that `stop_stream` needs, so a stale stop can't end a newer stream.
     pub fn start_stream(
         &self,
         device_id: u32,
         channel: Channel<SampleBatch>,
-    ) -> Result<(), String> {
-        if !self.snapshot().devices.iter().any(|d| d.id == device_id) {
-            return Err(format!("device {device_id} is not connected"));
-        }
-        lock(&self.recent).clear();
-        self.send(Command::Start { device_id, channel })
+    ) -> Result<u64, String> {
+        let profile = self.load_profile(device_id)?;
+        let token = {
+            let mut active = lock(&self.active);
+            let token = active.token + 1;
+            *active = ActiveStream {
+                token,
+                device_id: Some(device_id),
+                profile,
+            };
+            token
+        };
+        self.send(Command::Start {
+            token,
+            device_id,
+            channel,
+        })?;
+        Ok(token)
     }
 
-    /// Stops the active stream, if any.
-    pub fn stop_stream(&self) -> Result<(), String> {
-        self.send(Command::Stop)
+    /// Loads the saved profile of a connected device.
+    pub fn load_profile(&self, device_id: u32) -> Result<Option<DeviceProfile>, String> {
+        let key = self.device_key(device_id)?;
+        match lock(&self.store).as_ref() {
+            Some(store) => store.load(&key).map_err(|e| e.to_string()),
+            None => Ok(None),
+        }
+    }
+
+    /// Saves a device's profile and applies it right away if that device is streaming.
+    pub fn save_profile(&self, device_id: u32, profile: DeviceProfile) -> Result<(), String> {
+        for pedal in Pedal::ALL {
+            if let Some(axis) = profile.get(pedal) {
+                axis.calibration
+                    .validate()
+                    .map_err(|e| format!("{pedal:?}: {e}"))?;
+            }
+        }
+        let key = self.device_key(device_id)?;
+        lock(&self.store)
+            .as_ref()
+            .ok_or("profile storage is unavailable")?
+            .save(&key, &profile)
+            .map_err(|e| e.to_string())?;
+        self.activate_if_streaming(device_id, Some(profile));
+        Ok(())
+    }
+
+    /// Deletes a device's saved profile. Returns whether one existed.
+    pub fn reset_profile(&self, device_id: u32) -> Result<bool, String> {
+        let key = self.device_key(device_id)?;
+        let deleted = lock(&self.store)
+            .as_ref()
+            .ok_or("profile storage is unavailable")?
+            .delete(&key)
+            .map_err(|e| e.to_string())?;
+        self.activate_if_streaming(device_id, None);
+        Ok(deleted)
+    }
+
+    /// Ids of connected devices that have a saved profile, in device-list order.
+    pub fn profiled_devices(&self) -> Vec<u32> {
+        let store = lock(&self.store);
+        let Some(store) = store.as_ref() else {
+            return Vec::new();
+        };
+        self.snapshot()
+            .devices
+            .iter()
+            .filter(|d| matches!(store.load(&key_of(d)), Ok(Some(_))))
+            .map(|d| d.id)
+            .collect()
+    }
+
+    fn device_key(&self, device_id: u32) -> Result<DeviceKey, String> {
+        self.snapshot()
+            .devices
+            .iter()
+            .find(|d| d.id == device_id)
+            .map(key_of)
+            .ok_or_else(|| format!("device {device_id} is not connected"))
+    }
+
+    fn activate_if_streaming(&self, device_id: u32, profile: Option<DeviceProfile>) {
+        let mut active = lock(&self.active);
+        if active.device_id == Some(device_id) {
+            active.profile = profile;
+        }
+    }
+
+    /// Stops the stream started with `token`, if it is still the active one.
+    pub fn stop_stream(&self, token: u64) -> Result<(), String> {
+        {
+            let mut active = lock(&self.active);
+            if active.token == token {
+                active.device_id = None;
+                active.profile = None;
+            }
+        }
+        self.send(Command::Stop { token })
+    }
+
+    /// Runs axis detection over the streamed samples taken at or after `since_us`.
+    ///
+    /// The first of those samples is the baseline, so the pedals must be at rest at `since_us`.
+    pub fn detect_axis(&self, since_us: u64, exclude: &[usize]) -> Detection {
+        let recent = lock(&self.recent);
+        let mut samples = recent.iter().filter(|s| s.t_us >= since_us).peekable();
+        let Some(first) = samples.peek() else {
+            return Detection::NoMovement;
+        };
+        let mut detector = AxisDetector::new(usize::from(first.axis_count));
+        for sample in samples {
+            detector.observe(sample.axes());
+        }
+        detector.result(exclude)
+    }
+
+    /// Returns the `(min, max)` raw range of `axis` over the samples taken at or after `since_us`.
+    pub fn capture_range(&self, axis: usize, since_us: u64) -> Option<(i16, i16)> {
+        let mut capture = RangeCapture::new();
+        for sample in lock(&self.recent).iter().filter(|s| s.t_us >= since_us) {
+            if let Some(&raw) = sample.axes().get(axis) {
+                capture.observe(raw);
+            }
+        }
+        capture.range()
     }
 
     fn send(&self, command: Command) -> Result<(), String> {
@@ -156,6 +293,7 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
 
 /// An active stream of one device's samples to the UI.
 struct Stream {
+    token: u64,
     device_id: u32,
     channel: Channel<SampleBatch>,
     pending: Vec<RawSample>,
@@ -164,8 +302,9 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(device_id: u32, channel: Channel<SampleBatch>) -> Self {
+    fn new(token: u64, device_id: u32, channel: Channel<SampleBatch>) -> Self {
         Self {
+            token,
             device_id,
             channel,
             pending: Vec::with_capacity(32),
@@ -207,11 +346,22 @@ fn run(
     loop {
         loop {
             match commands.try_recv() {
-                Ok(Command::Start { device_id, channel }) => {
-                    stream = Some(Stream::new(device_id, channel));
+                Ok(Command::Start {
+                    token,
+                    device_id,
+                    channel,
+                }) => {
+                    // Cleared here, not in `start_stream`, so no sample of the previous
+                    // stream can land after the clear.
+                    lock(&service.recent).clear();
+                    stream = Some(Stream::new(token, device_id, channel));
                     next_tick = Instant::now();
                 }
-                Ok(Command::Stop) => stream = None,
+                Ok(Command::Stop { token }) => {
+                    if stream.as_ref().is_some_and(|s| s.token == token) {
+                        stream = None;
+                    }
+                }
                 Err(TryRecvError::Empty) => break,
                 // The service (and with it the app) is gone.
                 Err(TryRecvError::Disconnected) => return Ok(()),
@@ -310,8 +460,20 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
     )]
     let batch_age_ms = now_us.saturating_sub(oldest.t_us) as f32 / 1000.0;
     lock(&service.recent).extend_from_slice(&stream.pending);
+    let frames = {
+        let active = lock(&service.active);
+        match &active.profile {
+            Some(profile) if active.token == stream.token => stream
+                .pending
+                .iter()
+                .map(|s| PedalFrame::from_sample(profile, s))
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
     let batch = SampleBatch {
         samples: std::mem::take(&mut stream.pending),
+        frames,
         stats: StreamStats {
             sample_rate_hz: stream.rate.rate_hz(),
             batch_age_ms,
@@ -365,4 +527,8 @@ fn snapshot_of(open: &HashMap<u32, Joystick>) -> DevicesSnapshot {
         devices,
         error: None,
     }
+}
+
+fn key_of(device: &DeviceInfo) -> DeviceKey {
+    DeviceKey::new(device.guid.clone(), device.axis_count, device.button_count)
 }

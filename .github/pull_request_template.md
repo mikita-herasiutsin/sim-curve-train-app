@@ -8,7 +8,7 @@
 
 ## Acceptance criteria
 
-<!-- Copy the ticket's AC from docs/backlog/mvp-tickets.md and tick each one. -->
+<!-- Copy AC from docs/backlog/mvp-tickets.md when implementing a ticket, otherwise state the criteria or write N/A. -->
 
 - [ ] AC 1
 

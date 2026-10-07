@@ -7,6 +7,13 @@ fn main() {
             "list_devices",
             "start_stream",
             "stop_stream",
+            "detect_axis",
+            "capture_range",
+            "calibrate",
+            "load_profile",
+            "save_profile",
+            "reset_profile",
+            "profiled_devices",
         ]),
     ))
     .expect("failed to run tauri-build");

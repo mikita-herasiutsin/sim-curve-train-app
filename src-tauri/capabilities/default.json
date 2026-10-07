@@ -8,6 +8,13 @@
     "allow-list-devices",
     "allow-start-stream",
     "allow-stop-stream",
+    "allow-detect-axis",
+    "allow-capture-range",
+    "allow-calibrate",
+    "allow-load-profile",
+    "allow-save-profile",
+    "allow-reset-profile",
+    "allow-profiled-devices",
     "core:event:allow-listen",
     "core:event:allow-unlisten"
   ]

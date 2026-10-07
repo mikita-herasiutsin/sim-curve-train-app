@@ -1,14 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { normaliseRaw, startStream, type SampleBatch } from "$lib/stream";
+  import { normaliseRaw, type DeviceStream, type SampleBatch } from "$lib/stream";
 
-  let { deviceId }: { deviceId: number } = $props();
+  let { stream, error = null }: { stream: DeviceStream; error?: string | null } = $props();
 
   let axes = $state<number[]>([]);
   let sampleRateHz = $state(0);
   let batchAgeMs = $state(0);
   let batchIntervalMs = $state(0);
-  let error = $state<string | null>(null);
 
   onMount(() => {
     // Batches arrive at ~125 Hz; only the newest one is rendered, once per animation frame.
@@ -17,8 +16,6 @@
     let intervalSum = 0;
     let intervalCount = 0;
     let frame = 0;
-    let stop: (() => Promise<void>) | undefined;
-    let destroyed = false;
 
     const render = () => {
       frame = requestAnimationFrame(render);
@@ -34,7 +31,7 @@
     };
     frame = requestAnimationFrame(render);
 
-    startStream(deviceId, (batch) => {
+    const unsubscribe = stream.subscribe((batch) => {
       const now = performance.now();
       if (lastBatchAt > 0) {
         intervalSum += now - lastBatchAt;
@@ -42,14 +39,11 @@
       }
       lastBatchAt = now;
       latest = batch;
-    })
-      .then((fn) => (destroyed ? void fn() : (stop = fn)))
-      .catch((e: unknown) => (error = String(e)));
+    });
 
     return () => {
-      destroyed = true;
       cancelAnimationFrame(frame);
-      void stop?.();
+      unsubscribe();
     };
   });
 </script>

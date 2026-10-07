@@ -20,6 +20,7 @@ describe("Live page (page.test.ts)", () => {
       scale: vi.fn(),
       arcTo: vi.fn(),
       closePath: vi.fn(),
+      fill: vi.fn(),
       clip: vi.fn(),
       setLineDash: vi.fn(),
     } as unknown as CanvasRenderingContext2D);

@@ -4,6 +4,16 @@ import {
   saveGraphWindow,
   clampGraphWindow,
   DEFAULT_GRAPH_WINDOW_S,
+  loadTheme,
+  saveTheme,
+  getSystemTheme,
+  resolveTheme,
+  applyTheme,
+  toggleTheme,
+  onThemeChange,
+  initTheme,
+  THEME_KEY,
+  DEFAULT_THEME,
 } from "./settings";
 
 describe("settings", () => {
@@ -59,6 +69,139 @@ describe("settings", () => {
 
       getSpy.mockRestore();
       setSpy.mockRestore();
+    });
+  });
+
+  describe("theme settings", () => {
+    it("defaults to system when nothing is in localStorage", () => {
+      expect(loadTheme()).toBe("system");
+    });
+
+    it("saves and loads explicit themes", () => {
+      saveTheme("dark");
+      expect(loadTheme()).toBe("dark");
+      expect(localStorage.getItem(THEME_KEY)).toBe("dark");
+
+      saveTheme("light");
+      expect(loadTheme()).toBe("light");
+      expect(localStorage.getItem(THEME_KEY)).toBe("light");
+    });
+
+    it("removes localStorage item when saved as system", () => {
+      saveTheme("dark");
+      expect(localStorage.getItem(THEME_KEY)).toBe("dark");
+
+      saveTheme("system");
+      expect(loadTheme()).toBe("system");
+      expect(localStorage.getItem(THEME_KEY)).toBeNull();
+    });
+
+    it("handles corrupt localStorage values safely", () => {
+      localStorage.setItem(THEME_KEY, "invalid-theme");
+      expect(loadTheme()).toBe("system");
+    });
+
+    it("handles localStorage exceptions gracefully", () => {
+      const getSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("SecurityError: Access is denied");
+      });
+      const setSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new Error("QuotaExceededError");
+      });
+
+      expect(() => saveTheme("light")).not.toThrow();
+      expect(loadTheme()).toBe(DEFAULT_THEME);
+
+      getSpy.mockRestore();
+      setSpy.mockRestore();
+    });
+
+    it("resolves system theme according to prefers-color-scheme", () => {
+      const original = window.matchMedia;
+      window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes("light"),
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
+
+      expect(getSystemTheme()).toBe("light");
+      expect(resolveTheme("system")).toBe("light");
+      expect(resolveTheme("dark")).toBe("dark");
+
+      window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }));
+
+      expect(getSystemTheme()).toBe("dark");
+      expect(resolveTheme("system")).toBe("dark");
+      expect(resolveTheme("light")).toBe("light");
+
+      window.matchMedia = original;
+    });
+
+    it("applies theme to documentElement attributes and styles", () => {
+      applyTheme("light");
+      expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+      expect(document.documentElement.style.colorScheme).toBe("light");
+
+      applyTheme("dark");
+      expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+      expect(document.documentElement.style.colorScheme).toBe("dark");
+    });
+
+    it("notifies listeners on saveTheme and allows unsubscription", () => {
+      const listener = vi.fn();
+      const unsub = onThemeChange(listener);
+
+      saveTheme("light");
+      expect(listener).toHaveBeenCalledWith("light", "light");
+
+      saveTheme("dark");
+      expect(listener).toHaveBeenCalledWith("dark", "dark");
+
+      unsub();
+      saveTheme("light");
+      expect(listener).toHaveBeenCalledTimes(2);
+    });
+
+    it("toggles theme between dark and light correctly", () => {
+      // Starting from dark, toggles to light
+      saveTheme("dark");
+      applyTheme("dark");
+      const next1 = toggleTheme();
+      expect(next1).toBe("light");
+      expect(loadTheme()).toBe("light");
+      expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+
+      // Starting from light, toggles to dark
+      const next2 = toggleTheme();
+      expect(next2).toBe("dark");
+      expect(loadTheme()).toBe("dark");
+      expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    });
+
+    it("inits theme and cleans up listeners", () => {
+      const original = window.matchMedia;
+      const addListenerSpy = vi.fn();
+      const removeListenerSpy = vi.fn();
+      window.matchMedia = vi.fn().mockReturnValue({
+        matches: false,
+        media: "(prefers-color-scheme: light)",
+        addEventListener: addListenerSpy,
+        removeEventListener: removeListenerSpy,
+      } as unknown as MediaQueryList);
+
+      const cleanup = initTheme();
+      expect(addListenerSpy).toHaveBeenCalledWith("change", expect.any(Function));
+
+      cleanup();
+      expect(removeListenerSpy).toHaveBeenCalledWith("change", expect.any(Function));
+
+      window.matchMedia = original;
     });
   });
 });

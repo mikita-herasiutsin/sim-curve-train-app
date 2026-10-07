@@ -156,7 +156,7 @@ The target curve scrolls right to left towards a fixed "now" line, so you see wh
 - **AC:** both views use the same drill engine and score the same.
 - **Deps:** SCT-034
 
-### SCT-036 · Trace scoring ⬜ · M
+### SCT-036 · Trace scoring ✅ · M
 - **Accuracy:** time in the band and RMSE
 - **Timing:** lag, measured by cross-correlation
 - **Smoothness:** release jerk and peak overshoot

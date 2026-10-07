@@ -211,7 +211,7 @@ One button on each preset card runs a 3–5 minute routine: a chain of the prese
 
 ## M5: Progress & release
 
-### SCT-050 · Persist attempts ⬜ · S
+### SCT-050 · Persist attempts ✅ · S
 Save every finished rep and set to SQLite: drill, preset, time, total score, sub-scores, and the compressed sample blob for replay later.
 - **AC:** data survives a restart; schema migrations are in place (`refinery` or a simple versioned SQL).
 - **Deps:** SCT-033

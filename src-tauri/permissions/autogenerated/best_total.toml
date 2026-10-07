@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-best-total"
+description = "Enables the best_total command without any pre-configured scope."
+commands.allow = ["best_total"]
+
+[[permission]]
+identifier = "deny-best-total"
+description = "Denies the best_total command without any pre-configured scope."
+commands.deny = ["best_total"]

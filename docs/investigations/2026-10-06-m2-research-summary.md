@@ -44,7 +44,7 @@
 
 - **Reader:** pyirsdk (MIT) can read `.ibt` files offline. A NumPy-based reader is much faster if speed matters. Driver inputs (`Brake`, `Throttle`) are 0–1 at the 60 Hz base rate.
 - **Pipeline:** pick the fastest clean lap, then find zones with hysteresis thresholds and a minimum duration. Next, anchor t=0 at zone onset with a few hundred ms of lead-in, resample monotonically (PCHIP), then simplify with RDP on normalised axes. Expect 5–15 points per curve.
-- **Output:** it maps directly onto the trace format in `docs/preset-format.md` (SCT-030): `[ms, percent]` points.
+- **Output:** it maps directly onto the trace format in `docs/preset-format.md` (to be written as part of SCT-030): `[ms, percent]` points.
 
 ## Decisions for the maintainer
 

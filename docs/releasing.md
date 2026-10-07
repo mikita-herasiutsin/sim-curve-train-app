@@ -40,6 +40,6 @@ Never move a tag after its release has been published; release a new patch versi
 
 ## Code signing and SmartScreen
 
-Builds are **not code-signed** for now ([D-16](decisions/README.md)). Windows SmartScreen therefore shows "Windows protected your PC" on first run, and Edge may warn that the download "isn't commonly downloaded". Users click **More info → Run anyway**; the README's [Install section](../README.md#install-windows) explains this. GitHub shows a SHA-256 digest for each release asset, which users can compare with `Get-FileHash`.
+Builds are **not code-signed** for now ([D-16](decisions/README.md)). Windows SmartScreen therefore shows "Windows protected your PC" on first run, and Edge may warn that the download "isn't commonly downloaded". Users click **More info → Run anyway**; the README's [Install section](../README.md#install-windows) explains this. GitHub shows a SHA-256 digest for each release asset, which users can compare with `Get-FileHash`. Installers also carry build provenance attestations; verify with `gh attestation verify <file> --repo <owner>/<repo>`.
 
 Signing (SignPath.io free OSS signing, or Azure Trusted Signing) is tracked as SCT-076 in the post-MVP backlog.

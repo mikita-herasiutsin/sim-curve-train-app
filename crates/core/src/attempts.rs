@@ -264,7 +264,8 @@ impl AttemptStore {
             .best
             .or_else(|| attempt.reps.iter().map(|r| r.total).max_by(f32::total_cmp));
 
-        self.conn.execute_batch("BEGIN IMMEDIATE;")?;
+        // Rolls back on drop, so an error (or a failed commit) never leaves the transaction open.
+        let tx = self.conn.unchecked_transaction()?;
 
         let result = (|| -> Result<i64, AttemptError> {
             self.conn.execute(
@@ -312,16 +313,9 @@ impl AttemptStore {
             Ok(attempt_id)
         })();
 
-        match result {
-            Ok(id) => {
-                self.conn.execute_batch("COMMIT;")?;
-                Ok(id)
-            }
-            Err(err) => {
-                let _ = self.conn.execute_batch("ROLLBACK;");
-                Err(err)
-            }
-        }
+        let id = result?;
+        tx.commit()?;
+        Ok(id)
     }
 
     /// Lists the most recent recorded attempts for a drill, up to `limit`.

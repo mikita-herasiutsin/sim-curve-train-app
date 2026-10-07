@@ -6,6 +6,7 @@ use rusqlite::Connection;
 ///
 /// - Migration 1: Device pedal profile table (`device_profile`, SCT-015).
 /// - Migration 2: Attempt parent and child rep tables (`attempt`, `attempt_rep`, SCT-050).
+///   `attempt.samples` is reserved for the compressed sample blob used by replays (not written yet).
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE device_profile (\
         guid TEXT NOT NULL, \
@@ -24,7 +25,8 @@ pub const MIGRATIONS: &[&str] = &[
         aborted INTEGER NOT NULL, \
         best REAL, \
         average REAL, \
-        consistency REAL\
+        consistency REAL, \
+        samples BLOB\
     ); \
     CREATE INDEX idx_attempt_drill_started ON attempt (drill_id, started_at DESC, id DESC); \
     CREATE TABLE attempt_rep (\

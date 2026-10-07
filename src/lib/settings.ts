@@ -124,8 +124,7 @@ export function toggleTheme(): ResolvedTheme {
   const currentSetting = loadTheme();
   const currentResolved = resolveTheme(currentSetting);
   const nextTheme: ResolvedTheme = currentResolved === "dark" ? "light" : "dark";
-  saveTheme(nextTheme);
-  applyTheme(nextTheme);
+  saveTheme(nextTheme); // also applies it
   return nextTheme;
 }
 

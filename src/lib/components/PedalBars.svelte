@@ -33,8 +33,8 @@
     if (!canvasEl || width <= 0 || height <= 0) return;
     const ctx = canvasEl.getContext("2d");
     if (!ctx) return;
-
-    theme = readThemeColors(containerEl);
+    // Colours are cached: read on mount and refreshed by onThemeChange, not per frame.
+    if (!theme) return;
 
     ctx.save();
     ctx.scale(dpr, dpr);

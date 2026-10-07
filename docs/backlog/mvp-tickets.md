@@ -128,7 +128,7 @@ These combine into a total from 0 to 100 and a grade (S ≥ 95 / A ≥ 85 / B �
 - **AC:** scoring has unit tests on synthetic sample series (a perfect hold scores ≥ 98; a 10% offset scores below C).
 - **Deps:** SCT-031
 
-### SCT-033 · Reps + set summary ⬜ · S
+### SCT-033 · Reps + set summary 🟨 · S
 A drill runs N reps (from the preset; default 5) with a short pause between reps. The set summary shows the score for each rep and adds a **consistency** sub-score (spread of the rep scores).
 - **AC:** you can abort mid-set; the summary shows the best, average and consistency.
 - **Deps:** SCT-032

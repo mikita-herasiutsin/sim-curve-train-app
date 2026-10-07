@@ -12,6 +12,7 @@ pub mod preset;
 pub mod profile;
 pub mod ring_buffer;
 pub mod scoring;
+pub mod set_summary;
 pub mod stream;
 pub mod trace_scoring;
 

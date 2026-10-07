@@ -7,6 +7,7 @@ pub mod axis_detect;
 pub mod calibration;
 pub mod device;
 pub mod input;
+pub mod preset;
 pub mod profile;
 pub mod ring_buffer;
 pub mod stream;

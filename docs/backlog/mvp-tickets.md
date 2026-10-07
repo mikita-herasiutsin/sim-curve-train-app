@@ -98,9 +98,10 @@ A canvas graph shows brake and throttle over the last N seconds, scrolling right
 - **AC:** smooth scrolling with no visible stutter; the window setting is persisted.
 - **Deps:** SCT-020
 
-### SCT-022 · Latency check mode 🟨 · S
+### SCT-022 · Latency check mode ✅ · S
 A full-screen flash appears when the brake crosses 50%. `docs/latency-test.md` explains how to film it with a slow-motion phone camera and work out the latency.
 - **AC:** VNM pedals measured and the result recorded. **Target: <50 ms at 60 Hz, <20 ms at 144 Hz.**
+- **Closed without filming:** the maintainer decided a filmed measurement isn't worth it and will check latency by hand with the flash. The tool and `docs/latency-test.md` shipped in #17.
 - **Deps:** SCT-020
 
 ---

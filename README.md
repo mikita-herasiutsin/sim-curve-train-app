@@ -5,12 +5,12 @@
 
 Free, open-source Windows app for sim racers to train brake and throttle **muscle memory**. Pick a car class, follow a target pressure or a telemetry-like pedal trace with your real pedals, and get an instant score.
 
-> Status: **pre-alpha**. The app skeleton is in place (SCT-001); see the [MVP backlog](docs/backlog/mvp-tickets.md) for what comes next.
+> Status: **pre-alpha**. Milestone M1 is done (controller detection, axis wizard, calibration, saved profile, live bars/graph, latency test); M2 (drills and scoring) is next. See the [MVP backlog](docs/backlog/mvp-tickets.md).
 
 ## Goals
 
 - **Native and low-latency.** Pedals are read at 500–1000 Hz, with under 50 ms from input to display (the target is under 20 ms on a 144 Hz monitor).
-- **Works with any pedal iRacing sees.** Pedals are read through SDL3, with DirectInput as a fallback. Browser-based trainers often fail to detect some pedals.
+- **Works with any pedal iRacing sees.** Pedals are read through SDL3, and a DirectInput fallback is planned. Browser-based trainers often fail to detect some pedals.
 - **Car-class presets** (GT3, NASCAR and Road/MX-5 for the MVP), with hold and trace drills for brake and throttle.
 - **Visual and audio feedback**, a 0–100 score with a grade and sub-scores, and a local personal leaderboard.
 - **Gamified UI** with a dark/light theme.
@@ -19,7 +19,7 @@ Free, open-source Windows app for sim racers to train brake and throttle **muscl
 
 ## Install (Windows)
 
-Requires Windows 10 or 11, 64-bit. The app is pre-alpha, so early releases only show the app skeleton.
+Requires Windows 10 or 11, 64-bit. The app is pre-alpha: it shows your pedals live but has no drills yet.
 
 1. Open the [Releases page](https://github.com/mikita-herasiutsin/sim-curve-train-app/releases) and download one file:
    - `SimCurveTrainApp_<version>_x64-setup.exe`: the installer. It installs for your user only, adds a Start menu entry, and can be removed from **Settings → Apps**.

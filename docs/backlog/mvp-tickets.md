@@ -110,7 +110,7 @@ A full-screen flash appears when the brake crosses 50%. `docs/latency-test.md` e
 
 ### SCT-030 · Drill/preset schema + loader ⬜ · S
 Define a JSON schema for presets and drills (types: hold, trace, sequence later). A Rust loader with validation reads the bundled presets folder. One sample preset is included.
-- **AC:** an invalid preset gives a clear error; unit tests cover parsing and validation; `docs/preset-format.md` documents the format.
+- **AC:** an invalid preset gives a clear error; unit tests cover parsing and validation; `docs/preset-format.md` is written as part of SCT-030 to document the format.
 - **Deps:** SCT-001
 
 ### SCT-031 · Hold drill, single rep ⬜ · M
@@ -261,6 +261,7 @@ User README (install, SmartScreen note, first steps, screenshots), a CHANGELOG, 
 - **SCT-074** Presets from the telemetry pipeline (Garage 61 API, Pro); classes GTP/LMP, Formula and GT4
 - **SCT-075** Auto-update (`tauri-plugin-updater`, opt-in)
 - **SCT-076** Code signing (Q-08)
+- **SCT-077** Security pass before sharing builds with users: a CI dependency audit gate (`cargo deny` or `cargo audit`, plus `npm audit --audit-level=high`), all findings fixed in one batch, and a CSP review. Pairs with SCT-076.
 - **SCT-080** Combo drills with steering and trail braking (brake % against wheel angle)
 - **SCT-081** Import and export presets as files
 - **SCT-082** Career mode

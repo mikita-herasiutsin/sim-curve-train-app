@@ -70,12 +70,12 @@ A dedicated Rust thread polls the selected device at about 1 kHz and timestamps 
   - The ring buffer has unit tests.
 - **Deps:** SCT-010
 
-### SCT-013 · Axis assignment wizard ⬜ · S
+### SCT-013 · Axis assignment wizard ✅ · S
 Prompts: "Press **brake** fully and release", then the same for throttle (clutch can be skipped). The wizard picks the axis that moved the most.
 - **AC:** assigns the correct axes on VNM pedals with no manual selection; manual override is possible.
 - **Deps:** SCT-011
 
-### SCT-014 · Calibration (min/max, invert, deadzone) ⬜ · S
+### SCT-014 · Calibration (min/max, invert, deadzone) ✅ · S
 Sweep each pedal to capture its range. Set invert and a deadzone at the low and high ends. Output is 0–100% (the value the game sees).
 - **AC:**
   - A released pedal reads 0%, a fully pressed pedal reads 100%.
@@ -83,33 +83,34 @@ Sweep each pedal to capture its range. Set invert and a deadzone at the low and 
   - The normalisation function has unit tests.
 - **Deps:** SCT-013
 
-### SCT-015 · Persist device profile ⬜ · S
+### SCT-015 · Persist device profile ✅ · S
 Store axis assignment and calibration in SQLite, keyed by device GUID. On launch or reconnect, restore the profile automatically.
 - **AC:** after an app restart the pedals work without any setup; a "Reset profile" button clears it.
 - **Deps:** SCT-014
 
-### SCT-020 · Live pedal bars ⬜ · S
+### SCT-020 · Live pedal bars ✅ · S
 Main screen shows vertical bars for brake and throttle with large numbers from 0 to 100%, drawn on a canvas.
 - **AC:** visibly no lag; holds 144 fps on a 144 Hz monitor (frame-time HUD).
 - **Deps:** SCT-012, SCT-014
 
-### SCT-021 · Scrolling pedal graph ⬜ · M
+### SCT-021 · Scrolling pedal graph ✅ · M
 A canvas graph shows brake and throttle over the last N seconds, scrolling right to left. A slider sets the window from 3 to 10 s (default 5 s).
 - **AC:** smooth scrolling with no visible stutter; the window setting is persisted.
 - **Deps:** SCT-020
 
-### SCT-022 · Latency check mode ⬜ · S
+### SCT-022 · Latency check mode ✅ · S
 A full-screen flash appears when the brake crosses 50%. `docs/latency-test.md` explains how to film it with a slow-motion phone camera and work out the latency.
 - **AC:** VNM pedals measured and the result recorded. **Target: <50 ms at 60 Hz, <20 ms at 144 Hz.**
+- **Closed without filming:** the maintainer decided a filmed measurement isn't worth it and will check latency by hand with the flash. The tool and `docs/latency-test.md` shipped in #17.
 - **Deps:** SCT-020
 
 ---
 
 ## M2: First drill
 
-### SCT-030 · Drill/preset schema + loader ⬜ · S
+### SCT-030 · Drill/preset schema + loader ✅ · S
 Define a JSON schema for presets and drills (types: hold, trace, sequence later). A Rust loader with validation reads the bundled presets folder. One sample preset is included.
-- **AC:** an invalid preset gives a clear error; unit tests cover parsing and validation; `docs/preset-format.md` documents the format.
+- **AC:** an invalid preset gives a clear error; unit tests cover parsing and validation; `docs/preset-format.md` is written as part of SCT-030 to document the format.
 - **Deps:** SCT-001
 
 ### SCT-031 · Hold drill, single rep ⬜ · M
@@ -155,7 +156,7 @@ The target curve scrolls right to left towards a fixed "now" line, so you see wh
 - **AC:** both views use the same drill engine and score the same.
 - **Deps:** SCT-034
 
-### SCT-036 · Trace scoring ⬜ · M
+### SCT-036 · Trace scoring ✅ · M
 - **Accuracy:** time in the band and RMSE
 - **Timing:** lag, measured by cross-correlation
 - **Smoothness:** release jerk and peak overshoot
@@ -260,6 +261,7 @@ User README (install, SmartScreen note, first steps, screenshots), a CHANGELOG, 
 - **SCT-074** Presets from the telemetry pipeline (Garage 61 API, Pro); classes GTP/LMP, Formula and GT4
 - **SCT-075** Auto-update (`tauri-plugin-updater`, opt-in)
 - **SCT-076** Code signing (Q-08)
+- **SCT-077** Security pass before sharing builds with users: a CI dependency audit gate (`cargo deny` or `cargo audit`, plus `npm audit --audit-level=high`), all findings fixed in one batch, and a CSP review. Pairs with SCT-076.
 - **SCT-080** Combo drills with steering and trail braking (brake % against wheel angle)
 - **SCT-081** Import and export presets as files
 - **SCT-082** Career mode

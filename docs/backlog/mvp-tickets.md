@@ -118,7 +118,7 @@ A countdown runs, then the screen shows the target % (**as a large number**) and
 - **AC:** works for both brake and throttle (from the `pedal` field); rep timing comes from the sample timestamps, not the UI clock.
 - **Deps:** SCT-021, SCT-030
 
-### SCT-032 · Hold scoring + result card ⬜ · M
+### SCT-032 · Hold scoring + result card 🟨 · M
 Score each rep in Rust on the full-rate samples:
 - **Accuracy:** time in the band and RMSE
 - **Timing:** time until the pedal is first inside the band

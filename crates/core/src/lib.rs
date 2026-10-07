@@ -10,6 +10,7 @@ pub mod input;
 pub mod preset;
 pub mod profile;
 pub mod ring_buffer;
+pub mod scoring;
 pub mod stream;
 
 use serde::Serialize;

@@ -113,7 +113,7 @@ Define a JSON schema for presets and drills (types: hold, trace, sequence later)
 - **AC:** an invalid preset gives a clear error; unit tests cover parsing and validation; `docs/preset-format.md` is written as part of SCT-030 to document the format.
 - **Deps:** SCT-001
 
-### SCT-031 · Hold drill, single rep ⬜ · M
+### SCT-031 · Hold drill, single rep 🟨 · M
 A countdown runs, then the screen shows the target % (**as a large number**) and a tolerance band on the bar and the graph. The user holds the pedal inside the band for the set time. The band turns green inside and red outside.
 - **AC:** works for both brake and throttle (from the `pedal` field); rep timing comes from the sample timestamps, not the UI clock.
 - **Deps:** SCT-021, SCT-030

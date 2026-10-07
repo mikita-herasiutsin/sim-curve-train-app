@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "src-tauri"]
+members = ["crates/core", "crates/telemetry-extract", "src-tauri"]
 
 [workspace.package]
 version = "0.0.1"

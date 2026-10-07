@@ -62,11 +62,11 @@ export interface SetSummary {
 }
 
 export type DrillEvent =
-  | { event: "countdownStarted"; rep: number; endsUs: number }
+  | { event: "countdownStarted"; rep: number; startUs: number; endsUs: number }
   | { event: "repStarted"; rep: number; startUs: number }
   | { event: "repScored"; rep: number; score: RepScore }
   | { event: "repFailed"; rep: number }
-  | { event: "setFinished"; summary: SetSummary };
+  | { event: "setFinished"; summary: SetSummary | null };
 
 export async function listPresets(): Promise<Preset[]> {
   return invoke<Preset[]>("list_presets");

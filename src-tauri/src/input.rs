@@ -422,9 +422,8 @@ fn run(
                     if let Some(active) = stream.as_mut() {
                         if active.token == token {
                             if let Some(drill) = active.active_drill.as_mut() {
-                                if let Some(summary) = drill.run.abort() {
-                                    let _ = drill.channel.send(DrillEvent::SetFinished { summary });
-                                }
+                                let summary = drill.run.abort();
+                                let _ = drill.channel.send(DrillEvent::SetFinished { summary });
                             }
                             active.active_drill = None;
                         }

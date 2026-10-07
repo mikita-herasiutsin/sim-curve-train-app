@@ -70,12 +70,12 @@ A dedicated Rust thread polls the selected device at about 1 kHz and timestamps 
   - The ring buffer has unit tests.
 - **Deps:** SCT-010
 
-### SCT-013 · Axis assignment wizard ⬜ · S
+### SCT-013 · Axis assignment wizard ✅ · S
 Prompts: "Press **brake** fully and release", then the same for throttle (clutch can be skipped). The wizard picks the axis that moved the most.
 - **AC:** assigns the correct axes on VNM pedals with no manual selection; manual override is possible.
 - **Deps:** SCT-011
 
-### SCT-014 · Calibration (min/max, invert, deadzone) ⬜ · S
+### SCT-014 · Calibration (min/max, invert, deadzone) ✅ · S
 Sweep each pedal to capture its range. Set invert and a deadzone at the low and high ends. Output is 0–100% (the value the game sees).
 - **AC:**
   - A released pedal reads 0%, a fully pressed pedal reads 100%.
@@ -83,7 +83,7 @@ Sweep each pedal to capture its range. Set invert and a deadzone at the low and 
   - The normalisation function has unit tests.
 - **Deps:** SCT-013
 
-### SCT-015 · Persist device profile ⬜ · S
+### SCT-015 · Persist device profile ✅ · S
 Store axis assignment and calibration in SQLite, keyed by device GUID. On launch or reconnect, restore the profile automatically.
 - **AC:** after an app restart the pedals work without any setup; a "Reset profile" button clears it.
 - **Deps:** SCT-014

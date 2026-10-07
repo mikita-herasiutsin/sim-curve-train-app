@@ -16,6 +16,9 @@
     "allow-reset-profile",
     "allow-profiled-devices",
     "core:event:allow-listen",
-    "core:event:allow-unlisten"
+    "core:event:allow-unlisten",
+    "allow-list-presets",
+    "allow-start-drill-run",
+    "allow-abort-drill-run"
   ]
 }

@@ -38,11 +38,11 @@ export interface SampleBatch {
 export async function startStream(
   deviceId: number,
   onBatch: (batch: SampleBatch) => void,
-): Promise<() => Promise<void>> {
+): Promise<{ token: number; stop: () => Promise<void> }> {
   const channel = new Channel<SampleBatch>();
   channel.onmessage = onBatch;
   const token = await invoke<number>("start_stream", { deviceId, onBatch: channel });
-  return () => invoke<void>("stop_stream", { token });
+  return { token, stop: () => invoke<void>("stop_stream", { token }) };
 }
 
 /** Maps a raw SDL axis value to 0..1. */
@@ -65,15 +65,18 @@ export class DeviceStream {
 
   constructor(readonly deviceId: number) {}
 
+  public streamToken: number | null = null;
+
   /** Starts the Rust stream. Rejects if the device is gone. */
   async start(): Promise<void> {
-    const stop = await startStream(this.deviceId, (batch) => {
+    const { token, stop } = await startStream(this.deviceId, (batch) => {
       const last = batch.samples.at(-1);
       if (last) this.latest = last;
       this.latestFrame = batch.frames.at(-1) ?? null;
       this.stats = batch.stats;
       for (const listener of this.listeners) listener(batch);
     });
+    this.streamToken = token;
     if (this.stopped) await stop();
     else this.stopFn = stop;
   }

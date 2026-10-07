@@ -5,6 +5,8 @@ use sct_core::AppInfo;
 use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
+use sct_core::drill_engine::DrillEvent;
+use sct_core::preset::{Drill, Preset, load_dir};
 use sct_core::profile::{DeviceProfile, ProfileStore};
 use sct_core::stream::SampleBatch;
 use tauri::Manager;
@@ -148,6 +150,46 @@ fn profiled_devices(input: tauri::State<'_, InputService>) -> Vec<u32> {
 }
 
 /// Opens the profile database in the app data directory. The app still runs without it.
+/// Lists all bundled drill presets.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn list_presets(app: tauri::AppHandle) -> Result<Vec<Preset>, String> {
+    let resources = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Failed to get resource dir: {e}"))?;
+    let presets_dir = resources.join("presets");
+    load_dir(&presets_dir).map_err(|e| format!("Failed to load presets: {e}"))
+}
+
+/// Starts a drill run for the selected drill, feeding samples from the active stream.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn start_drill_run(
+    token: u64,
+    drill: Drill,
+    on_event: Channel<DrillEvent>,
+    input: tauri::State<'_, InputService>,
+) -> Result<(), String> {
+    input.start_drill(token, drill, on_event)
+}
+
+/// Aborts the active drill run.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn abort_drill_run(token: u64, input: tauri::State<'_, InputService>) -> Result<(), String> {
+    input.abort_drill(token)
+}
+
 fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
     let path = match app.path().app_data_dir() {
         Ok(dir) => dir.join("profiles.db"),
@@ -184,7 +226,10 @@ pub fn run() {
             load_profile,
             save_profile,
             reset_profile,
-            profiled_devices
+            profiled_devices,
+            list_presets,
+            start_drill_run,
+            abort_drill_run
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

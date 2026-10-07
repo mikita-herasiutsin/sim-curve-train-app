@@ -19,6 +19,10 @@ const fn default_reps() -> u32 {
     DEFAULT_REPS
 }
 
+const fn default_tolerance() -> f32 {
+    10.0
+}
+
 const fn default_lead_in() -> u32 {
     DEFAULT_LEAD_IN_MS
 }
@@ -63,6 +67,7 @@ pub struct Drill {
     #[serde(default = "default_lead_in")]
     pub lead_in_ms: u32,
     /// Permissible error tolerance in percent (`0.5..=50.0`).
+    #[serde(default = "default_tolerance")]
     pub tolerance: f32,
     /// Drill type and parameters (flattened in JSON).
     #[serde(flatten)]

@@ -7,7 +7,7 @@
   let info = $state<AppInfo | null>(null);
   let failed = $state(false);
 
-  const current = (path: "/" | "/devices" | "/live") =>
+  const current = (path: "/" | "/devices" | "/live" | "/drill") =>
     page.url.pathname === resolve(path) ? ("page" as const) : undefined;
 
   onMount(() => {
@@ -29,6 +29,7 @@
     <a href={resolve("/")} aria-current={current("/")}>Home</a>
     <a href={resolve("/devices")} aria-current={current("/devices")}>Devices</a>
     <a href={resolve("/live")} aria-current={current("/live")}>Live</a>
+    <a href={resolve("/drill")} aria-current={current("/drill")}>Drills</a>
   </nav>
   {#if info}
     <span class="version" data-testid="app-version">{formatVersion(info.version)}</span>

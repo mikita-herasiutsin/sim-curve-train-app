@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use crate::preset::{Drill, DrillKind};
+use crate::preset::{Drill, DrillKind, TraceCurve};
 use crate::scoring::{Grade, HoldParams, HoldScore, ValueSample, score_hold};
 use crate::set_summary::{SetSummary, summarize_set};
 use crate::trace_scoring::{TraceParams, TraceScore, score_trace};
@@ -93,6 +93,8 @@ pub enum DrillEvent {
     CountdownStarted {
         /// Zero-based repetition index.
         rep: u32,
+        /// Monotonic timestamp in microseconds when countdown began.
+        start_us: u64,
         /// Monotonic timestamp in microseconds when countdown expires.
         ends_us: u64,
     },
@@ -116,10 +118,11 @@ pub enum DrillEvent {
         /// Zero-based repetition index.
         rep: u32,
     },
-    /// Drill set concluded and at least one repetition was scored.
+    /// Drill set concluded (all repetitions completed).
+    #[serde(rename_all = "camelCase")]
     SetFinished {
-        /// Performance summary across all scored repetitions.
-        summary: SetSummary,
+        /// Performance summary across all scored repetitions, or `None` if zero repetitions were scored.
+        summary: Option<SetSummary>,
     },
 }
 
@@ -127,6 +130,7 @@ pub enum DrillEvent {
 #[derive(Debug, Clone)]
 pub struct DrillRun {
     drill: Drill,
+    curve: Option<TraceCurve>,
     rest_ms: u32,
     phase: Phase,
     countdown_start_us: u64,
@@ -138,10 +142,15 @@ pub struct DrillRun {
 
 impl DrillRun {
     /// Creates a new drill run for the given [`Drill`] with specified rest duration between reps.
+    ///
+    /// For trace drills, `rest_ms` should be at least [`TRACE_LAG_MARGIN_MS`], because the
+    /// lag pre-roll is collected during the rest countdown.
     #[must_use]
     pub fn new(drill: Drill, rest_ms: u32) -> Self {
+        let curve = drill.trace_curve();
         Self {
             drill,
+            curve,
             rest_ms,
             phase: Phase::Idle,
             countdown_start_us: 0,
@@ -173,7 +182,11 @@ impl DrillRun {
         self.countdown_start_us = now_us;
         self.phase = Phase::Countdown { rep: 0, ends_us };
 
-        vec![DrillEvent::CountdownStarted { rep: 0, ends_us }]
+        vec![DrillEvent::CountdownStarted {
+            rep: 0,
+            start_us: now_us,
+            ends_us,
+        }]
     }
 
     /// Advances the state machine with a new timestamped pedal sample.
@@ -281,10 +294,9 @@ impl DrillRun {
                 score_hold(&self.buffer, start_us, &params).map(RepScore::Hold)
             }
             DrillKind::Trace { .. } => {
-                let curve = self.drill.trace_curve();
                 let tolerance = self.drill.tolerance_fraction();
-                curve.and_then(|c| {
-                    let params = TraceParams::new(&c, tolerance);
+                self.curve.as_ref().and_then(|curve| {
+                    let params = TraceParams::new(curve, tolerance);
                     score_trace(&self.buffer, start_us, &params).map(RepScore::Trace)
                 })
             }
@@ -314,6 +326,7 @@ impl DrillRun {
             };
             events.push(DrillEvent::CountdownStarted {
                 rep: next_rep,
+                start_us: boundary_time,
                 ends_us: next_ends_us,
             });
         } else {
@@ -323,26 +336,32 @@ impl DrillRun {
                 .iter()
                 .filter_map(|r| r.as_ref().map(RepScore::total))
                 .collect();
-            if let Some(summary) = summarize_set(&scored_totals) {
-                events.push(DrillEvent::SetFinished { summary });
-            }
+            let summary = summarize_set(&scored_totals);
+            events.push(DrillEvent::SetFinished { summary });
         }
     }
 
     /// Aborts the drill set early, transitioning to [`Phase::Aborted`].
     ///
-    /// Returns a [`SetSummary`] summarizing all repetitions scored before the abort,
+    /// If the phase is [`Phase::Idle`], [`Phase::Finished`], or [`Phase::Aborted`],
+    /// this does nothing and returns `None`. Otherwise transitions to [`Phase::Aborted`]
+    /// and returns a [`SetSummary`] summarizing all repetitions scored before the abort,
     /// or `None` if zero repetitions were completed. Further calls to [`Self::push`]
     /// become no-ops.
     pub fn abort(&mut self) -> Option<SetSummary> {
-        self.phase = Phase::Aborted;
-        self.buffer.clear();
-        let scored_totals: Vec<f32> = self
-            .results
-            .iter()
-            .filter_map(|r| r.as_ref().map(RepScore::total))
-            .collect();
-        summarize_set(&scored_totals)
+        match self.phase {
+            Phase::Idle | Phase::Finished | Phase::Aborted => None,
+            Phase::Countdown { .. } | Phase::Active { .. } | Phase::Scoring { .. } => {
+                self.phase = Phase::Aborted;
+                self.buffer.clear();
+                let scored_totals: Vec<f32> = self
+                    .results
+                    .iter()
+                    .filter_map(|r| r.as_ref().map(RepScore::total))
+                    .collect();
+                summarize_set(&scored_totals)
+            }
+        }
     }
 
     /// Current lifecycle phase of the drill engine.
@@ -371,7 +390,7 @@ impl DrillRun {
             Phase::Active { .. } | Phase::Scoring { .. } => match &self.drill.kind {
                 DrillKind::Hold { .. } => self.drill.target_fraction(),
                 DrillKind::Trace { .. } => {
-                    let curve = self.drill.trace_curve()?;
+                    let curve = self.curve.as_ref()?;
                     let elapsed_us = t_us.saturating_sub(self.current_rep_start_us);
                     #[expect(
                         clippy::cast_precision_loss,
@@ -385,8 +404,8 @@ impl DrillRun {
         }
     }
 
-    /// Normalized progress fraction in `0.0..=1.0` through the current countdown or active phase,
-    /// or `None` during idle, scoring, finished, or aborted states.
+    /// Normalized progress fraction in `0.0..=1.0` through the current countdown or active phase
+    /// (`1.0` during scoring), or `None` during idle, finished, or aborted states.
     #[must_use]
     pub fn progress(&self, t_us: u64) -> Option<f32> {
         match self.phase {
@@ -426,7 +445,8 @@ impl DrillRun {
                 )]
                 Some((frac as f32).clamp(0.0, 1.0))
             }
-            Phase::Idle | Phase::Scoring { .. } | Phase::Finished | Phase::Aborted => None,
+            Phase::Scoring { .. } => Some(1.0),
+            Phase::Idle | Phase::Finished | Phase::Aborted => None,
         }
     }
 }
@@ -490,7 +510,8 @@ mod tests {
             events,
             vec![DrillEvent::CountdownStarted {
                 rep: 0,
-                ends_us: 1_000_000
+                start_us: 0,
+                ends_us: 1_000_000,
             }]
         );
 
@@ -504,14 +525,15 @@ mod tests {
             events[0],
             DrillEvent::CountdownStarted {
                 rep: 0,
-                ends_us: 1_000_000
+                start_us: 0,
+                ends_us: 1_000_000,
             }
         );
         assert_eq!(
             events[1],
             DrillEvent::RepStarted {
                 rep: 0,
-                start_us: 1_000_000
+                start_us: 1_000_000,
             }
         );
 
@@ -527,14 +549,15 @@ mod tests {
             events[3],
             DrillEvent::CountdownStarted {
                 rep: 1,
-                ends_us: 1_800_000
+                start_us: 1_500_000,
+                ends_us: 1_800_000,
             }
         );
         assert_eq!(
             events[4],
             DrillEvent::RepStarted {
                 rep: 1,
-                start_us: 1_800_000
+                start_us: 1_800_000,
             }
         );
 
@@ -548,6 +571,7 @@ mod tests {
 
         match &events[6] {
             DrillEvent::SetFinished { summary } => {
+                let summary = summary.as_ref().expect("summary should be present");
                 assert_eq!(summary.rep_totals.len(), 2);
                 assert!(summary.average >= 98.0);
             }
@@ -567,7 +591,8 @@ mod tests {
             start_events,
             vec![DrillEvent::CountdownStarted {
                 rep: 0,
-                ends_us: 6_000_000
+                start_us: 5_000_000,
+                ends_us: 6_000_000,
             }]
         );
 
@@ -576,7 +601,7 @@ mod tests {
             push_events,
             vec![DrillEvent::RepStarted {
                 rep: 0,
-                start_us: 6_000_000
+                start_us: 6_000_000,
             }]
         );
     }
@@ -591,7 +616,8 @@ mod tests {
             start_events,
             vec![DrillEvent::CountdownStarted {
                 rep: 0,
-                ends_us: 1_000_000
+                start_us: 0,
+                ends_us: 1_000_000,
             }]
         );
 
@@ -602,18 +628,20 @@ mod tests {
             vec![
                 DrillEvent::RepStarted {
                     rep: 0,
-                    start_us: 1_000_000
+                    start_us: 1_000_000,
                 },
                 DrillEvent::RepFailed { rep: 0 },
                 DrillEvent::CountdownStarted {
                     rep: 1,
-                    ends_us: 1_800_000
+                    start_us: 1_500_000,
+                    ends_us: 1_800_000,
                 },
                 DrillEvent::RepStarted {
                     rep: 1,
-                    start_us: 1_800_000
+                    start_us: 1_800_000,
                 },
                 DrillEvent::RepFailed { rep: 1 },
+                DrillEvent::SetFinished { summary: None },
             ]
         );
 
@@ -663,6 +691,7 @@ mod tests {
 
         // Between ends_us (1_600_000) and ends_us + 300_000 (1_900_000), phase is Scoring
         assert_eq!(run.phase(), Phase::Scoring { rep: 0 });
+        assert_eq!(run.progress(1_700_000), Some(1.0));
 
         feed_1khz(&mut run, 1_601_000, 1_899_000, |_t| 0.0);
         assert_eq!(run.phase(), Phase::Scoring { rep: 0 });
@@ -678,7 +707,10 @@ mod tests {
             }
             other => panic!("expected RepScored, got {other:?}"),
         }
-        assert!(matches!(final_events[1], DrillEvent::SetFinished { .. }));
+        assert!(matches!(
+            final_events[1],
+            DrillEvent::SetFinished { summary: Some(_) }
+        ));
     }
 
     #[test]
@@ -862,11 +894,13 @@ mod tests {
 
         let event1 = DrillEvent::CountdownStarted {
             rep: 0,
+            start_us: 1_000,
             ends_us: 5_000,
         };
         let json_event1 = serde_json::to_value(&event1).unwrap();
         assert_eq!(json_event1["event"], "countdownStarted");
         assert_eq!(json_event1["rep"], 0);
+        assert_eq!(json_event1["startUs"], 1_000);
         assert_eq!(json_event1["endsUs"], 5_000);
 
         let event2 = DrillEvent::RepStarted {
@@ -890,7 +924,7 @@ mod tests {
         assert_eq!(json_event4["event"], "repFailed");
         assert_eq!(json_event4["rep"], 2);
 
-        let summary = summarize_set(&[90.0, 95.0]).unwrap();
+        let summary = summarize_set(&[90.0, 95.0]);
         let event5 = DrillEvent::SetFinished { summary };
         let json_event5 = serde_json::to_value(&event5).unwrap();
         assert_eq!(json_event5["event"], "setFinished");
@@ -936,5 +970,127 @@ mod tests {
         feed_1khz(&mut run, 0, 2_000_000, |_t| 0.80);
         assert_eq!(run.phase(), Phase::Finished);
         assert!(run.results()[0].as_ref().unwrap().total() >= 98.0);
+    }
+
+    #[test]
+    fn test_all_reps_fail_emits_set_finished_none() {
+        let drill = make_hold_drill(2, 1000, 500, 70.0);
+        let mut run = DrillRun::new(drill, 300);
+
+        let mut events = run.start(0);
+        let jump_events = run.push(ValueSample::new(50_000_000, 0.70));
+        events.extend(jump_events);
+
+        assert_eq!(run.phase(), Phase::Finished);
+        assert_eq!(
+            events.last(),
+            Some(&DrillEvent::SetFinished { summary: None })
+        );
+    }
+
+    #[test]
+    fn test_abort_while_idle() {
+        let drill = make_hold_drill(1, 1000, 500, 70.0);
+        let mut run = DrillRun::new(drill, 300);
+        assert_eq!(run.phase(), Phase::Idle);
+        assert_eq!(run.abort(), None);
+        assert_eq!(run.phase(), Phase::Idle);
+    }
+
+    #[test]
+    fn test_abort_after_finished() {
+        let drill = make_hold_drill(1, 1000, 500, 70.0);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        feed_1khz(&mut run, 0, 1_500_000, |_t| 0.70);
+        assert_eq!(run.phase(), Phase::Finished);
+        assert_eq!(run.abort(), None);
+        assert_eq!(run.phase(), Phase::Finished);
+    }
+
+    #[test]
+    fn test_multi_rep_trace_perfect() {
+        let points = vec![(0, 0.0), (150, 90.0), (600, 0.0)];
+        let drill = make_trace_drill(2, 1000, points);
+        let curve = drill.trace_curve().unwrap();
+        let mut run = DrillRun::new(drill, 300);
+
+        let mut events = run.start(0);
+
+        // Rep 0: countdown [0..1_000_000), active [1_000_000..1_600_000), scoring [1_600_000..1_900_000]
+        // Rep 1: countdown [1_900_000..2_200_000), active [2_200_000..2_800_000), scoring [2_800_000..3_100_000]
+        let pushed_events = feed_1khz(&mut run, 0, 3_100_000, |t| {
+            if (1_000_000..=1_600_000).contains(&t) {
+                #[expect(clippy::cast_precision_loss, reason = "dt fits within f64")]
+                let ms = ((t - 1_000_000) as f64) / 1000.0;
+                curve.value_at(ms)
+            } else if (2_200_000..=2_800_000).contains(&t) {
+                #[expect(clippy::cast_precision_loss, reason = "dt fits within f64")]
+                let ms = ((t - 2_200_000) as f64) / 1000.0;
+                curve.value_at(ms)
+            } else {
+                0.0
+            }
+        });
+        events.extend(pushed_events);
+
+        assert_eq!(run.phase(), Phase::Finished);
+        assert_eq!(events.len(), 7);
+
+        // Assert event order:
+        // CountdownStarted(0) -> RepStarted(0) -> RepScored(0) ->
+        // CountdownStarted(1) -> RepStarted(1) -> RepScored(1) -> SetFinished(Some)
+        assert_eq!(
+            events[0],
+            DrillEvent::CountdownStarted {
+                rep: 0,
+                start_us: 0,
+                ends_us: 1_000_000,
+            }
+        );
+        assert_eq!(
+            events[1],
+            DrillEvent::RepStarted {
+                rep: 0,
+                start_us: 1_000_000,
+            }
+        );
+        let score0 = match &events[2] {
+            DrillEvent::RepScored { rep: 0, score } => score.clone(),
+            other => panic!("expected RepScored(0), got {other:?}"),
+        };
+        assert_eq!(
+            events[3],
+            DrillEvent::CountdownStarted {
+                rep: 1,
+                start_us: 1_900_000,
+                ends_us: 2_200_000,
+            }
+        );
+        assert_eq!(
+            events[4],
+            DrillEvent::RepStarted {
+                rep: 1,
+                start_us: 2_200_000,
+            }
+        );
+        let score1 = match &events[5] {
+            DrillEvent::RepScored { rep: 1, score } => score.clone(),
+            other => panic!("expected RepScored(1), got {other:?}"),
+        };
+        assert!(matches!(
+            events[6],
+            DrillEvent::SetFinished { summary: Some(_) }
+        ));
+
+        // both scores high (>= 90) and nearly equal
+        assert!(score0.total() >= 90.0, "score0 was {}", score0.total());
+        assert!(score1.total() >= 90.0, "score1 was {}", score1.total());
+        assert!(
+            (score0.total() - score1.total()).abs() < 1.0,
+            "scores differed: score0={}, score1={}",
+            score0.total(),
+            score1.total()
+        );
     }
 }

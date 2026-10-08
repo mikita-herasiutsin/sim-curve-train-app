@@ -6,8 +6,8 @@ pub struct ToneTarget {
     pub gain: f32,
 }
 
-const DEFAULT_GAIN: f32 = 0.2;
-const BASE_FREQ_HZ: f32 = 440.0;
+pub const DEFAULT_GAIN: f32 = 0.2;
+pub const BASE_FREQ_HZ: f32 = 440.0;
 
 /// Maps pedal error to an audio tone target (frequency and gain).
 ///
@@ -16,9 +16,9 @@ const BASE_FREQ_HZ: f32 = 440.0;
 /// * `drill_kind` - The type of drill currently active.
 #[must_use]
 pub fn map_tone(error_pct: f32, in_band: bool, drill_kind: &DrillKind) -> ToneTarget {
-    if in_band {
+    if !error_pct.is_finite() || in_band {
         return ToneTarget {
-            frequency_hz: 0.0,
+            frequency_hz: BASE_FREQ_HZ,
             gain: 0.0,
         };
     }
@@ -67,9 +67,26 @@ mod tests {
     #[test]
     fn silent_in_band() {
         let t = map_tone(5.0, true, &dummy_hold());
+        assert_eq!(t.frequency_hz, BASE_FREQ_HZ);
         assert_eq!(t.gain, 0.0);
         let t = map_tone(-5.0, true, &dummy_trace());
+        assert_eq!(t.frequency_hz, BASE_FREQ_HZ);
         assert_eq!(t.gain, 0.0);
+    }
+
+    #[test]
+    fn non_finite_error_returns_silence() {
+        let t_nan = map_tone(f32::NAN, false, &dummy_hold());
+        assert_eq!(t_nan.frequency_hz, BASE_FREQ_HZ);
+        assert_eq!(t_nan.gain, 0.0);
+
+        let t_inf = map_tone(f32::INFINITY, false, &dummy_hold());
+        assert_eq!(t_inf.frequency_hz, BASE_FREQ_HZ);
+        assert_eq!(t_inf.gain, 0.0);
+
+        let t_neg_inf = map_tone(f32::NEG_INFINITY, false, &dummy_trace());
+        assert_eq!(t_neg_inf.frequency_hz, BASE_FREQ_HZ);
+        assert_eq!(t_neg_inf.gain, 0.0);
     }
 
     #[test]

@@ -175,6 +175,13 @@ const AUDIO_VOLUME_KEY = "sct:audio_volume";
 export const DEFAULT_AUDIO_ENABLED = true;
 export const DEFAULT_AUDIO_VOLUME = 0.2;
 
+export function clampAudioVolume(volume: number): number {
+  if (Number.isNaN(volume) || !Number.isFinite(volume)) {
+    return DEFAULT_AUDIO_VOLUME;
+  }
+  return Math.max(0, Math.min(1, volume));
+}
+
 export function loadAudioEnabled(): boolean {
   try {
     if (typeof localStorage === "undefined") return DEFAULT_AUDIO_ENABLED;
@@ -200,8 +207,7 @@ export function loadAudioVolume(): number {
     const stored = localStorage.getItem(AUDIO_VOLUME_KEY);
     if (stored === null) return DEFAULT_AUDIO_VOLUME;
     const parsed = Number(stored);
-    if (Number.isNaN(parsed) || !Number.isFinite(parsed)) return DEFAULT_AUDIO_VOLUME;
-    return Math.max(0, Math.min(1, parsed));
+    return clampAudioVolume(parsed);
   } catch {
     return DEFAULT_AUDIO_VOLUME;
   }
@@ -210,7 +216,7 @@ export function loadAudioVolume(): number {
 export function saveAudioVolume(volume: number): void {
   try {
     if (typeof localStorage === "undefined") return;
-    const clamped = Math.max(0, Math.min(1, volume));
+    const clamped = clampAudioVolume(volume);
     localStorage.setItem(AUDIO_VOLUME_KEY, String(clamped));
   } catch {
     // Ignore error

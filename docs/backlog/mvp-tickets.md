@@ -174,7 +174,7 @@ A home screen shows the preset cards (GT3, NASCAR and Road/MX-5). Opening a card
 - **AC:** presets are loaded from bundled JSON; the last preset used is remembered.
 - **Deps:** SCT-030, SCT-033
 
-### SCT-044 · Dev tool: Telemetry zone extractor ✅ · M
+### SCT-044 · Dev tool: Telemetry zone extractor 🟨 · M
 A Rust workspace binary tool at `crates/telemetry-extract` (re-scoped from Python `.ibt` script to Garage 61 CSV exports; native `.ibt` support deferred as a post-MVP follow-up):
 1. Reads Garage 61 60 Hz CSV exports and parses car/track/lap time metadata.
 2. Finds brake zones (hysteresis thresholds, duration gating, gap merging) and throttle exit zones (from throttle minimum after braking to sustained $\ge 98\%$).

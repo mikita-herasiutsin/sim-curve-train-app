@@ -315,24 +315,70 @@ pub fn detect_plateau(samples: &[f32], onset_idx: usize, release_idx: usize) -> 
     let mut best_len = 0;
     let mut best_mean = 0.0;
 
-    for start in 0..=slice.len() - MIN_FRAMES {
-        for len in MIN_FRAMES..=(slice.len() - start) {
-            let window = &slice[start..start + len];
-            let min_val = window.iter().copied().fold(f32::INFINITY, f32::min);
-            let max_val = window.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let mut left = 0;
+    let mut current_sum = 0.0;
+    let mut min_dq = std::collections::VecDeque::<usize>::new();
+    let mut max_dq = std::collections::VecDeque::<usize>::new();
 
-            if max_val - min_val <= 0.06 {
+    for right in 0..slice.len() {
+        let val = slice[right];
+        current_sum += val;
+
+        while let Some(&idx) = min_dq.back() {
+            if slice[idx] >= val {
+                min_dq.pop_back();
+            } else {
+                break;
+            }
+        }
+        min_dq.push_back(right);
+
+        while let Some(&idx) = max_dq.back() {
+            if slice[idx] <= val {
+                max_dq.pop_back();
+            } else {
+                break;
+            }
+        }
+        max_dq.push_back(right);
+
+        while left <= right {
+            let cmin = slice[*min_dq.front().unwrap()];
+            let cmax = slice[*max_dq.front().unwrap()];
+            if cmax - cmin <= 0.06 {
+                break;
+            }
+            current_sum -= slice[left];
+            if min_dq.front() == Some(&left) {
+                min_dq.pop_front();
+            }
+            if max_dq.front() == Some(&left) {
+                max_dq.pop_front();
+            }
+            left += 1;
+        }
+
+        let mut cur_left = left;
+        let mut cur_sum = current_sum;
+        let mut len = right - cur_left + 1;
+
+        if slice[*max_dq.front().unwrap()] >= 0.20 {
+            while len >= MIN_FRAMES && len > best_len {
                 #[expect(
                     clippy::cast_precision_loss,
                     reason = "window frame count under 1000 fits in f32"
                 )]
                 let len_f32 = len as f32;
-                let mean = window.iter().sum::<f32>() / len_f32;
-                if mean >= 0.20 && len > best_len {
+                let mean = cur_sum / len_f32;
+                if mean >= 0.20 {
                     best_len = len;
-                    best_start = start;
+                    best_start = cur_left;
                     best_mean = mean;
+                    break;
                 }
+                cur_sum -= slice[cur_left];
+                cur_left += 1;
+                len -= 1;
             }
         }
     }

@@ -130,26 +130,22 @@ pub fn analyze_throttle_exit(throttles: &[f32], zone: &ThrottleExitZone) -> Thro
     }
 
     // 3. Identify fast steps (run of rate > 300 %/s)
-    let mut has_fast_step = false;
-    let mut first_fast_step_end = onset;
+    let mut fast_step_runs = Vec::new();
     let mut in_fast = false;
-
+    let mut fast_start = 0;
     for (k, &r) in rates.iter().enumerate() {
         if r > FAST_STEP_RATE_THRESHOLD {
             if !in_fast {
                 in_fast = true;
+                fast_start = k;
             }
         } else if in_fast {
             in_fast = false;
-            if !has_fast_step {
-                has_fast_step = true;
-                first_fast_step_end = onset + k;
-            }
+            fast_step_runs.push((fast_start, k));
         }
     }
-    if in_fast && !has_fast_step {
-        has_fast_step = true;
-        first_fast_step_end = onset + rates.len();
+    if in_fast {
+        fast_step_runs.push((fast_start, rates.len()));
     }
 
     // 4. Identify plateaus between steps (>= 80 ms = 5 frames at 60 Hz with |rate| < 50 %/s)
@@ -175,10 +171,17 @@ pub fn analyze_throttle_exit(throttles: &[f32], zone: &ThrottleExitZone) -> Thro
     }
 
     let mut plateau_levels_pct = Vec::new();
-    let mut last_plateau_end_frame = first_fast_step_end;
+    let mut last_plateau_end_frame = if fast_step_runs.is_empty() {
+        onset
+    } else {
+        onset + fast_step_runs[0].1
+    };
 
     for (p_start, p_end) in plateau_ranges {
-        if p_end < num_frames {
+        let has_fast_before = fast_step_runs.iter().any(|r| r.1 <= p_start);
+        let has_fast_after = fast_step_runs.iter().any(|r| r.0 >= p_end);
+
+        if has_fast_before && has_fast_after && p_end < num_frames {
             let th_at_end = f64::from(throttles[onset + p_end]) * 100.0;
             let th_full = f64::from(throttles[full]) * 100.0;
             if th_full > th_at_end + 5.0 {
@@ -196,20 +199,16 @@ pub fn analyze_throttle_exit(throttles: &[f32], zone: &ThrottleExitZone) -> Thro
         }
     }
 
-    let fast_steps = if has_fast_step || !plateau_levels_pct.is_empty() {
-        1 + plateau_levels_pct.len()
-    } else {
-        0
-    };
+    let fast_steps = fast_step_runs.len();
 
     #[expect(
         clippy::cast_precision_loss,
         reason = "sample count safely converts to f64"
     )]
-    let time_to_stab_s = if has_fast_step {
-        (first_fast_step_end - onset) as f64 / TELEMETRY_HZ
-    } else {
+    let time_to_stab_s = if fast_step_runs.is_empty() {
         0.0
+    } else {
+        (fast_step_runs[0].1) as f64 / TELEMETRY_HZ
     };
 
     let ramp_start_frame = last_plateau_end_frame.min(full);

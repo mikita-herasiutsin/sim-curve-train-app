@@ -133,8 +133,9 @@ pub fn detect_brake_zones(brakes: &[f32]) -> Vec<BrakeZone> {
 
     // 3. Filter by duration and peak, and construct BrakeZone.
     let mut zones = Vec::new();
+    let len = brakes.len();
     for (start, end) in merged_intervals {
-        if end <= start {
+        if end <= start || start == 0 || end == len.saturating_sub(1) {
             continue;
         }
 
@@ -144,6 +145,10 @@ pub fn detect_brake_zones(brakes: &[f32]) -> Vec<BrakeZone> {
         )]
         let duration_s = (end - start) as f64 / TELEMETRY_HZ;
         if duration_s < BRAKE_MIN_DURATION_S {
+            continue;
+        }
+        if duration_s > 60.0 {
+            eprintln!("warning: skipping brake zone > 60s ({duration_s:.1}s)");
             continue;
         }
 
@@ -186,8 +191,13 @@ pub fn detect_lift_zones(throttles: &[f32], brakes: &[f32]) -> Vec<LiftZone> {
     let mut onset = 0;
     let mut min_idx = 0;
     let mut min_val = 1.0f32;
+    let mut last_full = false;
 
     for (i, &t) in throttles.iter().enumerate() {
+        if t >= 0.95 {
+            last_full = true;
+        }
+
         if in_lift {
             if t < min_val {
                 min_val = t;
@@ -197,7 +207,7 @@ pub fn detect_lift_zones(throttles: &[f32], brakes: &[f32]) -> Vec<LiftZone> {
                 in_lift = false;
                 raw_intervals.push((onset, min_idx, i, min_val));
             }
-        } else if t < LIFT_ENTRY_THRESHOLD {
+        } else if t < LIFT_ENTRY_THRESHOLD && last_full {
             in_lift = true;
             onset = i;
             min_idx = i;
@@ -232,7 +242,11 @@ pub fn detect_lift_zones(throttles: &[f32], brakes: &[f32]) -> Vec<LiftZone> {
     merged.push(current);
 
     let mut zones = Vec::new();
+    let len = throttles.len();
     for (start, min_i, end, min_v) in merged {
+        if start == 0 || end == len.saturating_sub(1) {
+            continue;
+        }
         if min_v >= LIFT_THRESHOLD {
             continue;
         }
@@ -242,6 +256,10 @@ pub fn detect_lift_zones(throttles: &[f32], brakes: &[f32]) -> Vec<LiftZone> {
         )]
         let duration_s = (end.saturating_sub(start)) as f64 / TELEMETRY_HZ;
         if duration_s < LIFT_MIN_DURATION_S {
+            continue;
+        }
+        if duration_s > 60.0 {
+            eprintln!("warning: skipping lift zone > 60s ({duration_s:.1}s)");
             continue;
         }
 

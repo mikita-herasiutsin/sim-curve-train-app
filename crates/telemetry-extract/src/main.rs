@@ -12,7 +12,7 @@ mod tests;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::csv::{LapTelemetry, read_csv_file};
+use crate::csv::LapTelemetry;
 use crate::extract::{ExtractOptions, run_extract};
 use crate::stats::{StatsCollector, format_stats_table};
 use crate::zones::{detect_brake_zones, detect_lift_zones, detect_throttle_exit_zones};
@@ -130,13 +130,12 @@ fn load_laps(files: &[PathBuf], car_filter: Option<&str>) -> Vec<LapTelemetry> {
     let mut laps = Vec::new();
 
     for path in files {
-        match read_csv_file(path) {
+        match crate::csv::read_csv_file(path) {
             Ok(lap) => {
-                if let Some(filter) = car_filter {
-                    let car = lap.car_name().to_lowercase();
-                    if !car.contains(&filter.to_lowercase()) {
-                        continue;
-                    }
+                if let Some(filter) = car_filter
+                    && !lap.car_name().eq_ignore_ascii_case(filter)
+                {
+                    continue;
                 }
                 laps.push(lap);
             }
@@ -147,6 +146,33 @@ fn load_laps(files: &[PathBuf], car_filter: Option<&str>) -> Vec<LapTelemetry> {
     }
 
     laps
+}
+
+fn check_mixed_laps(laps: &[LapTelemetry], allow_mixed: bool) -> Result<(), String> {
+    if laps.is_empty() || allow_mixed {
+        return Ok(());
+    }
+
+    let first_car = laps[0].car_name();
+    let first_track = laps[0]
+        .metadata
+        .as_ref()
+        .map_or("Unknown Track", |m| m.track.as_str());
+
+    for lap in &laps[1..] {
+        let car = lap.car_name();
+        let track = lap
+            .metadata
+            .as_ref()
+            .map_or("Unknown Track", |m| m.track.as_str());
+        if car != first_car || track != first_track {
+            return Err(format!(
+                "mixed input detected. First lap is '{first_car}' at '{first_track}', but found '{car}' at '{track}'. Use --allow-mixed to bypass."
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn main() -> ExitCode {
@@ -187,6 +213,7 @@ fn handle_extract(args: &[String]) -> ExitCode {
     let mut preset_name = None;
     let mut tolerance = None;
     let mut max_drills = 12;
+    let mut allow_mixed = false;
     let mut inputs = Vec::new();
 
     let mut i = 0;
@@ -238,6 +265,9 @@ fn handle_extract(args: &[String]) -> ExitCode {
                     i += 1;
                 }
             }
+            "--allow-mixed" => {
+                allow_mixed = true;
+            }
             other => {
                 if other.starts_with('-') {
                     eprintln!("warning: unknown option '{other}'");
@@ -266,6 +296,11 @@ fn handle_extract(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if let Err(e) = check_mixed_laps(&laps, allow_mixed) {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
+    }
+
     let options = ExtractOptions {
         preset_id,
         preset_name,
@@ -285,6 +320,7 @@ fn handle_extract(args: &[String]) -> ExitCode {
 fn handle_stats(args: &[String]) -> ExitCode {
     let mut car_filter = None;
     let mut json_output = false;
+    let mut allow_mixed = false;
     let mut inputs = Vec::new();
 
     let mut i = 0;
@@ -298,6 +334,9 @@ fn handle_stats(args: &[String]) -> ExitCode {
             }
             "--json" => {
                 json_output = true;
+            }
+            "--allow-mixed" => {
+                allow_mixed = true;
             }
             other => {
                 if other.starts_with('-') {
@@ -324,6 +363,11 @@ fn handle_stats(args: &[String]) -> ExitCode {
     let laps = load_laps(&files, car_filter.as_deref());
     if laps.is_empty() {
         eprintln!("error: no matching laps loaded after filtering.");
+        return ExitCode::FAILURE;
+    }
+
+    if let Err(e) = check_mixed_laps(&laps, allow_mixed) {
+        eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
 

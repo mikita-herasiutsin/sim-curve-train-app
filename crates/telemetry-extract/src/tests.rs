@@ -210,8 +210,8 @@ fn test_stats_on_known_staged_ramp() {
     assert!((metrics.initial_stab_level_pct - 60.0).abs() < 1.0);
     // Time to stab is 6 frames = 0.10 s
     assert!((metrics.time_to_stab_s - 0.10).abs() < 1e-3);
-    // 1 fast step before progressive phase (plus 1 plateau -> 2 steps total)
-    assert_eq!(metrics.fast_steps, 2);
+    // 1 fast step before progressive phase (plus no plateau -> 1 step total)
+    assert_eq!(metrics.fast_steps, 1);
     // Progressive ramp from 60% to 98%
     assert!(
         metrics.progressive_ramp_rate_pct_s > 40.0 && metrics.progressive_ramp_rate_pct_s < 100.0
@@ -234,10 +234,10 @@ fn test_staged_throttle_exit_curve() {
     for i in onset + 6..onset + 24 {
         throttles[i] = 0.80;
     }
-    // 3. Second step: 80% -> 98% over 9 frames (0.15 s)
-    let full = onset + 33;
+    // 3. Second step: 80% -> 98% over 3 frames (0.05 s)
+    let full = onset + 27;
     for i in onset + 24..=full {
-        throttles[i] = 0.80 + ((i - (onset + 24)) as f32 / 9.0) * 0.18;
+        throttles[i] = 0.80 + ((i - (onset + 24)) as f32 / 3.0) * 0.18;
     }
     for t in &mut throttles[full + 1..] {
         *t = 1.0;
@@ -575,4 +575,223 @@ fn test_corner_grouping_and_options() {
     };
     let preset_cap = extract_preset_from_laps(&laps, &options_cap).expect("extract succeeds");
     assert_eq!(preset_cap.drills.len(), 1);
+}
+
+fn mk(n: usize, b: Vec<f32>, t: Vec<f32>, d: Vec<f32>, id: usize) -> LapTelemetry {
+    let path = std::path::PathBuf::from(format!(
+        "Garage 61 - D - Car - Trk - 01.20.{id:03} - ID{id}.csv"
+    ));
+    LapTelemetry {
+        metadata: parse_filename_metadata(&path),
+        path,
+        brake: b,
+        throttle: t,
+        speed: vec![0.0; n],
+        lap_dist_pct: d,
+    }
+}
+fn opts(max: usize) -> ExtractOptions {
+    ExtractOptions {
+        preset_id: Some("p".into()),
+        preset_name: Some("p".into()),
+        out_path: None,
+        tolerance: None,
+        max_drills: max,
+    }
+}
+fn brake(b: &mut [f32], t: &mut [f32], s: usize, len: usize, peak: f32) {
+    for i in s..s + len {
+        b[i] = peak;
+        t[i] = 0.0;
+    }
+}
+fn dist(n: usize) -> Vec<f32> {
+    (0..n).map(|i| i as f32 / n as f32).collect()
+}
+
+#[test]
+fn probe_wrap_mean() {
+    let n = 3000;
+    let mut laps = vec![];
+    for k in 0..4 {
+        let mut b = vec![0.0; n];
+        let mut t = vec![1.0; n];
+        brake(&mut b, &mut t, 900, 60, 0.60); // A at 0.30
+        brake(&mut b, &mut t, 2100, 60, 0.70); // B at 0.70
+        if k < 2 {
+            brake(&mut b, &mut t, 2985, 15, 0.90);
+        } else {
+            brake(&mut b, &mut t, 9, 30, 0.91);
+        }
+        laps.push(mk(n, b, t, dist(n), k));
+    }
+    let p = extract_preset_from_laps(&laps, &opts(12)).unwrap();
+    let mut onsets = p
+        .drills
+        .iter()
+        .filter_map(|d| {
+            let n = d.id.split('-').nth(1)?; // c01, c02
+            Some(n)
+        })
+        .collect::<Vec<_>>();
+    onsets.dedup();
+    assert_eq!(onsets.len(), 3);
+
+    let wrap_drills = p
+        .drills
+        .iter()
+        .filter(|d| d.id.contains("c03"))
+        .collect::<Vec<_>>();
+    assert!(!wrap_drills.is_empty(), "Wrap corner should be C03");
+}
+
+#[test]
+fn probe_chicane() {
+    let n = 3000;
+    let mut laps = vec![];
+    for k in 0..3 {
+        let mut b = vec![0.0; n];
+        let mut t = vec![1.0; n];
+        brake(&mut b, &mut t, 300, 30, 0.90); // onset 0.100
+        for i in 330..360 {
+            t[i] = 0.5;
+        }
+        brake(&mut b, &mut t, 360, 30, 0.50); // onset 0.120
+        laps.push(mk(n, b, t, dist(n), k));
+    }
+    let p = extract_preset_from_laps(&laps, &opts(12)).unwrap();
+    let mut corners = p
+        .drills
+        .iter()
+        .filter_map(|d| d.id.split('-').nth(1))
+        .collect::<Vec<_>>();
+    corners.dedup();
+    assert_eq!(
+        corners.len(),
+        2,
+        "Two separate brake zones in each lap should yield 2 corners, not 1 mixed cluster"
+    );
+}
+
+#[test]
+fn probe_budget() {
+    let n = 3000;
+    let mut laps = vec![];
+    for k in 0..1 {
+        let mut b = vec![0.0; n];
+        let t = vec![1.0; n];
+        for i in 600..660 {
+            b[i] = 0.50; // low priority at 0.2
+        }
+        for i in 2100..2160 {
+            b[i] = 0.95; // high priority at 0.7
+        }
+        laps.push(mk(n, b, t, dist(n), k));
+    }
+    let p = extract_preset_from_laps(&laps, &opts(3)).unwrap();
+    let hold_drills = p
+        .drills
+        .iter()
+        .filter(|d| matches!(d.kind, sct_core::preset::DrillKind::Hold { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(hold_drills.len(), 1);
+    assert!(
+        hold_drills[0].id.contains("c02"),
+        "The top priority corner should keep its hold drill"
+    );
+}
+
+#[test]
+fn probe_oval_steps() {
+    let n = 300;
+    let brakes = vec![0.0; n];
+    let mut throttles = vec![1.0; n];
+    for i in 60..90 {
+        throttles[i] = 1.0 - ((i - 60) as f32 / 30.0) * 0.70;
+    }
+    for i in 90..120 {
+        throttles[i] = 0.30;
+    }
+    for i in 120..180 {
+        throttles[i] = 0.30 + ((i - 120) as f32 / 60.0) * 0.70;
+    }
+    let bz = detect_brake_zones(&brakes);
+    let lz = detect_lift_zones(&throttles, &brakes);
+    let tz = detect_throttle_exit_zones(&throttles, &bz, &lz);
+    let m = analyze_throttle_exit(&throttles, &tz[0]);
+    assert!(m.fast_steps <= 1);
+    assert_eq!(m.plateau_levels_pct.len(), 0);
+}
+
+#[test]
+fn probe_lap_start_lift() {
+    let n = 600;
+    let b = vec![0.0; n];
+    let mut t = vec![1.0; n];
+    for i in 0..30 {
+        t[i] = 0.5 + i as f32 / 60.0;
+    }
+    let lz = detect_lift_zones(&t, &b);
+    assert!(
+        lz.is_empty(),
+        "lift onset requires earlier sample >= 95% in same lap"
+    );
+}
+
+#[test]
+fn probe_nan() {
+    let n = 600;
+    let mut b = vec![0.0; n];
+    let mut t = vec![1.0; n];
+    brake(&mut b, &mut t, 200, 60, 0.8);
+    b[230] = f32::NAN;
+    let lap = mk(n, b, t, dist(n), 0);
+    let _r = extract_preset_from_laps(&[lap], &opts(12)).unwrap();
+}
+
+#[test]
+fn probe_long_zone() {
+    let n = 4000;
+    let mut b = vec![0.0; n];
+    let mut t = vec![1.0; n];
+    for i in 100..3800 {
+        b[i] = 0.3 + 0.1 * ((i % 7) as f32 / 7.0);
+        t[i] = 0.0;
+    }
+    let bz = detect_brake_zones(&b);
+    assert!(bz.is_empty(), "zones > 60s should be skipped");
+}
+
+#[test]
+fn probe_nan_edge() {
+    let n = 600;
+    let mut b = vec![0.0; n];
+    let mut t = vec![1.0; n];
+    brake(&mut b, &mut t, 200, 60, 0.8);
+    b[182] = f32::NAN;
+    let lap = mk(n, b, t, dist(n), 0);
+    let _r = extract_preset_from_laps(&[lap], &opts(12)).unwrap();
+}
+
+#[test]
+fn probe_median_choice() {
+    let mut laps = vec![];
+    let n = 1000;
+    let peaks = [70.0, 85.0, 80.0];
+    for (k, &p) in peaks.iter().enumerate() {
+        let mut b = vec![0.0; n];
+        let mut t = vec![1.0; n];
+        brake(&mut b, &mut t, 200, 100, p / 100.0);
+        laps.push(mk(n, b, t, dist(n), k));
+    }
+    let p = extract_preset_from_laps(&laps, &opts(12)).unwrap();
+    let b_drills = p
+        .drills
+        .iter()
+        .filter(|d| matches!(d.kind, sct_core::preset::DrillKind::Hold { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(b_drills.len(), 1);
+    if let sct_core::preset::DrillKind::Hold { target, .. } = b_drills[0].kind {
+        assert!((target - 80.0).abs() < 1e-4, "Target should be median 80.0");
+    }
 }

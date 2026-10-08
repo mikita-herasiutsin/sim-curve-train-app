@@ -132,10 +132,12 @@ struct ChosenCorner {
     decel: DecelZone,
     throttle: Option<crate::zones::ThrottleExitZone>,
     priority_score: (f64, f64),
+    corner_num: usize,
+    trace_only: bool,
 }
 
-/// Maximum distance in normalized lap distance (0.025 = ~2.5% of lap) to cluster zones into the same corner.
-pub const CORNER_CLUSTER_EPSILON: f32 = 0.025;
+/// Maximum distance in normalized lap distance (0.01 = 1% of lap) to cluster zones into the same corner.
+pub const CORNER_CLUSTER_EPSILON: f32 = 0.01;
 
 /// Extracts grouped corner drills from multiple laps and compiles them into a validated [`Preset`].
 ///
@@ -211,10 +213,17 @@ pub fn extract_preset_from_laps(
     for cand in all_candidates {
         let mut matched_idx = None;
         for (c_idx, cluster) in clusters.iter().enumerate() {
+            let same_type = matches!(
+                (&cluster[0].decel, &cand.decel),
+                (DecelZone::Brake(_), DecelZone::Brake(_))
+                    | (DecelZone::Lift(_), DecelZone::Lift(_))
+            );
+            let has_lap = cluster.iter().any(|c| c.lap_idx == cand.lap_idx);
             let close = cluster
                 .iter()
                 .any(|c| circular_dist(c.onset_pct, cand.onset_pct) <= CORNER_CLUSTER_EPSILON);
-            if close {
+
+            if close && same_type && !has_lap {
                 matched_idx = Some(c_idx);
                 break;
             }
@@ -230,10 +239,23 @@ pub fn extract_preset_from_laps(
     // Merge wrap-around across 0/1 boundary
     if clusters.len() > 1 {
         let first_onset = clusters[0][0].onset_pct;
+        let same_type = matches!(
+            (
+                &clusters[0][0].decel,
+                &clusters[clusters.len() - 1][0].decel
+            ),
+            (DecelZone::Brake(_), DecelZone::Brake(_)) | (DecelZone::Lift(_), DecelZone::Lift(_))
+        );
+        let has_lap_overlap = clusters[0].iter().any(|c1| {
+            clusters[clusters.len() - 1]
+                .iter()
+                .any(|c2| c1.lap_idx == c2.lap_idx)
+        });
         let last_close = clusters[clusters.len() - 1]
             .iter()
             .any(|c| circular_dist(c.onset_pct, first_onset) <= CORNER_CLUSTER_EPSILON);
-        if last_close {
+
+        if last_close && same_type && !has_lap_overlap {
             let last_cluster = clusters.pop().unwrap();
             clusters[0].extend(last_cluster);
         }
@@ -286,7 +308,18 @@ pub fn extract_preset_from_laps(
             reason = "cluster member count safely converts to f32"
         )]
         let count_f32 = cluster.len() as f32;
-        let avg_onset = cluster.iter().map(|c| c.onset_pct).sum::<f32>() / count_f32;
+        let mut sum_sin = 0.0_f32;
+        let mut sum_cos = 0.0_f32;
+        for c in &cluster {
+            let theta = c.onset_pct * 2.0 * std::f32::consts::PI;
+            sum_sin += theta.sin();
+            sum_cos += theta.cos();
+        }
+        let mut avg_onset =
+            (sum_sin / count_f32).atan2(sum_cos / count_f32) / (2.0 * std::f32::consts::PI);
+        if avg_onset < 0.0 {
+            avg_onset += 1.0;
+        }
 
         chosen_corners.push(ChosenCorner {
             representative_lap: median_cand.lap_idx,
@@ -294,21 +327,41 @@ pub fn extract_preset_from_laps(
             decel: median_cand.decel.clone(),
             throttle: median_cand.throttle.clone(),
             priority_score: median_cand.decel.priority_score(),
+            corner_num: 0,
+            trace_only: false,
         });
+    }
+
+    // 4.5 Number all kept clusters by onset along the lap
+    chosen_corners.sort_by(|a, b| {
+        a.mean_onset_pct
+            .partial_cmp(&b.mean_onset_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (i, corner) in chosen_corners.iter_mut().enumerate() {
+        corner.corner_num = i + 1;
     }
 
     // 5. Prioritize corners with the highest brake peak / longest zones to fit within max_drills
     chosen_corners.sort_by(|a, b| {
-        b.priority_score
-            .0
-            .partial_cmp(&a.priority_score.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                b.priority_score
-                    .1
-                    .partial_cmp(&a.priority_score.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "priority score fits in u32"
+        )]
+        let p_a = a.priority_score.0.round() as u32;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "priority score fits in u32"
+        )]
+        let p_b = b.priority_score.0.round() as u32;
+        p_b.cmp(&p_a).then_with(|| {
+            b.priority_score
+                .1
+                .partial_cmp(&a.priority_score.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
 
     let max_drills = options.max_drills.max(1);
@@ -317,7 +370,7 @@ pub fn extract_preset_from_laps(
     let mut selected_corners = Vec::new();
     let mut drill_budget = 0;
 
-    for corner in chosen_corners {
+    for mut corner in chosen_corners {
         let rep_lap = &laps[corner.representative_lap];
         let mut count_for_corner = 1; // decel trace
         match &corner.decel {
@@ -341,12 +394,14 @@ pub fn extract_preset_from_laps(
 
         if drill_budget + count_for_corner <= max_drills || selected_corners.is_empty() {
             drill_budget += count_for_corner;
+            corner.trace_only = false;
             selected_corners.push(corner);
         } else if drill_budget < max_drills {
             // Include corner if trace drills fit
             let trace_only = if corner.throttle.is_some() { 2 } else { 1 };
             if drill_budget + trace_only <= max_drills {
                 drill_budget += trace_only;
+                corner.trace_only = true;
                 selected_corners.push(corner);
             }
         }
@@ -367,8 +422,8 @@ pub fn extract_preset_from_laps(
 
     let mut drills = Vec::new();
 
-    for (c_idx, corner) in selected_corners.iter().enumerate() {
-        let corner_num = c_idx + 1;
+    for corner in &selected_corners {
+        let corner_num = corner.corner_num;
         let rep_lap = &laps[corner.representative_lap];
 
         match &corner.decel {
@@ -386,7 +441,9 @@ pub fn extract_preset_from_laps(
                     });
                 }
 
-                if let Some(plateau) = detect_plateau(&rep_lap.brake, bz.onset_idx, bz.release_idx)
+                if !corner.trace_only
+                    && let Some(plateau) =
+                        detect_plateau(&rep_lap.brake, bz.onset_idx, bz.release_idx)
                     && drills.len() < max_drills
                 {
                     drills.push(Drill {
@@ -418,8 +475,9 @@ pub fn extract_preset_from_laps(
                     });
                 }
 
-                if let Some(plateau) =
-                    detect_plateau(&rep_lap.throttle, lz.onset_idx, lz.recovery_idx)
+                if !corner.trace_only
+                    && let Some(plateau) =
+                        detect_plateau(&rep_lap.throttle, lz.onset_idx, lz.recovery_idx)
                     && drills.len() < max_drills
                 {
                     drills.push(Drill {
@@ -452,7 +510,8 @@ pub fn extract_preset_from_laps(
                 });
             }
 
-            if let Some(plateau) = detect_plateau(&rep_lap.throttle, tz.onset_idx, tz.full_idx)
+            if !corner.trace_only
+                && let Some(plateau) = detect_plateau(&rep_lap.throttle, tz.onset_idx, tz.full_idx)
                 && drills.len() < max_drills
             {
                 drills.push(Drill {
@@ -475,6 +534,26 @@ pub fn extract_preset_from_laps(
         return Err("no drills could be extracted from telemetry data".to_string());
     }
 
+    let mut valid_drills = Vec::new();
+    for drill in drills {
+        let dummy_preset = Preset {
+            schema_version: SCHEMA_VERSION,
+            id: "dummy".to_string(),
+            name: "dummy".to_string(),
+            description: String::new(),
+            drills: vec![drill.clone()],
+        };
+        if let Err(e) = dummy_preset.validate() {
+            eprintln!("warning: dropping invalid drill '{}': {e}", drill.id);
+        } else {
+            valid_drills.push(drill);
+        }
+    }
+
+    if valid_drills.is_empty() {
+        return Err("all extracted drills failed validation".to_string());
+    }
+
     let default_car = laps[0].car_name();
     let preset_id = options.preset_id.as_deref().map_or_else(
         || sanitize_id(&format!("{default_car}-extracted")),
@@ -493,7 +572,7 @@ pub fn extract_preset_from_laps(
         description: format!(
             "Pedal practice drills extracted from Garage 61 telemetry for {default_car}."
         ),
-        drills,
+        drills: valid_drills,
     };
 
     // Strict validation via sct-core

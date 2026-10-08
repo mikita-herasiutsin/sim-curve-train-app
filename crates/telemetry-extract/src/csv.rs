@@ -37,6 +37,12 @@ pub enum CsvError {
     MissingColumn(String),
     /// File is empty or has no header.
     EmptyFile,
+    /// Row count duration differs from filename lap time by > 2%.
+    DurationMismatch {
+        row_duration_s: f64,
+        meta_lap_time_s: f64,
+        filename: String,
+    },
 }
 
 impl fmt::Display for CsvError {
@@ -45,6 +51,14 @@ impl fmt::Display for CsvError {
             Self::Io(err) => write!(f, "I/O error: {err}"),
             Self::MissingColumn(col) => write!(f, "missing required CSV column: {col}"),
             Self::EmptyFile => write!(f, "CSV file is empty"),
+            Self::DurationMismatch {
+                row_duration_s,
+                meta_lap_time_s,
+                filename,
+            } => write!(
+                f,
+                "warning: '{filename}': row duration ({row_duration_s:.3}s at 60 Hz) differs from filename lap time ({meta_lap_time_s:.3}s) by > 2%"
+            ),
         }
     }
 }
@@ -53,7 +67,7 @@ impl std::error::Error for CsvError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(err) => Some(err),
-            Self::MissingColumn(_) | Self::EmptyFile => None,
+            Self::MissingColumn(_) | Self::EmptyFile | Self::DurationMismatch { .. } => None,
         }
     }
 }
@@ -183,6 +197,10 @@ impl LapTelemetry {
 /// # Errors
 ///
 /// Returns [`CsvError`] if file reading fails or required columns (`Brake`, `Throttle`) are missing.
+#[expect(
+    clippy::too_many_lines,
+    reason = "parsing logic is linear and self-contained"
+)]
 pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
@@ -214,6 +232,11 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
     let mut speed = Vec::new();
     let mut lap_dist_pct = Vec::new();
 
+    let mut last_b = 0.0;
+    let mut last_t = 0.0;
+    let mut last_s = 0.0;
+    let mut last_d = -1.0;
+
     for line_res in lines {
         let line = line_res?;
         if line.trim().is_empty() {
@@ -224,28 +247,39 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
             continue;
         }
 
-        let b: f32 = cols[brake_idx]
-            .trim()
-            .parse::<f32>()
-            .unwrap_or(0.0)
+        let parse_cell = |s: &str| -> Option<f32> {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                s.parse::<f32>().ok().filter(|f| f.is_finite())
+            }
+        };
+
+        let b = parse_cell(cols[brake_idx])
+            .unwrap_or(last_b)
             .clamp(0.0, 1.0);
-        let t: f32 = cols[throttle_idx]
-            .trim()
-            .parse::<f32>()
-            .unwrap_or(0.0)
+        let t = parse_cell(cols[throttle_idx])
+            .unwrap_or(last_t)
             .clamp(0.0, 1.0);
-        let s: f32 = speed_idx
+        let s = speed_idx
             .and_then(|idx| cols.get(idx))
-            .and_then(|c| c.trim().parse().ok())
-            .unwrap_or(0.0);
-        let d: Option<f32> = lap_dist_idx
+            .and_then(|&c| parse_cell(c))
+            .unwrap_or(last_s);
+        let d = lap_dist_idx
             .and_then(|idx| cols.get(idx))
-            .and_then(|c| c.trim().parse().ok());
+            .and_then(|&c| parse_cell(c))
+            .unwrap_or(last_d);
+
+        last_b = b;
+        last_t = t;
+        last_s = s;
+        last_d = d;
 
         brake.push(b);
         throttle.push(t);
         speed.push(s);
-        lap_dist_pct.push(d.map_or(-1.0, |v| v.clamp(0.0, 1.0)));
+        lap_dist_pct.push(if d >= 0.0 { d.clamp(0.0, 1.0) } else { -1.0 });
     }
 
     let total_rows = brake.len();
@@ -273,11 +307,18 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
         if meta.lap_time_s > 0.0 {
             let diff_pct = ((row_duration_s - meta.lap_time_s).abs() / meta.lap_time_s) * 100.0;
             if diff_pct > 2.0 {
-                eprintln!(
-                    "warning: '{name}': row duration ({row_duration_s:.3}s at 60 Hz) differs from filename lap time ({lap_time:.3}s) by {diff_pct:.2}% (> 2%)",
-                    name = path.file_name().unwrap_or_default().to_string_lossy(),
-                    lap_time = meta.lap_time_s,
-                );
+                let filename = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let err = CsvError::DurationMismatch {
+                    row_duration_s,
+                    meta_lap_time_s: meta.lap_time_s,
+                    filename,
+                };
+                eprintln!("{err}");
+                return Err(err);
             }
         }
     }

@@ -139,6 +139,10 @@ struct ChosenCorner {
 /// Maximum distance in normalized lap distance (0.01 = 1% of lap) to cluster zones into the same corner.
 pub const CORNER_CLUSTER_EPSILON: f32 = 0.01;
 
+/// A throttle-hold whose target is this close (in percentage points) to the same corner's
+/// lift-hold is the same plateau found twice, and is dropped.
+pub const DUPLICATE_PLATEAU_PCT: f32 = 3.0;
+
 /// Extracts grouped corner drills from multiple laps and compiles them into a validated [`Preset`].
 ///
 /// # Errors
@@ -425,6 +429,9 @@ pub fn extract_preset_from_laps(
     for corner in &selected_corners {
         let corner_num = corner.corner_num;
         let rep_lap = &laps[corner.representative_lap];
+        // Target of this corner's lift-hold. A lift zone runs until the throttle recovers, so it
+        // overlaps the throttle exit and can find the same plateau again.
+        let mut lift_hold_target: Option<f32> = None;
 
         match &corner.decel {
             DecelZone::Brake(bz) => {
@@ -480,6 +487,7 @@ pub fn extract_preset_from_laps(
                         detect_plateau(&rep_lap.throttle, lz.onset_idx, lz.recovery_idx)
                     && drills.len() < max_drills
                 {
+                    lift_hold_target = Some(plateau.target);
                     drills.push(Drill {
                         id: sanitize_id(&format!("{t_slug}-c{corner_num:02}-lift-hold")),
                         name: format!("Turn {corner_num} lift hold ({:.0}%)", plateau.target),
@@ -512,6 +520,8 @@ pub fn extract_preset_from_laps(
 
             if !corner.trace_only
                 && let Some(plateau) = detect_plateau(&rep_lap.throttle, tz.onset_idx, tz.full_idx)
+                && !lift_hold_target
+                    .is_some_and(|t| (t - plateau.target).abs() <= DUPLICATE_PLATEAU_PCT)
                 && drills.len() < max_drills
             {
                 drills.push(Drill {

@@ -891,3 +891,70 @@ fn test_drill_id_format_slug() {
         assert!(!drill.id.starts_with("troad-atlanta"));
     }
 }
+
+/// A partial lift that holds a plateau and then recovers: the lift-hold and the throttle exit see
+/// the same plateau, which must become only one hold drill.
+#[test]
+fn test_partial_lift_plateau_is_not_duplicated() {
+    let n = 400;
+    let mut laps = Vec::new();
+    for lap_idx in 0..3 {
+        let dist: Vec<f32> = (0..n).map(|i| i as f32 / n as f32).collect();
+        let mut t = vec![1.0_f32; n];
+        // Lift to 40 % at index 100, hold it for 60 frames (1 s at 60 Hz), then ramp to full.
+        for v in &mut t[100..105] {
+            *v = 0.7;
+        }
+        for v in &mut t[105..165] {
+            *v = 0.4;
+        }
+        for (k, v) in t[165..185].iter_mut().enumerate() {
+            *v = 0.4 + 0.6 * (k as f32 + 1.0) / 20.0;
+        }
+        let path = std::path::PathBuf::from(format!(
+            "Garage 61 - Driver - Lift Car - Oval Track - 00.30.{lap_idx:03} - L{lap_idx}.csv"
+        ));
+        let metadata = parse_filename_metadata(&path);
+        laps.push(LapTelemetry {
+            path,
+            metadata,
+            lap_dist_pct: dist,
+            brake: vec![0.0; n],
+            throttle: t,
+            speed: vec![50.0; n],
+        });
+    }
+    let options = ExtractOptions {
+        preset_id: Some("lift-test".to_string()),
+        preset_name: Some("Lift Test".to_string()),
+        out_path: None,
+        tolerance: None,
+        max_drills: 12,
+    };
+    let preset = extract_preset_from_laps(&laps, &options).expect("extract succeeds");
+    preset.validate().expect("extracted preset validates");
+
+    let holds: Vec<(&str, f32)> = preset
+        .drills
+        .iter()
+        .filter_map(|d| match d.kind {
+            DrillKind::Hold { target, .. } => Some((d.id.as_str(), target)),
+            DrillKind::Trace { .. } => None,
+        })
+        .collect();
+    assert!(
+        !holds.is_empty(),
+        "the plateau should give a hold drill: {:?}",
+        preset.drills.iter().map(|d| &d.id).collect::<Vec<_>>()
+    );
+    for (i, a) in holds.iter().enumerate() {
+        for b in &holds[i + 1..] {
+            let same_corner =
+                a.0.split("-c").nth(1).map(|s| &s[..2]) == b.0.split("-c").nth(1).map(|s| &s[..2]);
+            assert!(
+                !(same_corner && (a.1 - b.1).abs() <= 3.0),
+                "duplicate hold drills {a:?} and {b:?}"
+            );
+        }
+    }
+}

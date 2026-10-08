@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { scrollIntoViewSoon } from "$lib/scroll";
   import AppHeader from "$lib/components/AppHeader.svelte";
   import DevicePanel from "$lib/components/DevicePanel.svelte";
   import { formatUsbIds, listDevices, onDevicesChanged, type DevicesSnapshot } from "$lib/devices";
 
   let snapshot = $state<DevicesSnapshot | null>(null);
+  let panelEl = $state<HTMLElement | null>(null);
   let loadError = $state<string | null>(null);
   let selectedId = $state<number | null>(null);
   // Unplugging the selected device hides its monitor.
@@ -36,66 +38,89 @@
   });
 </script>
 
-<AppHeader />
+<div class="devices-page">
+  <AppHeader />
 
-<main>
-  <h2>Devices</h2>
-  <p class="lead">
-    Every connected game controller. Plug in or unplug a device and the list updates by itself.
-  </p>
+  <div class="scroll-area">
+    <main>
+      <h2>Devices</h2>
+      <p class="lead">
+        Every connected game controller. Plug in or unplug a device and the list updates by itself.
+      </p>
 
-  {#if loadError || snapshot?.error}
-    <p class="error" role="alert">Input unavailable: {snapshot?.error ?? loadError}</p>
-  {:else if snapshot === null}
-    <p class="muted">Looking for controllers…</p>
-  {:else if snapshot.devices.length === 0}
-    <p class="muted">No controllers found. Plug in your pedals.</p>
-  {:else}
-    <table>
-      <thead>
-        <tr>
-          <th scope="col">Name</th>
-          <th scope="col">USB VID:PID</th>
-          <th scope="col" class="num">Axes</th>
-          <th scope="col" class="num">Buttons</th>
-          <th scope="col" class="num">Hats</th>
-          <th scope="col">GUID</th>
-          <th scope="col"><span class="visually-hidden">Monitor</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each snapshot.devices as device (device.id)}
-          <tr class:selected={selectedId === device.id}>
-            <td>{device.name}</td>
-            <td class="mono">{formatUsbIds(device)}</td>
-            <td class="num">{device.axisCount}</td>
-            <td class="num">{device.buttonCount}</td>
-            <td class="num">{device.hatCount}</td>
-            <td class="mono guid">{device.guid}</td>
-            <td>
-              <button
-                type="button"
-                aria-pressed={selectedId === device.id}
-                onclick={() => (selectedId = selectedId === device.id ? null : device.id)}
-              >
-                {selectedId === device.id ? "Hide axes" : "Show axes"}
-              </button>
-            </td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
+      {#if loadError || snapshot?.error}
+        <p class="error" role="alert">Input unavailable: {snapshot?.error ?? loadError}</p>
+      {:else if snapshot === null}
+        <p class="muted">Looking for controllers…</p>
+      {:else if snapshot.devices.length === 0}
+        <p class="muted">No controllers found. Plug in your pedals.</p>
+      {:else}
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Name</th>
+              <th scope="col">USB VID:PID</th>
+              <th scope="col" class="num">Axes</th>
+              <th scope="col" class="num">Buttons</th>
+              <th scope="col" class="num">Hats</th>
+              <th scope="col">GUID</th>
+              <th scope="col"><span class="visually-hidden">Monitor</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {#each snapshot.devices as device (device.id)}
+              <tr class:selected={selectedId === device.id}>
+                <td>{device.name}</td>
+                <td class="mono">{formatUsbIds(device)}</td>
+                <td class="num">{device.axisCount}</td>
+                <td class="num">{device.buttonCount}</td>
+                <td class="num">{device.hatCount}</td>
+                <td class="mono guid" title={device.guid}>{device.guid}</td>
+                <td>
+                  <button
+                    type="button"
+                    aria-pressed={selectedId === device.id}
+                    onclick={() => {
+                      selectedId = selectedId === device.id ? null : device.id;
+                      if (selectedId !== null) void scrollIntoViewSoon(() => panelEl);
+                    }}
+                  >
+                    {selectedId === device.id ? "Hide axes" : "Show axes"}
+                  </button>
+                </td>
+              </tr>
+            {/each}
+          </tbody>
+        </table>
 
-    {#if selected}
-      {#key selected.id}
-        <DevicePanel device={selected} />
-      {/key}
-    {/if}
-  {/if}
-</main>
+        {#if selected}
+          <div bind:this={panelEl}>
+            {#key selected.id}
+              <DevicePanel device={selected} />
+            {/key}
+          </div>
+        {/if}
+      {/if}
+    </main>
+  </div>
+</div>
 
 <style>
+  /* The header stays put; only the content below it scrolls. */
+  .devices-page {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+  }
+
+  .scroll-area {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
   main {
+    width: 100%;
     max-width: 72rem;
     margin: 0 auto;
     padding: 2.5rem 1.5rem;
@@ -181,5 +206,9 @@
 
   .guid {
     color: var(--text-muted);
+    max-width: 12rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

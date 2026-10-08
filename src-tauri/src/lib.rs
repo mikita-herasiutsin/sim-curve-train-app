@@ -1,4 +1,5 @@
 mod input;
+mod window;
 
 use input::InputService;
 use sct_core::AppInfo;
@@ -311,6 +312,7 @@ fn open_attempt_store(app: &tauri::App) -> Option<AttemptStore> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            window::fit_main_window(app);
             let store = open_profile_store(app);
             app.manage(InputService::spawn(app.handle().clone(), store));
 

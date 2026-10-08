@@ -164,11 +164,15 @@
   }
 
   .row {
-    display: grid;
-    grid-template-columns: 8rem minmax(6rem, 1fr) 4.5rem auto auto auto auto;
+    display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 0.75rem;
+    gap: 0.5rem 0.75rem;
     font-size: 0.875rem;
+  }
+
+  .name {
+    flex: 0 0 8rem;
   }
 
   small {
@@ -176,6 +180,7 @@
   }
 
   .bar {
+    flex: 1 1 6rem;
     height: 1rem;
     border-radius: 0.375rem;
     background: var(--surface-raised);
@@ -197,6 +202,7 @@
   }
 
   .value {
+    flex: 0 0 4.5rem;
     text-align: right;
     font-variant-numeric: tabular-nums;
   }

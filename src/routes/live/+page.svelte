@@ -160,7 +160,7 @@
   .live-page {
     display: flex;
     flex-direction: column;
-    min-height: 100vh;
+    height: 100vh;
     background: var(--bg);
     color: var(--text);
   }
@@ -223,6 +223,7 @@
   .live-workspace {
     flex: 1;
     display: grid;
+    grid-template-rows: minmax(0, 1fr);
     grid-template-columns: 220px 1fr;
     gap: 1.25rem;
     padding: 1.25rem 1.5rem;
@@ -239,14 +240,14 @@
   .bars-panel {
     display: flex;
     flex-direction: column;
-    min-height: 20rem;
+    min-height: 0;
   }
 
   .graph-panel {
     display: flex;
     flex-direction: column;
     gap: 0.75rem;
-    min-height: 20rem;
+    min-height: 0;
   }
 
   .graph-toolbar {

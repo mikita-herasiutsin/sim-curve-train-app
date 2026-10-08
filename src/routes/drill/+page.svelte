@@ -307,7 +307,7 @@
   .drill-page {
     display: flex;
     flex-direction: column;
-    min-height: 100vh;
+    height: 100vh;
     background: var(--bg);
     color: var(--text);
   }
@@ -353,6 +353,8 @@
 
   .content {
     flex: 1;
+    min-height: 0;
+    overflow-y: auto;
     padding: 1.5rem;
     display: flex;
     gap: 1.5rem;
@@ -410,6 +412,7 @@
 
   .active-workspace {
     flex: 1;
+    min-height: 0;
     display: grid;
     grid-template-columns: 1fr 300px;
     gap: 1.5rem;
@@ -423,7 +426,8 @@
     padding: 0;
     overflow: hidden;
     display: flex;
-    min-height: 400px;
+    flex: 1.2 1 0;
+    min-height: 0;
   }
 
   .overlay {
@@ -461,6 +465,8 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   .rep-info h3 {
@@ -582,12 +588,21 @@
   .left-col {
     display: flex;
     flex-direction: column;
-    gap: 1.5rem;
+    gap: 1rem;
     min-width: 0;
+    min-height: 0;
   }
 
+  /* The graph takes the height the bars leave over, but never less than 160px. */
   .graph-container {
-    height: 18rem;
+    flex: 1 1 0;
+    min-height: 160px;
+  }
+
+  /* Let the canvases shrink with their panel instead of keeping their own 18rem floor. */
+  .bars-container :global(.pedal-bars-container),
+  .graph-container :global(.pedal-graph-container) {
+    min-height: 0;
   }
 
   .error-message {

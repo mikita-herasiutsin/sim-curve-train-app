@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import { scrollIntoViewSoon } from "$lib/scroll";
   import type { DeviceStream } from "$lib/stream";
   import {
     WIZARD_STEPS,
@@ -45,11 +46,14 @@
 
   // Assignments from before "Detect pedals", restored on Cancel (the saved profile stays as is).
   let beforeWizard: Assignments = {};
+  let sectionEl = $state<HTMLElement | null>(null);
 
   function start() {
     beforeWizard = assignments;
     assignments = {};
     beginStep(0);
+    // Bring the instructions and the axis bars below them into view.
+    void scrollIntoViewSoon(() => sectionEl?.parentElement);
   }
 
   function beginStep(index: number) {
@@ -139,7 +143,7 @@
   onDestroy(stopTimer);
 </script>
 
-<section class="wizard" aria-label="Pedal setup">
+<section class="wizard" aria-label="Pedal setup" bind:this={sectionEl}>
   {#if step}
     <p class="prompt" aria-live="polite">
       Press <strong>{step.pedal}</strong> fully and release.

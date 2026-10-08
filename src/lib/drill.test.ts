@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { applyDrillEvent, IDLE_VIEW, type SetSummary } from "./drill";
+import { applyDrillEvent, IDLE_VIEW, type SetSummary, type TraceScore } from "./drill";
+
+function traceScore(total: number, grade: string): TraceScore {
+  return {
+    kind: "trace",
+    total,
+    grade,
+    accuracy: 0,
+    timing: 0,
+    smoothness: 0,
+    lagMs: 0,
+    timeInBand: 0,
+    rmse: 0,
+    overshoot: 0,
+    ldljUser: 0,
+    ldljTarget: 0,
+  };
+}
 
 const summary: SetSummary = {
   repTotals: [80],
@@ -22,7 +39,7 @@ describe("applyDrillEvent", () => {
   });
 
   it("keeps the rep score through the rest countdown and clears it when the next rep starts", () => {
-    const score = { kind: "trace", total: 90, grade: "A", rmse: 0 } as const;
+    const score = traceScore(90, "A");
     let view = applyDrillEvent(IDLE_VIEW, { event: "repStarted", rep: 0, startUs: 0 });
     view = applyDrillEvent(view, { event: "repScored", rep: 0, score });
     view = applyDrillEvent(view, {
@@ -45,6 +62,25 @@ describe("applyDrillEvent", () => {
   it("marks a failed rep as scored without a score", () => {
     const view = applyDrillEvent(IDLE_VIEW, { event: "repFailed", rep: 1 });
     expect(view).toMatchObject({ runState: "scored", currentRep: 1, lastScore: null });
+  });
+
+  it("lists every rep by its own number, failed ones included", () => {
+    let view = applyDrillEvent(IDLE_VIEW, {
+      event: "repScored",
+      rep: 0,
+      score: traceScore(90, "A"),
+    });
+    view = applyDrillEvent(view, { event: "repFailed", rep: 1 });
+    view = applyDrillEvent(view, {
+      event: "repScored",
+      rep: 2,
+      score: traceScore(70, "C"),
+    });
+    expect(view.reps).toEqual([
+      { rep: 0, total: 90 },
+      { rep: 1, total: null },
+      { rep: 2, total: 70 },
+    ]);
   });
 
   it("finishes with a summary", () => {

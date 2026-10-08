@@ -7,9 +7,10 @@
     startDrillRun,
     abortDrillRun,
     applyDrillEvent,
+    playableDrills,
     IDLE_VIEW,
     type Preset,
-    type Drill,
+    type HoldDrill,
     type DrillEvent,
     type RunView,
   } from "$lib/drill";
@@ -21,7 +22,8 @@
 
   let presets = $state<Preset[]>([]);
   let selectedPreset = $state<Preset | null>(null);
-  let selectedDrill = $state<Drill | null>(null);
+  let selectedDrill = $state<HoldDrill | null>(null);
+  let presetsError = $state<string | null>(null);
 
   let sourceStatus = $state<SourceStatus>({ kind: "connecting" });
   let stopSource: (() => void) | null = null;
@@ -43,7 +45,8 @@
         }
       : null,
   );
-  // Bumped on every start and abort, so events of a run the user left are ignored.
+  // Bumped on every start and whenever a run is given up, so late events of a replaced or
+  // dead run are ignored. An aborted run keeps its id: its final `setFinished` ends the set.
   let runId = 0;
 
   let rafId: number | null = null;
@@ -52,13 +55,19 @@
     if (isTauri()) {
       listPresets()
         .then((p) => {
-          presets = p;
-          if (p.length > 0) {
-            selectedPreset = p[0];
-            selectedDrill = p[0].drills[0] ?? null;
+          // Only presets with something this screen can run are offered.
+          presets = p.filter((preset) => playableDrills(preset).length > 0);
+          if (presets.length > 0) {
+            selectedPreset = presets[0];
+            selectedDrill = playableDrills(presets[0])[0] ?? null;
+          } else {
+            presetsError = "No playable drills found.";
           }
         })
-        .catch((e) => console.error("Failed to load presets", e));
+        .catch((e) => {
+          console.error("Failed to load presets", e);
+          presetsError = `Failed to load drills: ${e}`;
+        });
 
       stopSource = startRealSource(pedalStream, (s) => {
         sourceStatus = s;
@@ -99,6 +108,7 @@
     startDrillRun(sourceStatus.token, selectedPreset.id, selectedDrill.id, onEvent).catch((e) => {
       if (id !== runId) return;
       console.error(e);
+      runId++;
       view = { ...IDLE_VIEW };
       errorMessage = `Failed to start drill: ${e}`;
     });
@@ -109,6 +119,8 @@
 
   function abort() {
     if (sourceStatus.kind !== "live") {
+      // No stream to ask for a final event, so give the run up here.
+      runId++;
       view = { ...IDLE_VIEW };
       return;
     }
@@ -149,12 +161,19 @@
           <p class="error-message" role="alert">{errorMessage}</p>
         {/if}
 
+        {#if presetsError}
+          <p class="error-message" role="alert">{presetsError}</p>
+        {/if}
+
         <div class="picker-controls">
           <label>
             Preset:
             <select
               bind:value={selectedPreset}
-              onchange={() => (selectedDrill = selectedPreset?.drills[0] ?? null)}
+              onchange={() =>
+                (selectedDrill = selectedPreset
+                  ? (playableDrills(selectedPreset)[0] ?? null)
+                  : null)}
             >
               {#each presets as p (p.id)}
                 <option value={p}>{p.name}</option>
@@ -166,13 +185,14 @@
             <label>
               Drill:
               <select bind:value={selectedDrill}>
-                {#each selectedPreset.drills as d (d.id)}
+                {#each playableDrills(selectedPreset) as d (d.id)}
                   <option value={d}>{d.name} ({d.reps} reps)</option>
                 {/each}
               </select>
             </label>
           {/if}
         </div>
+        <p class="note">Trace drills arrive with SCT-034.</p>
 
         {#if selectedDrill}
           <div class="drill-info">
@@ -286,8 +306,10 @@
               </div>
               <h4>All Reps:</h4>
               <div class="rep-totals">
-                {#each view.summary.repTotals as t, i (i)}
-                  <span class="rep-pill">#{i + 1}: {Math.round(t)}</span>
+                {#each view.reps as r (r.rep)}
+                  <span class="rep-pill"
+                    >#{r.rep + 1}: {r.total === null ? "failed" : Math.round(r.total)}</span
+                  >
                 {/each}
               </div>
             </div>
@@ -603,6 +625,12 @@
   .bars-container :global(.pedal-bars-container),
   .graph-container :global(.pedal-graph-container) {
     min-height: 0;
+  }
+
+  .note {
+    margin: 0 0 1rem 0;
+    color: var(--text-muted);
+    font-size: 0.8125rem;
   }
 
   .error-message {

@@ -77,11 +77,26 @@ enum Command {
 const DRILL_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A drill running on the input thread.
+///
+/// Dropping it ends the UI's run: unless the engine already sent its own `SetFinished`, the
+/// drop sends one with the summary of the reps scored so far. That covers every way a stream
+/// can end, panics and unwinding included.
 struct ActiveDrill {
     run: DrillRun,
     channel: Channel<DrillEvent>,
     /// Profile copied when the drill started, so the per-sample path takes no lock.
     profile: DeviceProfile,
+    /// The UI already got the terminal `SetFinished`.
+    finished: bool,
+}
+
+impl Drop for ActiveDrill {
+    fn drop(&mut self) {
+        if !self.finished {
+            let summary = self.run.abort();
+            let _ = self.channel.send(DrillEvent::SetFinished { summary });
+        }
+    }
 }
 
 /// The stream the UI last asked for, shared with the input thread.
@@ -368,12 +383,9 @@ impl Stream {
         }
     }
 
-    /// Ends the running drill, if any, telling the UI with a final `SetFinished`.
+    /// Ends the running drill, if any. Dropping it tells the UI with a final `SetFinished`.
     fn finish_drill(&mut self) {
-        if let Some(mut drill) = self.active_drill.take() {
-            let summary = drill.run.abort();
-            let _ = drill.channel.send(DrillEvent::SetFinished { summary });
-        }
+        self.active_drill = None;
     }
 
     /// Feeds one sample to the running drill and forwards its events.
@@ -386,7 +398,9 @@ impl Stream {
         for event in drill.run.push(ValueSample::new(sample.t_us, value)) {
             let _ = drill.channel.send(event);
         }
-        if matches!(drill.run.phase(), Phase::Finished | Phase::Aborted) {
+        if matches!(drill.run.phase(), Phase::Finished) {
+            // The engine sent `SetFinished` itself.
+            drill.finished = true;
             self.active_drill = None;
         }
     }
@@ -408,30 +422,47 @@ fn pedal_value(frame: &PedalFrame, pedal: Pedal) -> f32 {
     }
 }
 
-/// Starts a drill on `stream`, replacing a running one. Errors go back to the caller.
+/// Why a drill can't start on `stream` with `profile`, if it can't.
+fn check_start(
+    stream: Option<&mut Stream>,
+    profile: Option<DeviceProfile>,
+    pedal: Pedal,
+) -> Result<(&mut Stream, DeviceProfile), String> {
+    let stream = stream.ok_or("no active pedal stream; connect the pedals first")?;
+    let profile = profile.ok_or("the device has no saved profile; calibrate it first")?;
+    if profile.get(pedal).is_none() {
+        let name = format!("{pedal:?}").to_lowercase();
+        return Err(format!(
+            "the {name} pedal isn't assigned; set it up on the Devices page"
+        ));
+    }
+    Ok((stream, profile))
+}
+
+/// Starts `drill` on `stream`, replacing a running one, and answers on `reply`.
+///
+/// The answer goes out before any event. If nobody is waiting for it any more (the caller
+/// timed out), the drill is not installed and no event is sent.
 fn start_drill(
     stream: Option<&mut Stream>,
-    service: &InputService,
-    epoch: Instant,
-    token: u64,
+    profile: Option<DeviceProfile>,
+    t_us: u64,
     drill: Drill,
     channel: Channel<DrillEvent>,
-) -> Result<(), String> {
-    let stream = stream
-        .filter(|s| s.token == token)
-        .ok_or("no active pedal stream; connect the pedals first")?;
-    let profile = {
-        let active = lock(&service.active);
-        if active.token == token {
-            active.profile.clone()
-        } else {
-            None
+    reply: &Sender<Result<(), String>>,
+) {
+    let (stream, profile) = match check_start(stream, profile, drill.pedal) {
+        Ok(checked) => checked,
+        Err(error) => {
+            let _ = reply.send(Err(error));
+            return;
         }
+    };
+    if reply.send(Ok(())).is_err() {
+        return;
     }
-    .ok_or("the device has no saved profile; calibrate it first")?;
     stream.finish_drill();
     let mut run = DrillRun::new(drill, sct_core::drill_engine::DEFAULT_REST_MS);
-    let t_us = u64::try_from(epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
     for event in run.start(t_us) {
         let _ = channel.send(event);
     }
@@ -439,8 +470,18 @@ fn start_drill(
         run,
         channel,
         profile,
+        finished: false,
     });
-    Ok(())
+}
+
+/// The profile of the stream started with `token`, if it is still the active one.
+fn stream_profile(service: &InputService, token: u64) -> Option<DeviceProfile> {
+    let active = lock(&service.active);
+    if active.token == token {
+        active.profile.clone()
+    } else {
+        None
+    }
 }
 
 /// Handles all queued commands. Returns `false` once the service is gone.
@@ -476,8 +517,15 @@ fn drain_commands(
                 channel,
                 reply,
             }) => {
-                let result = start_drill(stream.as_mut(), service, epoch, token, drill, channel);
-                let _ = reply.send(result);
+                let t_us = u64::try_from(epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
+                start_drill(
+                    stream.as_mut().filter(|s| s.token == token),
+                    stream_profile(service, token),
+                    t_us,
+                    drill,
+                    channel,
+                    &reply,
+                );
             }
             Ok(Command::AbortDrill { token }) => {
                 if let Some(active) = stream.as_mut().filter(|s| s.token == token) {
@@ -725,4 +773,168 @@ fn snapshot_of(open: &HashMap<u32, Joystick>) -> DevicesSnapshot {
 
 fn key_of(device: &DeviceInfo) -> DeviceKey {
     DeviceKey::new(device.guid.clone(), device.axis_count, device.button_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sct_core::calibration::AxisCalibration;
+    use sct_core::preset::DrillKind;
+    use sct_core::profile::PedalAxis;
+    use tauri::ipc::InvokeResponseBody;
+
+    type Log = Arc<Mutex<Vec<String>>>;
+
+    fn event_channel() -> (Channel<DrillEvent>, Log) {
+        let log: Log = Arc::default();
+        let sink = Arc::clone(&log);
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(json) = body {
+                sink.lock().unwrap().push(json);
+            }
+            Ok(())
+        });
+        (channel, log)
+    }
+
+    fn finished_count(log: &Log) -> usize {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.contains("setFinished"))
+            .count()
+    }
+
+    fn stream() -> Stream {
+        Stream::new(1, 1, Channel::new(|_| Ok(())))
+    }
+
+    fn brake_profile() -> DeviceProfile {
+        let mut profile = DeviceProfile::default();
+        profile.set(
+            Pedal::Brake,
+            Some(PedalAxis {
+                axis: 0,
+                calibration: AxisCalibration::default(),
+            }),
+        );
+        profile
+    }
+
+    fn drill(pedal: Pedal) -> Drill {
+        Drill {
+            id: "d".into(),
+            name: "D".into(),
+            pedal,
+            reps: 2,
+            lead_in_ms: 1000,
+            tolerance: 5.0,
+            kind: DrillKind::Hold {
+                target: 70.0,
+                hold_ms: 1000,
+            },
+        }
+    }
+
+    /// Starts a drill and returns its event log and whether the caller got `Ok`.
+    fn start(stream: &mut Stream, pedal: Pedal) -> (Log, Result<(), String>) {
+        let (channel, log) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        start_drill(
+            Some(stream),
+            Some(brake_profile()),
+            0,
+            drill(pedal),
+            channel,
+            &reply,
+        );
+        (log, answer.recv().unwrap())
+    }
+
+    #[test]
+    fn abort_sends_one_terminal_event() {
+        let mut stream = stream();
+        let (log, result) = start(&mut stream, Pedal::Brake);
+        assert_eq!(result, Ok(()));
+        assert!(log.lock().unwrap()[0].contains("countdownStarted"));
+        stream.finish_drill();
+        stream.finish_drill();
+        drop(stream);
+        assert_eq!(finished_count(&log), 1);
+    }
+
+    #[test]
+    fn replacing_start_ends_the_old_drill_once() {
+        let mut stream = stream();
+        let (first, _) = start(&mut stream, Pedal::Brake);
+        let (second, result) = start(&mut stream, Pedal::Brake);
+        assert_eq!(result, Ok(()));
+        assert_eq!(finished_count(&first), 1);
+        assert_eq!(finished_count(&second), 0);
+        drop(stream);
+        assert_eq!(finished_count(&first), 1);
+        assert_eq!(finished_count(&second), 1);
+    }
+
+    #[test]
+    fn end_stream_sends_one_terminal_event() {
+        let mut slot = Some(stream());
+        let (log, _) = start(slot.as_mut().unwrap(), Pedal::Brake);
+        end_stream(&mut slot);
+        assert!(slot.is_none());
+        assert_eq!(finished_count(&log), 1);
+    }
+
+    #[test]
+    fn unmapped_pedal_is_rejected_and_keeps_the_running_drill() {
+        let mut stream = stream();
+        let (running, _) = start(&mut stream, Pedal::Brake);
+        let (rejected, result) = start(&mut stream, Pedal::Throttle);
+        assert_eq!(
+            result,
+            Err("the throttle pedal isn't assigned; set it up on the Devices page".to_owned())
+        );
+        assert!(rejected.lock().unwrap().is_empty());
+        assert_eq!(finished_count(&running), 0);
+    }
+
+    #[test]
+    fn missing_stream_or_profile_is_an_error() {
+        let (channel, log) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        start_drill(None, None, 0, drill(Pedal::Brake), channel, &reply);
+        assert!(answer.recv().unwrap().is_err());
+
+        let mut stream = stream();
+        let (channel, _) = event_channel();
+        start_drill(
+            Some(&mut stream),
+            None,
+            0,
+            drill(Pedal::Brake),
+            channel,
+            &reply,
+        );
+        assert!(answer.recv().unwrap().is_err());
+        assert!(log.lock().unwrap().is_empty());
+        assert!(stream.active_drill.is_none());
+    }
+
+    #[test]
+    fn caller_that_gave_up_gets_no_drill_and_no_events() {
+        let mut stream = stream();
+        let (channel, log) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        drop(answer);
+        start_drill(
+            Some(&mut stream),
+            Some(brake_profile()),
+            0,
+            drill(Pedal::Brake),
+            channel,
+            &reply,
+        );
+        assert!(stream.active_drill.is_none());
+        assert!(log.lock().unwrap().is_empty());
+    }
 }

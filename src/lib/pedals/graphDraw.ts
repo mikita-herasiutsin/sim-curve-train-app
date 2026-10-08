@@ -1,3 +1,4 @@
+import { bandColor } from "./barsDraw";
 import { getGraphX, getGraphY } from "./geometry";
 import type { AppThemeColors } from "./theme";
 
@@ -188,7 +189,7 @@ export interface TargetBand {
   tolerance: number;
 }
 
-/** Shades the target band across the whole graph, in the pedal's colour. */
+/** Shades the target band across the whole graph: green while the pedal is inside it, red outside. */
 export function drawTargetBand(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -197,6 +198,7 @@ export function drawTargetBand(
   theme: AppThemeColors,
   paddingTop: number,
   paddingBottom: number,
+  inBand: boolean,
 ): void {
   const top = getGraphY(
     Math.min(1, band.target + band.tolerance),
@@ -210,7 +212,7 @@ export function drawTargetBand(
     paddingTop,
     paddingBottom,
   );
-  ctx.fillStyle = (band.pedal === "brake" ? theme.brake : theme.throttle) + "30";
+  ctx.fillStyle = bandColor(inBand, theme);
   ctx.fillRect(0, top, width, bottom - top);
 }
 
@@ -229,6 +231,8 @@ export function drawGraph(
   paddingBottom = 26,
   dpr = 1,
   band: TargetBand | null = null,
+  /** Whether the latest value of the band's pedal is inside the band. */
+  bandInBand = false,
 ): void {
   // Clear canvas
   ctx.clearRect(0, 0, width, height);
@@ -279,7 +283,7 @@ export function drawGraph(
   }
   ctx.setLineDash([]);
 
-  if (band) drawTargetBand(ctx, width, height, band, theme, paddingTop, paddingBottom);
+  if (band) drawTargetBand(ctx, width, height, band, theme, paddingTop, paddingBottom, bandInBand);
 
   // Draw Brake line
   const brakeSegments = buildSignalSegments(

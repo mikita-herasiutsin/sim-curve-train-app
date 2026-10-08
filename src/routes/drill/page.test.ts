@@ -42,10 +42,12 @@ interface Channelish {
 describe("Drill page", () => {
   let startError: string | null = null;
   let drillChannel: Channelish | null = null;
+  let aborts = 0;
 
   beforeEach(() => {
     startError = null;
     drillChannel = null;
+    aborts = 0;
     (globalThis as { isTauri?: boolean }).isTauri = true;
     globalThis.ResizeObserver = class {
       observe() {}
@@ -66,7 +68,9 @@ describe("Drill page", () => {
           case "start_stream":
             return 7;
           case "stop_stream":
+            return null;
           case "abort_drill_run":
+            aborts++;
             return null;
           case "start_drill_run":
             drillChannel = (args as { onEvent: Channelish }).onEvent;
@@ -137,5 +141,78 @@ describe("Drill page", () => {
     expect(card).toHaveTextContent("Average: 80 (B)");
     expect(card).toHaveTextContent("Consistency: 88%");
     expect(card).not.toHaveTextContent("NaN");
+  });
+
+  // Field names and shapes exactly as sct_core::scoring::HoldScore serializes them.
+  const holdScore = {
+    kind: "hold",
+    total: 82.4,
+    grade: "B",
+    accuracy: 91.2,
+    timing: 70.1,
+    smoothness: 88.8,
+    timeInBand: 0.83,
+    rmse: 0.041,
+    timeToBandMs: null,
+    overshoot: 0.02,
+    jitter: 0.013,
+  };
+
+  it("shows the rep result card for a real hold score", async () => {
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
+    const card = (await screen.findByText("Rep Result")).closest("div")!;
+    expect(card).toHaveTextContent("82");
+    expect(card).toHaveTextContent("B");
+    expect(card).toHaveTextContent("Accuracy: 91");
+    expect(card).toHaveTextContent("RMSE: 0.041");
+    expect(card).not.toHaveTextContent("NaN");
+  });
+
+  it("keeps the aborted set's summary and lists failed reps", async () => {
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
+    drillChannel!.onmessage({ event: "repFailed", rep: 1 });
+    await fireEvent.click(await screen.findByRole("button", { name: "Abort Set" }));
+    await waitFor(() => expect(aborts).toBe(1));
+    // The engine answers an abort with the final event.
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [82.4],
+        best: 82.4,
+        average: 82.4,
+        grade: "B",
+        consistency: null,
+        stdDev: 0,
+      },
+    });
+    expect(await screen.findByText("Set Finished!")).toBeInTheDocument();
+    const card = screen.getByText("Set Summary").closest("div")!;
+    expect(card).toHaveTextContent("Best: 82");
+    expect(card).toHaveTextContent("#1: 82");
+    expect(card).toHaveTextContent("#2: failed");
+  });
+
+  it("ignores events of a run that Play Again replaced", async () => {
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    const oldChannel = drillChannel!;
+    oldChannel.onmessage({ event: "setFinished", summary: null });
+    drillChannel = null;
+    await fireEvent.click(await screen.findByRole("button", { name: "Play Again" }));
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    expect(drillChannel).not.toBe(oldChannel);
+
+    oldChannel.onmessage({ event: "repScored", rep: 0, score: holdScore });
+    oldChannel.onmessage({ event: "setFinished", summary: null });
+    expect(screen.queryByText("Rep Result")).not.toBeInTheDocument();
+    expect(screen.queryByText("Set Finished!")).not.toBeInTheDocument();
+    expect(screen.getByText("COUNTDOWN")).toBeInTheDocument();
   });
 });

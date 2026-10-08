@@ -236,7 +236,8 @@ fn load_presets(app: &tauri::AppHandle) -> Result<Vec<Preset>, String> {
 }
 
 /// Lists all bundled drill presets.
-#[tauri::command]
+/// `async` so the file reads run off the main thread.
+#[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri injects command arguments by value"
@@ -248,7 +249,8 @@ fn list_presets(app: tauri::AppHandle) -> Result<Vec<Preset>, String> {
 /// Starts a drill run for a bundled drill, feeding samples from the active stream.
 ///
 /// The drill is looked up on the Rust side; the webview only names it.
-#[tauri::command]
+/// `async` so it can wait for the input thread without blocking the main thread.
+#[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri injects command arguments by value"

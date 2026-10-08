@@ -28,7 +28,7 @@ Every drill shares a set of common fields, plus specific fields determined by th
 | `pedal` | string | Required | `"throttle"`, `"brake"`, `"clutch"` | Target pedal hardware axis to monitor. |
 | `reps` | integer | Optional (default: `5`) | `1` to `50` | Number of repetitions to complete the drill. |
 | `leadInMs` | integer | Optional (default: `3000`) | `0` to `10000` | Lead-in preparation countdown before each repetition in milliseconds. |
-| `tolerance` | number | Required | `0.5` to `50.0` | Half-width of the tolerance band in percentage points: `5` means the target ±5%. |
+| `tolerance` | number | Optional (default: `10`, D-17) | `0.5` to `50.0` | Half-width of the tolerance band in percentage points: `5` means the target ±5%. |
 
 ### Hold Drill Fields (`"type": "hold"`)
 

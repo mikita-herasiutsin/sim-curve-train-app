@@ -1253,4 +1253,11 @@ mod tests {
             "drill 'nope' not found in preset 'p'"
         );
     }
+
+    #[test]
+    fn tolerance_defaults_to_ten_when_omitted() {
+        let json = r#"{"schemaVersion":1,"id":"p","name":"P","drills":[{"id":"d","name":"D","type":"hold","pedal":"brake","target":70,"holdMs":2000}]}"#;
+        let preset = parse_preset(json).unwrap();
+        assert!((preset.drills[0].tolerance - 10.0).abs() < f32::EPSILON);
+    }
 }

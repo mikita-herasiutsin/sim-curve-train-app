@@ -165,18 +165,7 @@ describe("graphDraw pure math and decimation", () => {
       expect(mockCtx.stroke).toHaveBeenCalled();
     });
 
-    it("shades the target band only when one is given", () => {
-      const fillRect = vi.fn();
-      const ctx = {
-        clearRect: vi.fn(),
-        fillRect,
-        beginPath: vi.fn(),
-        moveTo: vi.fn(),
-        lineTo: vi.fn(),
-        stroke: vi.fn(),
-        fillText: vi.fn(),
-        setLineDash: vi.fn(),
-      } as unknown as CanvasRenderingContext2D;
+    describe("target band", () => {
       const theme: AppThemeColors = {
         bg: "#000",
         surface: "#111",
@@ -188,22 +177,59 @@ describe("graphDraw pure math and decimation", () => {
         throttle: "#00f000",
         accent: "#0000f0",
       };
-      const decimator = new ColumnDecimator(50);
-      decimator.reset();
+      const band = { pedal: "brake", target: 0.5, tolerance: 0.1 } as const;
 
-      drawGraph(ctx, 100, 100, decimator, 2_000_000, 2_000_000, theme);
-      const withoutBand = fillRect.mock.calls.length;
+      function draw(withBand: boolean, inBand: boolean) {
+        const fills: { style: string; rect: number[] }[] = [];
+        const ctx = {
+          fillStyle: "",
+          clearRect: vi.fn(),
+          fillRect: vi.fn(function (this: { fillStyle: string }, ...rect: number[]) {
+            fills.push({ style: this.fillStyle, rect });
+          }),
+          beginPath: vi.fn(),
+          moveTo: vi.fn(),
+          lineTo: vi.fn(),
+          stroke: vi.fn(),
+          fillText: vi.fn(),
+          setLineDash: vi.fn(),
+        } as unknown as CanvasRenderingContext2D;
+        const decimator = new ColumnDecimator(50);
+        decimator.reset();
+        drawGraph(
+          ctx,
+          100,
+          100,
+          decimator,
+          2_000_000,
+          2_000_000,
+          theme,
+          18,
+          26,
+          1,
+          withBand ? band : null,
+          inBand,
+        );
+        return fills;
+      }
 
-      drawGraph(ctx, 100, 100, decimator, 2_000_000, 2_000_000, theme, 18, 26, 1, {
-        pedal: "brake",
-        target: 0.5,
-        tolerance: 0.1,
+      it("draws nothing extra without a band", () => {
+        expect(draw(false, true)).toHaveLength(1);
       });
-      expect(fillRect.mock.calls.length - withoutBand).toBe(withoutBand + 1);
-      const [x, y, w, h] = fillRect.mock.calls[fillRect.mock.calls.length - 1];
-      expect([x, w]).toEqual([0, 100]);
-      expect(y).toBeGreaterThan(0);
-      expect(h).toBeGreaterThan(0);
+
+      it("is green while the value is inside the band", () => {
+        const fills = draw(true, true);
+        expect(fills).toHaveLength(2);
+        expect(fills[1].style).toBe("#00f00050");
+        const [x, y, w, h] = fills[1].rect;
+        expect([x, w]).toEqual([0, 100]);
+        expect(y).toBeGreaterThan(0);
+        expect(h).toBeGreaterThan(0);
+      });
+
+      it("is red while the value is outside the band", () => {
+        expect(draw(true, false)[1].style).toBe("#f0000050");
+      });
     });
   });
 });

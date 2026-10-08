@@ -22,6 +22,18 @@ export interface TraceDrill extends BaseDrill {
 
 export type Drill = HoldDrill | TraceDrill;
 
+/**
+ * Whether the drill screen can run it. Trace drills arrive with SCT-034; the engine already
+ * runs them, but the screen can't show their target curve yet. Clutch has no bar.
+ */
+export function isPlayable(drill: Drill): drill is HoldDrill {
+  return drill.type === "hold" && drill.pedal !== "clutch";
+}
+
+export function playableDrills(preset: Preset): HoldDrill[] {
+  return preset.drills.filter(isPlayable);
+}
+
 export interface Preset {
   schemaVersion: number;
   id: string;
@@ -44,11 +56,20 @@ export interface HoldScore {
   jitter: number;
 }
 
+// Mirrors sct_core::trace_scoring::TraceScore (camelCase).
 export interface TraceScore {
   kind: "trace";
   total: number;
   grade: string;
+  accuracy: number;
+  timing: number;
+  smoothness: number;
+  lagMs: number;
+  timeInBand: number;
   rmse: number;
+  overshoot: number;
+  ldljUser: number;
+  ldljTarget: number;
 }
 
 export type RepScore = HoldScore | TraceScore;
@@ -92,6 +113,12 @@ export async function abortDrillRun(token: number): Promise<void> {
 
 export type RunState = "idle" | "countdown" | "active" | "scored" | "finished";
 
+/** The outcome of one rep, numbered like the engine's `rep` (zero-based). `total` is null for a failed rep. */
+export interface RepResult {
+  rep: number;
+  total: number | null;
+}
+
 /** What the drill screen shows for a run, advanced by [`applyDrillEvent`]. */
 export interface RunView {
   runState: RunState;
@@ -100,6 +127,8 @@ export interface RunView {
   lastScore: RepScore | null;
   /** Set summary; `null` after a finished set means no rep was scored. */
   summary: SetSummary | null;
+  /** Every rep that ended, failed ones included. */
+  reps: RepResult[];
 }
 
 export const IDLE_VIEW: RunView = {
@@ -108,7 +137,12 @@ export const IDLE_VIEW: RunView = {
   countdownEndsUs: 0,
   lastScore: null,
   summary: null,
+  reps: [],
 };
+
+function withRep(reps: RepResult[], result: RepResult): RepResult[] {
+  return [...reps.filter((r) => r.rep !== result.rep), result].sort((a, b) => a.rep - b.rep);
+}
 
 /**
  * Advances the view by one engine event. A rep's score stays visible through the rest
@@ -127,9 +161,21 @@ export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
     case "repStarted":
       return { ...view, runState: "active", currentRep: e.rep, lastScore: null };
     case "repScored":
-      return { ...view, runState: "scored", currentRep: e.rep, lastScore: e.score };
+      return {
+        ...view,
+        runState: "scored",
+        currentRep: e.rep,
+        lastScore: e.score,
+        reps: withRep(view.reps, { rep: e.rep, total: e.score.total }),
+      };
     case "repFailed":
-      return { ...view, runState: "scored", currentRep: e.rep, lastScore: null };
+      return {
+        ...view,
+        runState: "scored",
+        currentRep: e.rep,
+        lastScore: null,
+        reps: withRep(view.reps, { rep: e.rep, total: null }),
+      };
     case "setFinished":
       return { ...view, runState: "finished", summary: e.summary };
   }

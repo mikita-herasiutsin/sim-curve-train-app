@@ -64,7 +64,7 @@ pub struct Drill {
     #[serde(default = "default_lead_in")]
     pub lead_in_ms: u32,
     /// Permissible error tolerance in percent (`0.5..=50.0`).
-    /// Defaults to 10.0 (D-17) when omitted in JSON.
+    /// `None` (omitted, or an explicit `null`) means unset: the drill uses 10.0 (D-17).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tolerance: Option<f32>,
     /// Drill type and parameters (flattened in JSON).

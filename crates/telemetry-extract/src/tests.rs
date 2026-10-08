@@ -483,7 +483,8 @@ fn test_preset_output_validates_against_sct_core() {
 #[test]
 fn test_corner_grouping_and_options() {
     let n = 200;
-    // Build 3 laps with consistent corner at dist ~0.25, wrap corner at ~0.99/0.01, and noise corner at ~0.60
+    // Build 3 laps with a consistent corner at dist ~0.25 and a noise corner at ~0.60.
+    // Wrap-around is covered by test_wrap_corner_is_one_cluster.
     let mut laps = Vec::new();
     let brake_peaks = [70.0, 85.0, 80.0];
 
@@ -507,15 +508,6 @@ fn test_corner_grouping_and_options() {
             for i in 115..130 {
                 t[i] = 0.0;
                 b[i] = 0.60;
-            }
-        }
-
-        // Wrap corner near lap boundary:
-        // Laps 0 & 1 have corner at dist 0.99 / 0.01 (index 195..200 and index 0..10)
-        if lap_idx < 2 {
-            for i in 195..200 {
-                t[i] = 0.0;
-                b[i] = 0.75;
             }
         }
 
@@ -556,6 +548,11 @@ fn test_corner_grouping_and_options() {
     // Only corner 1 (seen in 3 laps) should be present
     assert_ne!(preset.drills.len(), 0);
     assert!(preset.drills.iter().any(|d| d.id.contains("c01-brake")));
+    assert!(
+        !preset.drills.iter().any(|d| d.name.contains("(60%)")),
+        "noise corner leaked: {:?}",
+        preset.drills.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
 
     // 2. Explicit tolerance should be preserved
     let options_tol = ExtractOptions {
@@ -609,8 +606,11 @@ fn dist(n: usize) -> Vec<f32> {
     (0..n).map(|i| i as f32 / n as f32).collect()
 }
 
+/// A corner straddling the start/finish line, braked just before it in two laps and just after
+/// it in the other two, is one corner. With 4 laps a 2-lap cluster would also survive, so a split
+/// would show up as a fourth corner.
 #[test]
-fn probe_wrap_mean() {
+fn test_wrap_corner_is_one_cluster() {
     let n = 3000;
     let mut laps = vec![];
     for k in 0..4 {
@@ -619,30 +619,25 @@ fn probe_wrap_mean() {
         brake(&mut b, &mut t, 900, 60, 0.60); // A at 0.30
         brake(&mut b, &mut t, 2100, 60, 0.70); // B at 0.70
         if k < 2 {
-            brake(&mut b, &mut t, 2985, 15, 0.90);
+            brake(&mut b, &mut t, 2980, 15, 0.90); // 0.9933, released before the last frame
         } else {
-            brake(&mut b, &mut t, 9, 30, 0.91);
+            brake(&mut b, &mut t, 6, 30, 0.91); // 0.0020
         }
         laps.push(mk(n, b, t, dist(n), k));
     }
     let p = extract_preset_from_laps(&laps, &opts(12)).unwrap();
-    let mut onsets = p
+    let mut corners: Vec<&str> = p
         .drills
         .iter()
-        .filter_map(|d| {
-            let n = d.id.split('-').nth(1)?; // c01, c02
-            Some(n)
-        })
-        .collect::<Vec<_>>();
-    onsets.dedup();
-    assert_eq!(onsets.len(), 3);
-
-    let wrap_drills = p
-        .drills
-        .iter()
-        .filter(|d| d.id.contains("c03"))
-        .collect::<Vec<_>>();
-    assert!(!wrap_drills.is_empty(), "Wrap corner should be C03");
+        .filter_map(|d| d.id.split('-').nth(1))
+        .collect();
+    corners.dedup();
+    assert_eq!(
+        corners,
+        ["c01", "c02", "c03"],
+        "{:?}",
+        p.drills.iter().map(|d| &d.id).collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -957,4 +952,126 @@ fn test_partial_lift_plateau_is_not_duplicated() {
             );
         }
     }
+}
+
+/// A short stab just before a corner's main zone, seen in only some laps, must not pull the main
+/// zone of the other laps into its own cluster.
+#[test]
+fn test_zone_joins_nearest_cluster() {
+    let n = 3000;
+    let mut laps = vec![];
+    for k in 0..4 {
+        let mut b = vec![0.0; n];
+        let mut t = vec![1.0; n];
+        if k < 2 {
+            brake(&mut b, &mut t, 898, 10, 0.50); // stab X at 0.2993
+        }
+        brake(&mut b, &mut t, 925, 60, 0.90); // main zone Y at 0.3083
+        laps.push(mk(n, b, t, dist(n), k));
+    }
+    let p = extract_preset_from_laps(&laps, &opts(12)).unwrap();
+    let names: Vec<&str> = p.drills.iter().map(|d| d.name.as_str()).collect();
+    let count = |s: &str| names.iter().filter(|n| n.ends_with(s)).count();
+    assert_eq!(
+        count("brake (90%)"),
+        1,
+        "main zone must be one corner: {names:?}"
+    );
+    assert_eq!(
+        count("brake (50%)"),
+        1,
+        "stab must keep its own corner: {names:?}"
+    );
+}
+
+/// The budget charges a corner only for the drills it really emits: a throttle-hold dropped as a
+/// duplicate of the lift-hold must not push the next corner down to traces only.
+#[test]
+fn test_budget_counts_emitted_drills_only() {
+    let n = 3000;
+    let mut laps = vec![];
+    for k in 0..2 {
+        let mut b = vec![0.0; n];
+        let mut t = vec![1.0; n];
+        // Held partial lift (priority 60): lift trace, lift-hold, throttle trace.
+        t[600..605].fill(0.7);
+        t[605..665].fill(0.4);
+        for (j, v) in t[665..685].iter_mut().enumerate() {
+            *v = 0.4 + 0.6 * (j as f32 + 1.0) / 20.0;
+        }
+        // Brake plateau (priority 50): brake trace and brake-hold, no throttle exit.
+        brake(&mut b, &mut t, 2100, 60, 0.50);
+        laps.push(mk(n, b, t, dist(n), k));
+    }
+    let full = extract_preset_from_laps(&laps, &opts(12)).unwrap();
+    let ids =
+        |p: &sct_core::preset::Preset| p.drills.iter().map(|d| d.id.clone()).collect::<Vec<_>>();
+    let all = ids(&full);
+    assert!(all.iter().any(|id| id.ends_with("-brake-hold")), "{all:?}");
+    assert!(
+        !all.iter().any(|id| id.ends_with("-throttle-hold")),
+        "{all:?}"
+    );
+
+    let capped = extract_preset_from_laps(&laps, &opts(all.len())).unwrap();
+    assert_eq!(
+        ids(&capped),
+        all,
+        "a budget equal to the full output must keep every drill"
+    );
+}
+
+/// A real lift that recovers a few frames before a lift into braking must survive: the braking
+/// one is dropped before the two could be merged.
+#[test]
+fn test_lift_before_braking_lift_is_kept() {
+    let n = 600;
+    let mut t = vec![1.0_f32; n];
+    let mut b = vec![0.0_f32; n];
+    t[200..260].fill(0.5);
+    t[268..360].fill(0.0);
+    b[280..340].fill(0.8);
+    let zones = detect_lift_zones(&t, &b);
+    assert_eq!(zones.len(), 1, "{zones:?}");
+    assert_eq!(zones[0].onset_idx, 200);
+}
+
+/// Full throttle reached only in the last frames of the trace is not sustained.
+#[test]
+fn test_full_throttle_at_trace_end_is_not_sustained() {
+    let n = 300;
+    let mut t = vec![1.0_f32; n];
+    let mut b = vec![0.0_f32; n];
+    b[100..160].fill(0.8);
+    t[100..160].fill(0.0);
+    for (j, v) in t[160..n - 3].iter_mut().enumerate() {
+        *v = 0.9 * (j as f32 + 1.0) / (n - 163) as f32;
+    }
+    let brakes = detect_brake_zones(&b);
+    assert_eq!(brakes.len(), 1);
+    assert_eq!(
+        detect_throttle_exit_zones(&t, &brakes, &[]),
+        Vec::<crate::zones::ThrottleExitZone>::new()
+    );
+}
+
+#[test]
+fn test_cli_option_values() {
+    let args: Vec<String> = ["--tolerance", "--out", "x"]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let mut i = 0;
+    assert!(
+        crate::option_value(&args, &mut i).is_err(),
+        "a flag is not a value"
+    );
+    i = 1;
+    assert_eq!(crate::option_value(&args, &mut i).as_deref(), Ok("x"));
+    assert_eq!(i, 2);
+
+    assert_eq!(crate::parse_tolerance("7.5"), Ok(7.5));
+    assert!(crate::parse_tolerance("abc").is_err());
+    assert!(crate::parse_tolerance("0.1").is_err());
+    assert!(crate::parse_tolerance("51").is_err());
 }

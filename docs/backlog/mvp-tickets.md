@@ -174,15 +174,15 @@ A home screen shows the preset cards (GT3, NASCAR and Road/MX-5). Opening a card
 - **AC:** presets are loaded from bundled JSON; the last preset used is remembered.
 - **Deps:** SCT-030, SCT-033
 
-### SCT-044 · Dev tool: Telemetry zone extractor 🟨 · M
+### SCT-044 · Dev tool: Telemetry zone extractor ✅ · M
 A Rust workspace binary tool at `crates/telemetry-extract` (re-scoped from Python `.ibt` script to Garage 61 CSV exports; native `.ibt` support deferred as a post-MVP follow-up):
 1. Reads Garage 61 60 Hz CSV exports and parses car/track/lap time metadata.
-2. Finds brake zones (hysteresis thresholds, duration gating, gap merging) and throttle exit zones (from throttle minimum after braking to sustained $\ge 98\%$).
+2. Finds brake zones (hysteresis thresholds, duration gating, gap merging), lift zones, and throttle exit zones (from throttle minimum after braking to sustained $\ge 98\%$).
 3. Normalises coordinates and simplifies curves using RDP into 5–15 points.
 4. Outputs validated draft drill JSON (trace drills and plateau hold drills) via `sct-core` validation.
 5. Computes statistical pedal metrics (`stats` subcommand) per car reporting median and IQR (and JSON).
 
-This is a developer tool only and is not shipped in the app.
+This is a developer tool only and is not shipped in the app. Zones are grouped into corners across laps, and a corner is kept only if it appears in at least half of them. Drills omit `tolerance` unless `--tolerance` is given, so `Drill.tolerance` is now optional and an unset value falls back to 10 (D-17). Usage: `crates/telemetry-extract/README.md`.
 - **AC:**
   - Running `extract` produces valid drill JSON that `sct-core` loads and validates cleanly.
   - Running `stats` outputs compact table and JSON with median and IQR for brake zones and staged throttle exits.

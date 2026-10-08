@@ -44,7 +44,7 @@ Expected Garage 61 filename:
 Garage 61 - <Driver> - <Car> - <Track> - <mm.ss.mmm> - <ID>.csv
 ```
 
-`--car-filter` must equal the car name exactly, case-insensitive. Mixed cars or tracks are rejected unless `--allow-mixed` is used.
+`--car-filter` keeps laps whose car name contains the given text, ignoring case (`--car-filter mx-5` matches "Global Mazda MX-5 Cup"). Mixed cars or tracks are rejected unless `--allow-mixed` is used.
 
 ## Output
 

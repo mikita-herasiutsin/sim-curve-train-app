@@ -48,7 +48,7 @@ ARGUMENTS:
 
 OPTIONS:
     --out <FILE>           Output file path for the generated preset JSON. If omitted, prints to stdout.
-    --car-filter <CAR>     Case-insensitive filter matching car name parsed from filename.
+    --car-filter <CAR>     Keep laps whose car name (from the filename) contains CAR, any case.
     --preset-id <ID>       Unique preset identifier (lowercase alphanumeric and hyphens: [a-z0-9-]+).
     --name, --preset-name <NAME>
                            Human-readable preset name.
@@ -71,7 +71,7 @@ ARGUMENTS:
     <INPUT_PATHS...>       One or more CSV files or directories containing Garage 61 CSV exports.
 
 OPTIONS:
-    --car-filter <CAR>     Case-insensitive filter matching car name parsed from filename.
+    --car-filter <CAR>     Keep laps whose car name (from the filename) contains CAR, any case.
     --json                 Output aggregated statistics as JSON instead of a formatted table.
     --allow-mixed          Accept laps from different cars or tracks in one run.
     -h, --help             Print help information.
@@ -135,19 +135,51 @@ fn load_laps(files: &[PathBuf], car_filter: Option<&str>) -> Vec<LapTelemetry> {
         match crate::csv::read_csv_file(path) {
             Ok(lap) => {
                 if let Some(filter) = car_filter
-                    && !lap.car_name().eq_ignore_ascii_case(filter)
+                    && !lap
+                        .car_name()
+                        .to_lowercase()
+                        .contains(&filter.to_lowercase())
                 {
                     continue;
                 }
                 laps.push(lap);
             }
             Err(e) => {
-                eprintln!("warning: failed to read CSV '{}': {e}", path.display());
+                eprintln!("skipping '{}': {e}", path.display());
             }
         }
     }
 
     laps
+}
+
+/// Takes the value after the option at `args[*i]`, advancing `i` past it.
+fn option_value(args: &[String], i: &mut usize) -> Result<String, String> {
+    let flag = &args[*i];
+    match args.get(*i + 1) {
+        Some(v) if !v.starts_with("--") => {
+            *i += 1;
+            Ok(v.clone())
+        }
+        _ => Err(format!("{flag} needs a value")),
+    }
+}
+
+/// Parses `--tolerance`, checking the same range sct-core validation enforces.
+fn parse_tolerance(v: &str) -> Result<f32, String> {
+    v.parse::<f32>()
+        .ok()
+        .filter(|t| (0.5..=50.0).contains(t))
+        .ok_or_else(|| format!("--tolerance must be a number from 0.5 to 50, got '{v}'"))
+}
+
+/// Records a positional input path; anything else starting with `-` is an unknown option.
+fn positional(arg: &str, inputs: &mut Vec<String>) -> Result<(), String> {
+    if arg.starts_with('-') {
+        return Err(format!("unknown option '{arg}'"));
+    }
+    inputs.push(arg.to_string());
+    Ok(())
 }
 
 fn check_mixed_laps(laps: &[LapTelemetry], allow_mixed: bool) -> Result<(), String> {
@@ -220,63 +252,30 @@ fn handle_extract(args: &[String]) -> ExitCode {
 
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--out" => {
-                if i + 1 < args.len() {
-                    out_path = Some(args[i + 1].clone());
-                    i += 1;
-                }
-            }
-            "--car-filter" => {
-                if i + 1 < args.len() {
-                    car_filter = Some(args[i + 1].clone());
-                    i += 1;
-                }
-            }
-            "--preset-id" => {
-                if i + 1 < args.len() {
-                    preset_id = Some(args[i + 1].clone());
-                    i += 1;
-                }
-            }
-            "--name" | "--preset-name" => {
-                if i + 1 < args.len() {
-                    preset_name = Some(args[i + 1].clone());
-                    i += 1;
-                }
-            }
-            "--tolerance" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<f32>() {
-                        Ok(v) => tolerance = Some(v),
-                        Err(e) => {
-                            eprintln!("warning: invalid --tolerance value '{}': {e}", args[i + 1]);
-                        }
-                    }
-                    i += 1;
-                }
-            }
-            "--max-drills" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<usize>() {
-                        Ok(v) => max_drills = v,
-                        Err(e) => {
-                            eprintln!("warning: invalid --max-drills value '{}': {e}", args[i + 1]);
-                        }
-                    }
-                    i += 1;
-                }
-            }
+        let parsed: Result<(), String> = match args[i].as_str() {
+            "--out" => option_value(args, &mut i).map(|v| out_path = Some(v)),
+            "--car-filter" => option_value(args, &mut i).map(|v| car_filter = Some(v)),
+            "--preset-id" => option_value(args, &mut i).map(|v| preset_id = Some(v)),
+            "--name" | "--preset-name" => option_value(args, &mut i).map(|v| preset_name = Some(v)),
+            "--tolerance" => option_value(args, &mut i)
+                .and_then(|v| parse_tolerance(&v))
+                .map(|v| tolerance = Some(v)),
+            "--max-drills" => option_value(args, &mut i).and_then(|v| {
+                v.parse::<usize>()
+                    .ok()
+                    .filter(|&n| n > 0)
+                    .map(|n| max_drills = n)
+                    .ok_or_else(|| format!("--max-drills must be a positive integer, got '{v}'"))
+            }),
             "--allow-mixed" => {
                 allow_mixed = true;
+                Ok(())
             }
-            other => {
-                if other.starts_with('-') {
-                    eprintln!("warning: unknown option '{other}'");
-                } else {
-                    inputs.push(other.to_string());
-                }
-            }
+            other => positional(other, &mut inputs),
+        };
+        if let Err(e) = parsed {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
         }
         i += 1;
     }
@@ -294,7 +293,11 @@ fn handle_extract(args: &[String]) -> ExitCode {
 
     let laps = load_laps(&files, car_filter.as_deref());
     if laps.is_empty() {
-        eprintln!("error: no matching laps loaded after filtering.");
+        if let Some(filter) = &car_filter {
+            eprintln!("error: no readable laps match --car-filter '{filter}'.");
+        } else {
+            eprintln!("error: none of the CSV files could be read.");
+        }
         return ExitCode::FAILURE;
     }
 
@@ -327,26 +330,21 @@ fn handle_stats(args: &[String]) -> ExitCode {
 
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
-            "--car-filter" => {
-                if i + 1 < args.len() {
-                    car_filter = Some(args[i + 1].clone());
-                    i += 1;
-                }
-            }
+        let parsed: Result<(), String> = match args[i].as_str() {
+            "--car-filter" => option_value(args, &mut i).map(|v| car_filter = Some(v)),
             "--json" => {
                 json_output = true;
+                Ok(())
             }
             "--allow-mixed" => {
                 allow_mixed = true;
+                Ok(())
             }
-            other => {
-                if other.starts_with('-') {
-                    eprintln!("warning: unknown option '{other}'");
-                } else {
-                    inputs.push(other.to_string());
-                }
-            }
+            other => positional(other, &mut inputs),
+        };
+        if let Err(e) = parsed {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
         }
         i += 1;
     }
@@ -364,7 +362,11 @@ fn handle_stats(args: &[String]) -> ExitCode {
 
     let laps = load_laps(&files, car_filter.as_deref());
     if laps.is_empty() {
-        eprintln!("error: no matching laps loaded after filtering.");
+        if let Some(filter) = &car_filter {
+            eprintln!("error: no readable laps match --car-filter '{filter}'.");
+        } else {
+            eprintln!("error: none of the CSV files could be read.");
+        }
         return ExitCode::FAILURE;
     }
 

@@ -57,7 +57,7 @@ impl fmt::Display for CsvError {
                 filename,
             } => write!(
                 f,
-                "warning: '{filename}': row duration ({row_duration_s:.3}s at 60 Hz) differs from filename lap time ({meta_lap_time_s:.3}s) by > 2%"
+                "'{filename}': row duration ({row_duration_s:.3}s at 60 Hz) differs from filename lap time ({meta_lap_time_s:.3}s) by > 2%"
             ),
         }
     }
@@ -250,6 +250,8 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
     let mut last_t = 0.0;
     let mut last_s = 0.0;
     let mut last_d = -1.0;
+    // Short rows still take a 60 Hz slot, forward-filled, so the timeline does not shift.
+    let mut short_rows = 0usize;
 
     for line_res in lines {
         let line = line_res?;
@@ -258,7 +260,7 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
         }
         let cols: Vec<&str> = line.split(',').collect();
         if cols.len() <= brake_idx || cols.len() <= throttle_idx {
-            continue;
+            short_rows += 1;
         }
 
         let parse_cell = |s: &str| -> Option<f32> {
@@ -270,10 +272,14 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
             }
         };
 
-        let b = parse_cell(cols[brake_idx])
+        let b = cols
+            .get(brake_idx)
+            .and_then(|&c| parse_cell(c))
             .unwrap_or(last_b)
             .clamp(0.0, 1.0);
-        let t = parse_cell(cols[throttle_idx])
+        let t = cols
+            .get(throttle_idx)
+            .and_then(|&c| parse_cell(c))
             .unwrap_or(last_t)
             .clamp(0.0, 1.0);
         let s = speed_idx
@@ -294,6 +300,13 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
         throttle.push(t);
         speed.push(s);
         lap_dist_pct.push(if d >= 0.0 { d.clamp(0.0, 1.0) } else { -1.0 });
+    }
+
+    if short_rows > 0 {
+        eprintln!(
+            "note: '{}': {short_rows} short row(s) filled from the previous sample",
+            path.display()
+        );
     }
 
     let total_rows = brake.len();
@@ -331,7 +344,6 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
                     meta_lap_time_s: meta.lap_time_s,
                     filename,
                 };
-                eprintln!("{err}");
                 return Err(err);
             }
         }

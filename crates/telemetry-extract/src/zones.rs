@@ -219,6 +219,15 @@ pub fn detect_lift_zones(throttles: &[f32], brakes: &[f32]) -> Vec<LiftZone> {
         raw_intervals.push((onset, min_idx, throttles.len().saturating_sub(1), min_val));
     }
 
+    // Drop lifts into braking before merging, so a real lift just before one is not merged
+    // into it and thrown out with it.
+    raw_intervals.retain(|&(start, _, end, _)| {
+        let b_end = (end + 1).min(brakes.len());
+        brakes[start.min(b_end)..b_end]
+            .iter()
+            .all(|&b| b < BRAKE_ONSET_THRESHOLD)
+    });
+
     if raw_intervals.is_empty() {
         return Vec::new();
     }
@@ -263,18 +272,6 @@ pub fn detect_lift_zones(throttles: &[f32], brakes: &[f32]) -> Vec<LiftZone> {
             continue;
         }
 
-        // Exclude if driver braked during this interval
-        if !brakes.is_empty() {
-            let b_end = (end + 1).min(brakes.len());
-            let b_start = start.min(b_end);
-            let has_braking = brakes[b_start..b_end]
-                .iter()
-                .any(|&b| b >= BRAKE_ONSET_THRESHOLD);
-            if has_braking {
-                continue;
-            }
-        }
-
         zones.push(LiftZone {
             onset_idx: start,
             min_idx: min_i,
@@ -285,6 +282,21 @@ pub fn detect_lift_zones(throttles: &[f32], brakes: &[f32]) -> Vec<LiftZone> {
     }
 
     zones
+}
+
+/// First index in `from..end` where the throttle reaches full and stays at or above 95 % for
+/// `THROTTLE_SUSTAINED_FRAMES`. The whole window must fit before `end`, so a brief spike at the
+/// end of the trace or just before the next corner does not count.
+fn find_sustained_full(throttles: &[f32], from: usize, end: usize) -> Option<usize> {
+    let last = end
+        .min(throttles.len())
+        .checked_sub(THROTTLE_SUSTAINED_FRAMES)?;
+    (from..=last).find(|&i| {
+        throttles[i] >= THROTTLE_FULL_THRESHOLD
+            && throttles[i..i + THROTTLE_SUSTAINED_FRAMES]
+                .iter()
+                .all(|&v| v >= 0.95)
+    })
 }
 
 enum DecelRef<'a> {
@@ -308,10 +320,6 @@ impl DecelRef<'_> {
 /// For a lift zone, onset is the throttle minimum in the zone.
 /// In both cases, it terminates when throttle reaches and stays sustained at $\ge 98\%$.
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "throttle exit zone detection with dual decel triggers"
-)]
 pub fn detect_throttle_exit_zones(
     throttles: &[f32],
     brake_zones: &[BrakeZone],
@@ -377,25 +385,7 @@ pub fn detect_throttle_exit_zones(
                 };
 
                 // 3. Find where throttle reaches >= 98% sustained
-                let mut full_idx = None;
-                for (i, &t) in throttles.iter().enumerate().take(window_end).skip(onset) {
-                    if t >= THROTTLE_FULL_THRESHOLD {
-                        if window_end < throttles.len()
-                            && i + THROTTLE_SUSTAINED_FRAMES > window_end
-                        {
-                            continue;
-                        }
-                        let sustained_end = (i + THROTTLE_SUSTAINED_FRAMES).min(window_end);
-                        let is_sustained =
-                            throttles[i..sustained_end].iter().all(|&val| val >= 0.95);
-                        if is_sustained {
-                            full_idx = Some(i);
-                            break;
-                        }
-                    }
-                }
-
-                let Some(full) = full_idx else {
+                let Some(full) = find_sustained_full(throttles, onset, window_end) else {
                     continue;
                 };
 
@@ -429,25 +419,7 @@ pub fn detect_throttle_exit_zones(
                 }
 
                 // Find where throttle reaches >= 98% sustained
-                let mut full_idx = None;
-                for (i, &t) in throttles.iter().enumerate().take(window_end).skip(onset) {
-                    if t >= THROTTLE_FULL_THRESHOLD {
-                        if window_end < throttles.len()
-                            && i + THROTTLE_SUSTAINED_FRAMES > window_end
-                        {
-                            continue;
-                        }
-                        let sustained_end = (i + THROTTLE_SUSTAINED_FRAMES).min(window_end);
-                        let is_sustained =
-                            throttles[i..sustained_end].iter().all(|&val| val >= 0.95);
-                        if is_sustained {
-                            full_idx = Some(i);
-                            break;
-                        }
-                    }
-                }
-
-                let Some(full) = full_idx else {
+                let Some(full) = find_sustained_full(throttles, onset, window_end) else {
                     continue;
                 };
 

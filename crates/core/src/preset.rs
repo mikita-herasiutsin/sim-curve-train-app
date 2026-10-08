@@ -1143,10 +1143,12 @@ mod tests {
         let json = include_str!("../../../presets/sample.json");
         let preset = parse_preset(json).expect("presets/sample.json must be valid");
         assert_eq!(preset.id, "sample");
-        assert_eq!(preset.drills.len(), 3);
+        assert_eq!(preset.drills.len(), 4);
         assert_eq!(preset.drills[0].pedal, Pedal::Brake);
         assert_eq!(preset.drills[1].pedal, Pedal::Throttle);
         assert_eq!(preset.drills[2].pedal, Pedal::Brake);
+        assert_eq!(preset.drills[3].id, "throttle-rolling-start-35");
+        assert_eq!(preset.drills[3].pedal, Pedal::Throttle);
     }
 
     #[test]

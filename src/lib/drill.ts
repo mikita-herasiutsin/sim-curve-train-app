@@ -124,6 +124,8 @@ export interface RunView {
   runState: RunState;
   currentRep: number;
   countdownEndsUs: number;
+  /** Sample-clock start of the active rep (µs); 0 until a rep starts. */
+  repStartUs: number;
   lastScore: RepScore | null;
   /** Set summary; `null` after a finished set means no rep was scored. */
   summary: SetSummary | null;
@@ -135,6 +137,7 @@ export const IDLE_VIEW: RunView = {
   runState: "idle",
   currentRep: 0,
   countdownEndsUs: 0,
+  repStartUs: 0,
   lastScore: null,
   summary: null,
   reps: [],
@@ -159,7 +162,13 @@ export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
         countdownEndsUs: e.endsUs,
       };
     case "repStarted":
-      return { ...view, runState: "active", currentRep: e.rep, lastScore: null };
+      return {
+        ...view,
+        runState: "active",
+        currentRep: e.rep,
+        repStartUs: e.startUs,
+        lastScore: null,
+      };
     case "repScored":
       return {
         ...view,

@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/sv
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import DrillPage from "./+page.svelte";
 import type { Preset } from "$lib/drill";
+import { pedalStream } from "$lib/pedals/stream";
 
 const preset: Preset = {
   schemaVersion: 1,
@@ -167,8 +168,43 @@ describe("Drill page", () => {
     expect(card).toHaveTextContent("82");
     expect(card).toHaveTextContent("B");
     expect(card).toHaveTextContent("Accuracy: 91");
-    expect(card).toHaveTextContent("RMSE: 0.041");
+    expect(card).toHaveTextContent("Avg error ±4.1%");
+    expect(card).toHaveTextContent("Shakiness 1.3%");
+    expect(card).toHaveTextContent("What do these mean?");
+    expect(card).toHaveTextContent("How fast you got into the band.");
     expect(card).not.toHaveTextContent("NaN");
+  });
+
+  it("counts down 3, 2, 1, then shows GO! and the hold timer", async () => {
+    let nowUs = 0;
+    vi.spyOn(pedalStream, "dataNowUs").mockImplementation(() => nowUs);
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "countdownStarted", rep: 0, startUs: 0, endsUs: 3_000_000 });
+    expect(await screen.findByText("3")).toBeInTheDocument();
+    expect(screen.queryByText("Get Ready!")).not.toBeInTheDocument();
+    nowUs = 1_500_000;
+    expect(await screen.findByText("2")).toBeInTheDocument();
+    nowUs = 2_500_000;
+    expect(await screen.findByText("1")).toBeInTheDocument();
+
+    nowUs = 3_400_000;
+    drillChannel!.onmessage({ event: "repStarted", rep: 0, startUs: 3_000_000 });
+    expect(await screen.findByText("GO!")).toBeInTheDocument();
+    const hud = await screen.findByTestId("hold-hud");
+    await waitFor(() => expect(hud).toHaveTextContent("Hold 1.6s"));
+    expect(hud).toHaveTextContent("Target 70% ±5");
+    expect(screen.getByRole("progressbar", { name: "Hold time left" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("GO!")).not.toBeInTheDocument());
+  });
+
+  it("renders Avg error from rmse as a percentage", async () => {
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, rmse: 0.07 } });
+    expect(await screen.findByText("Avg error ±7.0%")).toBeInTheDocument();
   });
 
   it("keeps the aborted set's summary and lists failed reps", async () => {

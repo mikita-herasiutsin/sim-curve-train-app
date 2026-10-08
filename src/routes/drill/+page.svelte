@@ -30,6 +30,14 @@
 
   let view = $state<RunView>({ ...IDLE_VIEW });
   let countdownMs = $state(0);
+  // Time left to hold in the active rep, in ms (0..holdMs), refreshed every frame.
+  let holdRemainingMs = $state(0);
+  // "GO!" is shown briefly when a rep becomes active.
+  let showGo = $state(false);
+  let goTimer: ReturnType<typeof setTimeout> | undefined;
+  const GO_MS = 600;
+  // 3, 2, 1 for a 3000 ms lead-in; clamped so a late frame never flashes 0.
+  const countdownSeconds = $derived(Math.max(1, Math.ceil(countdownMs / 1000)));
   let errorMessage = $state<string | null>(null);
   // Set once the user aborts; the engine still ends the set with a final `setFinished`.
   let aborting = $state(false);
@@ -50,6 +58,30 @@
   let runId = 0;
 
   let rafId: number | null = null;
+
+  const METRIC_HELP: Record<string, string> = {
+    accuracy: "Time inside the band and distance from target after you first reach it.",
+    timing: "How fast you got into the band.",
+    smoothness: "Overshoot beyond the band and shakiness.",
+    avgError: "Average distance from the target, as a share of full pedal travel.",
+    shakiness: "Small quick wobbles around your own average pedal position.",
+  };
+
+  // Show "GO!" for a moment each time a rep becomes active.
+  let lastRunState = "idle";
+  $effect(() => {
+    const state = view.runState;
+    if (state === "active" && lastRunState !== "active") {
+      showGo = true;
+      holdRemainingMs = selectedDrill?.type === "hold" ? selectedDrill.holdMs : 0;
+      clearTimeout(goTimer);
+      goTimer = setTimeout(() => (showGo = false), GO_MS);
+    } else if (state !== "active") {
+      showGo = false;
+      clearTimeout(goTimer);
+    }
+    lastRunState = state;
+  });
 
   onMount(() => {
     if (isTauri()) {
@@ -78,6 +110,12 @@
       if (view.runState === "countdown" && view.countdownEndsUs > 0) {
         const remainingUs = view.countdownEndsUs - pedalStream.dataNowUs();
         countdownMs = Math.max(0, Math.ceil(remainingUs / 1000));
+      } else if (view.runState === "active" && selectedDrill?.type === "hold") {
+        const endUs = view.repStartUs + selectedDrill.holdMs * 1000;
+        holdRemainingMs = Math.min(
+          selectedDrill.holdMs,
+          Math.max(0, Math.ceil((endUs - pedalStream.dataNowUs()) / 1000)),
+        );
       }
       rafId = requestAnimationFrame(loop);
     };
@@ -85,6 +123,7 @@
   });
 
   onDestroy(() => {
+    clearTimeout(goTimer);
     if (stopSource) stopSource();
     if (rafId !== null) cancelAnimationFrame(rafId);
     if (sourceStatus.kind === "live" && view.runState !== "idle" && view.runState !== "finished") {
@@ -217,8 +256,10 @@
           <div class="bars-container panel">
             {#if view.runState === "countdown"}
               <div class="overlay">
-                <h2 class="countdown-text">Get Ready!</h2>
-                <p class="countdown-timer">{(countdownMs / 1000).toFixed(1)}s</p>
+                <p class="countdown-label">Get ready</p>
+                {#key countdownSeconds}
+                  <p class="countdown-number" aria-live="assertive">{countdownSeconds}</p>
+                {/key}
               </div>
             {:else if view.runState === "finished"}
               <div class="overlay">
@@ -249,6 +290,29 @@
         </div>
 
         <div class="side-panel">
+          {#if view.runState === "active" && selectedDrill?.type === "hold"}
+            <div class="hold-hud-card panel" data-testid="hold-hud">
+              {#if showGo}
+                <p class="go-label">GO!</p>
+              {:else}
+                <p class="hold-time">Hold <span>{(holdRemainingMs / 1000).toFixed(1)}s</span></p>
+                <p class="hold-target">
+                  Target {selectedDrill.target}% &plusmn;{selectedDrill.tolerance}
+                </p>
+                <div
+                  class="hold-progress"
+                  role="progressbar"
+                  aria-label="Hold time left"
+                  aria-valuemin={0}
+                  aria-valuemax={selectedDrill.holdMs}
+                  aria-valuenow={holdRemainingMs}
+                >
+                  <span style:width="{(holdRemainingMs / selectedDrill.holdMs) * 100}%"></span>
+                </div>
+              {/if}
+            </div>
+          {/if}
+
           <div class="rep-info panel">
             <h3>Rep {view.currentRep + 1} / {selectedDrill?.reps}</h3>
             <p class="status-badge {view.runState}">{view.runState.toUpperCase()}</p>
@@ -277,14 +341,32 @@
                 <span class="grade grade-{view.lastScore.grade}">{view.lastScore.grade}</span>
               </div>
               <ul class="subscores">
-                <li>Accuracy: {Math.round(view.lastScore.accuracy)}</li>
-                <li>Timing: {Math.round(view.lastScore.timing)}</li>
-                <li>Smoothness: {Math.round(view.lastScore.smoothness)}</li>
+                <li title={METRIC_HELP.accuracy} aria-describedby="help-accuracy">
+                  Accuracy: {Math.round(view.lastScore.accuracy)}
+                </li>
+                <li title={METRIC_HELP.timing} aria-describedby="help-timing">
+                  Timing: {Math.round(view.lastScore.timing)}
+                </li>
+                <li title={METRIC_HELP.smoothness} aria-describedby="help-smoothness">
+                  Smoothness: {Math.round(view.lastScore.smoothness)}
+                </li>
               </ul>
               <div class="metrics">
-                <small>RMSE: {view.lastScore.rmse.toFixed(3)}</small>
-                <small>Jitter: {view.lastScore.jitter.toFixed(3)}</small>
+                <small title={METRIC_HELP.avgError} aria-describedby="help-avgError"
+                  >Avg error ±{(view.lastScore.rmse * 100).toFixed(1)}%</small
+                >
+                <small title={METRIC_HELP.shakiness} aria-describedby="help-shakiness"
+                  >Shakiness {(view.lastScore.jitter * 100).toFixed(1)}%</small
+                >
               </div>
+              <details class="metric-help">
+                <summary>What do these mean?</summary>
+                <ul>
+                  {#each [["accuracy", "Accuracy"], ["timing", "Timing"], ["smoothness", "Smoothness"], ["avgError", "Avg error"], ["shakiness", "Shakiness"]] as [key, label] (key)}
+                    <li id="help-{key}"><strong>{label}:</strong> {METRIC_HELP[key]}</li>
+                  {/each}
+                </ul>
+              </details>
             </div>
           {/if}
 
@@ -463,18 +545,93 @@
     z-index: 10;
   }
 
-  .countdown-text {
-    font-size: 2rem;
+  .countdown-label {
     margin: 0;
-    color: var(--text);
+    font-size: 1.25rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
   }
 
-  .countdown-timer {
-    font-size: 4rem;
-    font-weight: 700;
+  .countdown-number {
+    font-size: 9rem;
+    line-height: 1;
+    font-weight: 800;
     margin: 0;
     color: var(--accent);
     font-variant-numeric: tabular-nums;
+    animation: pop-in 0.45s ease-out;
+  }
+  .countdown-number.go {
+    color: #22c55e;
+  }
+  .go-overlay {
+    background: rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+  }
+
+  @keyframes pop-in {
+    from {
+      transform: scale(1.8);
+      opacity: 0;
+    }
+    to {
+      transform: scale(1);
+      opacity: 1;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .countdown-number {
+      animation: none;
+    }
+  }
+
+  .hold-hud-card {
+    text-align: center;
+  }
+
+  .go-label {
+    margin: 0;
+    font-size: 3rem;
+    font-weight: 800;
+    color: #22c55e;
+  }
+
+  .hold-time {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 700;
+  }
+  .hold-time span {
+    font-size: 1.75rem;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .hold-target {
+    margin: 0 0 0.375rem;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+  }
+  .hold-progress {
+    height: 0.375rem;
+    border-radius: 999px;
+    background: var(--surface-raised);
+    overflow: hidden;
+  }
+  .hold-progress span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+  }
+
+  .metric-help {
+    margin-top: 0.75rem;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+  }
+  .metric-help ul {
+    padding-left: 1rem;
+    margin: 0.5rem 0 0;
   }
 
   .finished-text {

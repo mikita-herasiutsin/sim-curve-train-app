@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { scrollIntoViewSoon } from "$lib/scroll";
   import type { DeviceStream } from "$lib/stream";
   import {
@@ -140,7 +140,41 @@
     timer = undefined;
   }
 
-  onDestroy(stopTimer);
+  // Live input bars: one rAF loop writes straight to the DOM, so no reactive churn per sample.
+  const fills: Partial<Record<PedalName, HTMLElement>> = {};
+  const labels: Partial<Record<PedalName, HTMLElement>> = {};
+  let frame = 0;
+
+  /** Raw -32768..32767 mapped linearly to 0..100 (calibration is not known yet). */
+  function rawPercent(raw: number): number {
+    return Math.min(100, Math.max(0, ((raw + 32768) / 65535) * 100));
+  }
+
+  function paint() {
+    frame = requestAnimationFrame(paint);
+    const latest = stream.latest;
+    for (const { pedal } of WIZARD_STEPS) {
+      const a = assignments[pedal];
+      const fill = fills[pedal];
+      const label = labels[pedal];
+      if (!a || !fill || !label) continue;
+      const raw = latest?.axes[a.axis];
+      if (raw === undefined) continue;
+      const pct = rawPercent(raw);
+      fill.style.width = `${pct}%`;
+      label.textContent = `${pct.toFixed(0)}%`;
+      fill.parentElement?.setAttribute("aria-valuenow", pct.toFixed(0));
+    }
+  }
+
+  onMount(() => {
+    frame = requestAnimationFrame(paint);
+  });
+
+  onDestroy(() => {
+    stopTimer();
+    cancelAnimationFrame(frame);
+  });
 </script>
 
 <section class="wizard" aria-label="Pedal setup" bind:this={sectionEl}>
@@ -180,6 +214,21 @@
                 <option value={axis.toString()}>Axis {axis}</option>
               {/each}
             </select>
+          </td>
+          <td class="live">
+            {#if assignments[pedal]}
+              <span
+                class="bar"
+                role="meter"
+                aria-label="{pedalLabel(pedal)} live input"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={0}
+              >
+                <span class="fill" bind:this={fills[pedal]}></span>
+              </span>
+              <span class="pct" bind:this={labels[pedal]}>0%</span>
+            {/if}
           </td>
         </tr>
       {/each}
@@ -239,6 +288,38 @@
 
   table {
     border-collapse: collapse;
+  }
+
+  .live {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-left: 0.75rem;
+  }
+
+  .bar {
+    display: inline-block;
+    width: 10rem;
+    height: 0.75rem;
+    border-radius: 999px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+  }
+
+  .pct {
+    min-width: 4.5ch;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+    font-size: 0.875rem;
   }
 
   th {

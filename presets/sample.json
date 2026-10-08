@@ -42,6 +42,16 @@
         [1000, 40],
         [1500, 0]
       ]
+    },
+    {
+      "id": "throttle-rolling-start-35",
+      "name": "Rolling start: throttle hold 35%",
+      "type": "hold",
+      "pedal": "throttle",
+      "target": 35,
+      "holdMs": 10000,
+      "reps": 3,
+      "leadInMs": 3000
     }
   ]
 }

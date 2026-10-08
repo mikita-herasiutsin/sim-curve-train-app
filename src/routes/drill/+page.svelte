@@ -6,11 +6,12 @@
     listPresets,
     startDrillRun,
     abortDrillRun,
+    applyDrillEvent,
+    IDLE_VIEW,
     type Preset,
     type Drill,
     type DrillEvent,
-    type RepScore,
-    type SetSummary,
+    type RunView,
   } from "$lib/drill";
   import { pedalStream } from "$lib/pedals/stream";
   import { startRealSource, type SourceStatus } from "$lib/pedals/realSource";
@@ -23,12 +24,10 @@
   let sourceStatus = $state<SourceStatus>({ kind: "connecting" });
   let stopSource: (() => void) | null = null;
 
-  let runState = $state<"idle" | "countdown" | "active" | "scored" | "finished">("idle");
-  let currentRep = $state(0);
-  let countdownEndsUs = $state(0);
+  let view = $state<RunView>({ ...IDLE_VIEW });
   let countdownMs = $state(0);
-  let lastScore = $state<RepScore | null>(null);
-  let summary = $state<SetSummary | null>(null);
+  // Bumped on every start and abort, so events of a run the user left are ignored.
+  let runId = 0;
 
   let rafId: number | null = null;
 
@@ -50,8 +49,8 @@
     }
 
     const loop = () => {
-      if (runState === "countdown") {
-        const remainingUs = countdownEndsUs - pedalStream.dataNowUs();
+      if (view.runState === "countdown") {
+        const remainingUs = view.countdownEndsUs - pedalStream.dataNowUs();
         countdownMs = Math.max(0, Math.ceil(remainingUs / 1000));
       }
       rafId = requestAnimationFrame(loop);
@@ -62,69 +61,43 @@
   onDestroy(() => {
     if (stopSource) stopSource();
     if (rafId !== null) cancelAnimationFrame(rafId);
-    if (sourceStatus.kind === "live" && runState !== "idle" && runState !== "finished") {
+    if (sourceStatus.kind === "live" && view.runState !== "idle" && view.runState !== "finished") {
       abortDrillRun(sourceStatus.token).catch(console.error);
     }
   });
 
-  function handleEvent(e: DrillEvent) {
-    switch (e.event) {
-      case "countdownStarted":
-        runState = "countdown";
-        currentRep = e.rep;
-        countdownEndsUs = e.endsUs;
-        lastScore = null; // hide score when next rep is counting down
-        break;
-      case "repStarted":
-        runState = "active";
-        currentRep = e.rep;
-        break;
-      case "repScored":
-        runState = "scored";
-        currentRep = e.rep;
-        lastScore = e.score;
-        break;
-      case "repFailed":
-        runState = "scored";
-        currentRep = e.rep;
-        lastScore = null; // No score
-        break;
-      case "setFinished":
-        runState = "finished";
-        summary = e.summary;
-        break;
-    }
-  }
-
   function start() {
-    if (!selectedDrill) return;
+    if (!selectedPreset || !selectedDrill) return;
     if (sourceStatus.kind !== "live") {
       alert("Please connect pedals before starting.");
       return;
     }
 
-    startDrillRun(sourceStatus.token, selectedDrill, handleEvent).catch((e) => {
+    const id = ++runId;
+    const onEvent = (e: DrillEvent) => {
+      if (id === runId) view = applyDrillEvent(view, e);
+    };
+    startDrillRun(sourceStatus.token, selectedPreset.id, selectedDrill.id, onEvent).catch((e) => {
+      if (id !== runId) return;
       console.error(e);
+      view = { ...IDLE_VIEW };
       alert("Failed to start drill: " + e);
     });
-    runState = "countdown";
+    view = { ...IDLE_VIEW, runState: "countdown" };
     countdownMs = selectedDrill.leadInMs;
-    // endsUs is set by event
+    // countdownEndsUs is set by the first event
   }
 
   function abort() {
+    runId++;
     if (sourceStatus.kind === "live") {
       abortDrillRun(sourceStatus.token).catch(console.error);
     }
-    runState = "idle";
-    lastScore = null;
-    summary = null;
+    view = { ...IDLE_VIEW };
   }
 
   function restart() {
-    runState = "idle";
-    summary = null;
-    lastScore = null;
+    view = { ...IDLE_VIEW };
     start();
   }
 </script>
@@ -143,7 +116,7 @@
   </header>
 
   <main class="content">
-    {#if runState === "idle"}
+    {#if view.runState === "idle"}
       <div class="picker-panel panel">
         <h2>Select a Drill</h2>
 
@@ -192,16 +165,16 @@
     {:else}
       <div class="active-workspace">
         <div class="bars-container panel">
-          {#if runState === "countdown"}
+          {#if view.runState === "countdown"}
             <div class="overlay">
               <h2 class="countdown-text">Get Ready!</h2>
               <p class="countdown-timer">{(countdownMs / 1000).toFixed(1)}s</p>
             </div>
-          {:else if runState === "finished"}
+          {:else if view.runState === "finished"}
             <div class="overlay">
               <h2 class="finished-text">Set Finished!</h2>
               <button class="btn-primary mt" onclick={restart}>Play Again</button>
-              <button class="btn-secondary mt" onclick={() => (runState = "idle")}
+              <button class="btn-secondary mt" onclick={() => (view.runState = "idle")}
                 >Pick Another Drill</button
               >
             </div>
@@ -222,47 +195,52 @@
 
         <div class="side-panel">
           <div class="rep-info panel">
-            <h3>Rep {currentRep + 1} / {selectedDrill?.reps}</h3>
-            <p class="status-badge {runState}">{runState.toUpperCase()}</p>
+            <h3>Rep {view.currentRep + 1} / {selectedDrill?.reps}</h3>
+            <p class="status-badge {view.runState}">{view.runState.toUpperCase()}</p>
 
-            {#if runState !== "finished"}
+            {#if view.runState !== "finished"}
               <button class="btn-abort" onclick={abort}>Abort Set</button>
             {/if}
           </div>
 
-          {#if lastScore && lastScore.kind === "hold"}
+          {#if view.lastScore && view.lastScore.kind === "hold"}
             <div class="score-card panel">
               <h3>Rep Result</h3>
               <div class="score-grade">
-                <span class="total">{Math.round(lastScore.total)}</span>
-                <span class="grade grade-{lastScore.grade}">{lastScore.grade}</span>
+                <span class="total">{Math.round(view.lastScore.total)}</span>
+                <span class="grade grade-{view.lastScore.grade}">{view.lastScore.grade}</span>
               </div>
               <ul class="subscores">
-                <li>Accuracy: {Math.round(lastScore.accuracy)}</li>
-                <li>Timing: {Math.round(lastScore.timing)}</li>
-                <li>Smoothness: {Math.round(lastScore.smoothness)}</li>
+                <li>Accuracy: {Math.round(view.lastScore.accuracy)}</li>
+                <li>Timing: {Math.round(view.lastScore.timing)}</li>
+                <li>Smoothness: {Math.round(view.lastScore.smoothness)}</li>
               </ul>
               <div class="metrics">
-                <small>RMSE: {lastScore.rmse.toFixed(3)}</small>
-                <small>Jitter: {lastScore.jitter.toFixed(3)}</small>
+                <small>RMSE: {view.lastScore.rmse.toFixed(3)}</small>
+                <small>Jitter: {view.lastScore.jitter.toFixed(3)}</small>
               </div>
             </div>
           {/if}
 
-          {#if summary}
+          {#if view.summary}
             <div class="summary-card panel">
               <h3>Set Summary</h3>
               <div class="summary-stats">
-                <div><strong>Best:</strong> {Math.round(summary.bestTotal)}</div>
-                <div><strong>Average:</strong> {Math.round(summary.avgTotal)}</div>
-                <div><strong>Consistency:</strong> {Math.round(summary.consistency)}%</div>
+                <div><strong>Best:</strong> {Math.round(view.summary.bestTotal)}</div>
+                <div><strong>Average:</strong> {Math.round(view.summary.avgTotal)}</div>
+                <div><strong>Consistency:</strong> {Math.round(view.summary.consistency)}%</div>
               </div>
               <h4>All Reps:</h4>
               <div class="rep-totals">
-                {#each summary.repTotals as t, i (i)}
+                {#each view.summary.repTotals as t, i (i)}
                   <span class="rep-pill">#{i + 1}: {Math.round(t)}</span>
                 {/each}
               </div>
+            </div>
+          {:else if view.runState === "finished"}
+            <div class="summary-card panel">
+              <h3>Set Summary</h3>
+              <p>No scored reps.</p>
             </div>
           {/if}
         </div>

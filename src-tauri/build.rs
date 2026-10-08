@@ -17,6 +17,9 @@ fn main() {
             "list_presets",
             "start_drill_run",
             "abort_drill_run",
+            "save_attempt",
+            "list_attempts",
+            "best_total",
         ]),
     ))
     .expect("failed to run tauri-build");

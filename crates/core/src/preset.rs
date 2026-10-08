@@ -518,6 +518,24 @@ pub fn parse_preset(json: &str) -> Result<Preset, PresetError> {
     Ok(preset)
 }
 
+/// Finds the drill `drill_id` inside the preset `preset_id`.
+///
+/// # Errors
+///
+/// Returns a message naming the missing preset or drill.
+pub fn find_drill(presets: &[Preset], preset_id: &str, drill_id: &str) -> Result<Drill, String> {
+    let preset = presets
+        .iter()
+        .find(|p| p.id == preset_id)
+        .ok_or_else(|| format!("preset '{preset_id}' not found"))?;
+    preset
+        .drills
+        .iter()
+        .find(|d| d.id == drill_id)
+        .cloned()
+        .ok_or_else(|| format!("drill '{drill_id}' not found in preset '{preset_id}'"))
+}
+
 /// Loads and validates all preset files from a directory.
 ///
 /// Reads every `*.json` file in `dir` (non-recursively), sorted by file name.
@@ -1210,5 +1228,29 @@ mod tests {
         };
         assert!(err_in_file.to_string().contains("in 'bar.json'"));
         assert!(err_in_file.source().is_some());
+    }
+
+    #[test]
+    fn find_drill_looks_up_by_preset_and_drill_id() {
+        let preset = Preset {
+            schema_version: SCHEMA_VERSION,
+            id: "p".to_string(),
+            name: "P".to_string(),
+            description: String::new(),
+            drills: vec![valid_hold_drill(), valid_trace_drill()],
+        };
+        let presets = [preset];
+        assert_eq!(
+            find_drill(&presets, "p", "hairpin").unwrap(),
+            valid_trace_drill()
+        );
+        assert_eq!(
+            find_drill(&presets, "x", "hairpin").unwrap_err(),
+            "preset 'x' not found"
+        );
+        assert_eq!(
+            find_drill(&presets, "p", "nope").unwrap_err(),
+            "drill 'nope' not found in preset 'p'"
+        );
     }
 }

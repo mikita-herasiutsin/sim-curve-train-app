@@ -2,11 +2,12 @@ mod input;
 
 use input::InputService;
 use sct_core::AppInfo;
+use sct_core::attempts::{Attempt, AttemptStore, NewAttempt};
 use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
 use sct_core::drill_engine::DrillEvent;
-use sct_core::preset::{Drill, Preset, load_dir};
+use sct_core::preset::{Preset, find_drill, load_dir};
 use sct_core::profile::{DeviceProfile, ProfileStore};
 use sct_core::stream::SampleBatch;
 use tauri::Manager;
@@ -149,7 +150,90 @@ fn profiled_devices(input: tauri::State<'_, InputService>) -> Vec<u32> {
     input.profiled_devices()
 }
 
-/// Opens the profile database in the app data directory. The app still runs without it.
+/// Shared handle to the attempts database, managed by Tauri.
+#[derive(Clone)]
+pub struct AttemptsService {
+    store: std::sync::Arc<std::sync::Mutex<Option<AttemptStore>>>,
+}
+
+impl AttemptsService {
+    #[must_use]
+    pub fn new(store: Option<AttemptStore>) -> Self {
+        Self {
+            store: std::sync::Arc::new(std::sync::Mutex::new(store)),
+        }
+    }
+}
+
+fn lock_attempts<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Saves a completed or aborted drill set attempt and each of its reps.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn save_attempt(
+    attempt: NewAttempt,
+    attempts: tauri::State<'_, AttemptsService>,
+) -> Result<i64, String> {
+    let guard = lock_attempts(&attempts.store);
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "attempts store is unavailable".to_string())?;
+    store.save_attempt(&attempt).map_err(|e| e.to_string())
+}
+
+/// Lists recorded attempts for a drill, ordered from newest to oldest.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn list_attempts(
+    drill_id: String,
+    limit: u32,
+    attempts: tauri::State<'_, AttemptsService>,
+) -> Result<Vec<Attempt>, String> {
+    let guard = lock_attempts(&attempts.store);
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "attempts store is unavailable".to_string())?;
+    store
+        .list_attempts(&drill_id, limit)
+        .map_err(|e| e.to_string())
+}
+
+/// Returns the highest total score recorded for a drill, or `None` if no attempts exist.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn best_total(
+    drill_id: String,
+    attempts: tauri::State<'_, AttemptsService>,
+) -> Result<Option<f32>, String> {
+    let guard = lock_attempts(&attempts.store);
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "attempts store is unavailable".to_string())?;
+    store.best_total(&drill_id).map_err(|e| e.to_string())
+}
+
+/// Loads the bundled presets from `<resource dir>/presets`.
+fn load_presets(app: &tauri::AppHandle) -> Result<Vec<Preset>, String> {
+    let resources = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Failed to get resource dir: {e}"))?;
+    load_dir(&resources.join("presets")).map_err(|e| format!("Failed to load presets: {e}"))
+}
+
 /// Lists all bundled drill presets.
 #[tauri::command]
 #[expect(
@@ -157,15 +241,12 @@ fn profiled_devices(input: tauri::State<'_, InputService>) -> Vec<u32> {
     reason = "Tauri injects command arguments by value"
 )]
 fn list_presets(app: tauri::AppHandle) -> Result<Vec<Preset>, String> {
-    let resources = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("Failed to get resource dir: {e}"))?;
-    let presets_dir = resources.join("presets");
-    load_dir(&presets_dir).map_err(|e| format!("Failed to load presets: {e}"))
+    load_presets(&app)
 }
 
-/// Starts a drill run for the selected drill, feeding samples from the active stream.
+/// Starts a drill run for a bundled drill, feeding samples from the active stream.
+///
+/// The drill is looked up on the Rust side; the webview only names it.
 #[tauri::command]
 #[expect(
     clippy::needless_pass_by_value,
@@ -173,10 +254,13 @@ fn list_presets(app: tauri::AppHandle) -> Result<Vec<Preset>, String> {
 )]
 fn start_drill_run(
     token: u64,
-    drill: Drill,
+    preset_id: String,
+    drill_id: String,
     on_event: Channel<DrillEvent>,
+    app: tauri::AppHandle,
     input: tauri::State<'_, InputService>,
 ) -> Result<(), String> {
+    let drill = find_drill(&load_presets(&app)?, &preset_id, &drill_id)?;
     input.start_drill(token, drill, on_event)
 }
 
@@ -190,6 +274,7 @@ fn abort_drill_run(token: u64, input: tauri::State<'_, InputService>) -> Result<
     input.abort_drill(token)
 }
 
+/// Opens the profile database in the app data directory. The app still runs without it.
 fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
     let path = match app.path().app_data_dir() {
         Ok(dir) => dir.join("profiles.db"),
@@ -202,6 +287,21 @@ fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
         .inspect_err(|error| eprintln!("failed to open {}: {error}", path.display()))
         .ok()
 }
+
+/// Opens the attempts database in the app data directory. The app still runs without it.
+fn open_attempt_store(app: &tauri::App) -> Option<AttemptStore> {
+    let path = match app.path().app_data_dir() {
+        Ok(dir) => dir.join("profiles.db"),
+        Err(error) => {
+            eprintln!("no app data directory, attempts won't be saved: {error}");
+            return None;
+        }
+    };
+    AttemptStore::open(&path)
+        .inspect_err(|error| eprintln!("failed to open attempts in {}: {error}", path.display()))
+        .ok()
+}
+
 /// Builds and runs the Tauri application.
 ///
 /// # Panics
@@ -213,6 +313,9 @@ pub fn run() {
         .setup(|app| {
             let store = open_profile_store(app);
             app.manage(InputService::spawn(app.handle().clone(), store));
+
+            let attempt_store = open_attempt_store(app);
+            app.manage(AttemptsService::new(attempt_store));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -229,7 +332,10 @@ pub fn run() {
             profiled_devices,
             list_presets,
             start_drill_run,
-            abort_drill_run
+            abort_drill_run,
+            save_attempt,
+            list_attempts,
+            best_total
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

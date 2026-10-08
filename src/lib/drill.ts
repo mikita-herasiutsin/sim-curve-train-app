@@ -74,14 +74,56 @@ export async function listPresets(): Promise<Preset[]> {
 
 export async function startDrillRun(
   token: number,
-  drill: Drill,
+  presetId: string,
+  drillId: string,
   onEvent: (e: DrillEvent) => void,
 ): Promise<void> {
   const channel = new Channel<DrillEvent>();
   channel.onmessage = onEvent;
-  return invoke<void>("start_drill_run", { token, drill, onEvent: channel });
+  return invoke<void>("start_drill_run", { token, presetId, drillId, onEvent: channel });
 }
 
 export async function abortDrillRun(token: number): Promise<void> {
   return invoke<void>("abort_drill_run", { token });
+}
+
+export type RunState = "idle" | "countdown" | "active" | "scored" | "finished";
+
+/** What the drill screen shows for a run, advanced by [`applyDrillEvent`]. */
+export interface RunView {
+  runState: RunState;
+  currentRep: number;
+  countdownEndsUs: number;
+  lastScore: RepScore | null;
+  /** Set summary; `null` after a finished set means no rep was scored. */
+  summary: SetSummary | null;
+}
+
+export const IDLE_VIEW: RunView = {
+  runState: "idle",
+  currentRep: 0,
+  countdownEndsUs: 0,
+  lastScore: null,
+  summary: null,
+};
+
+export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
+  switch (e.event) {
+    case "countdownStarted":
+      return {
+        ...view,
+        runState: "countdown",
+        currentRep: e.rep,
+        countdownEndsUs: e.endsUs,
+        lastScore: null,
+      };
+    case "repStarted":
+      return { ...view, runState: "active", currentRep: e.rep };
+    case "repScored":
+      return { ...view, runState: "scored", currentRep: e.rep, lastScore: e.score };
+    case "repFailed":
+      return { ...view, runState: "scored", currentRep: e.rep, lastScore: null };
+    case "setFinished":
+      return { ...view, runState: "finished", summary: e.summary };
+  }
 }

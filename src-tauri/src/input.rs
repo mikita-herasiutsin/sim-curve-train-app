@@ -1,4 +1,3 @@
-#![allow(clippy::collapsible_if, clippy::too_many_lines, reason = "")]
 //! Pedal input backend: a dedicated thread that owns the SDL3 joystick subsystem.
 //!
 //! SDL contexts aren't `Send`, so the thread initialises SDL, keeps every connected joystick
@@ -57,22 +56,32 @@ enum Command {
         device_id: u32,
         channel: Channel<SampleBatch>,
     },
+    /// Stops the stream only if it is still the one started with `token`, so a late stop from
+    /// a previous page can't kill a newer stream.
     Stop {
         token: u64,
     },
+    /// Starts a drill on the stream started with `token`. The outcome goes to `reply`.
     StartDrill {
         token: u64,
         drill: Drill,
         channel: Channel<DrillEvent>,
+        reply: Sender<Result<(), String>>,
     },
     AbortDrill {
         token: u64,
     },
 }
 
+/// How long `start_drill` waits for the input thread to answer.
+const DRILL_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A drill running on the input thread.
 struct ActiveDrill {
     run: DrillRun,
     channel: Channel<DrillEvent>,
+    /// Profile copied when the drill started, so the per-sample path takes no lock.
+    profile: DeviceProfile,
 }
 
 /// The stream the UI last asked for, shared with the input thread.
@@ -248,19 +257,27 @@ impl InputService {
         self.send(Command::Stop { token })
     }
 
+    /// Starts `drill` on the stream started with `token`, feeding events to `channel`.
+    /// Fails if that stream isn't active or its device has no profile.
     pub fn start_drill(
         &self,
         token: u64,
         drill: Drill,
         channel: Channel<DrillEvent>,
     ) -> Result<(), String> {
+        let (reply, answer) = mpsc::channel();
         self.send(Command::StartDrill {
             token,
             drill,
             channel,
-        })
+            reply,
+        })?;
+        answer
+            .recv_timeout(DRILL_REPLY_TIMEOUT)
+            .map_err(|_| "input thread did not answer".to_owned())?
     }
 
+    /// Aborts the drill running on the stream started with `token`, if any.
     pub fn abort_drill(&self, token: u64) -> Result<(), String> {
         self.send(Command::AbortDrill { token })
     }
@@ -350,6 +367,131 @@ impl Stream {
             active_drill: None,
         }
     }
+
+    /// Ends the running drill, if any, telling the UI with a final `SetFinished`.
+    fn finish_drill(&mut self) {
+        if let Some(mut drill) = self.active_drill.take() {
+            let summary = drill.run.abort();
+            let _ = drill.channel.send(DrillEvent::SetFinished { summary });
+        }
+    }
+
+    /// Feeds one sample to the running drill and forwards its events.
+    fn step_drill(&mut self, sample: &RawSample) {
+        let Some(drill) = self.active_drill.as_mut() else {
+            return;
+        };
+        let frame = PedalFrame::from_sample(&drill.profile, sample);
+        let value = pedal_value(&frame, drill.run.drill().pedal);
+        for event in drill.run.push(ValueSample::new(sample.t_us, value)) {
+            let _ = drill.channel.send(event);
+        }
+        if matches!(drill.run.phase(), Phase::Finished | Phase::Aborted) {
+            self.active_drill = None;
+        }
+    }
+}
+
+/// Ends `stream`, first sending the UI the terminal event of a running drill.
+fn end_stream(stream: &mut Option<Stream>) {
+    if let Some(mut ended) = stream.take() {
+        ended.finish_drill();
+    }
+}
+
+/// The calibrated value (0 to 1) of `pedal` in `frame`.
+fn pedal_value(frame: &PedalFrame, pedal: Pedal) -> f32 {
+    match pedal {
+        Pedal::Brake => frame.brake,
+        Pedal::Throttle => frame.throttle,
+        Pedal::Clutch => frame.clutch,
+    }
+}
+
+/// Starts a drill on `stream`, replacing a running one. Errors go back to the caller.
+fn start_drill(
+    stream: Option<&mut Stream>,
+    service: &InputService,
+    epoch: Instant,
+    token: u64,
+    drill: Drill,
+    channel: Channel<DrillEvent>,
+) -> Result<(), String> {
+    let stream = stream
+        .filter(|s| s.token == token)
+        .ok_or("no active pedal stream; connect the pedals first")?;
+    let profile = {
+        let active = lock(&service.active);
+        if active.token == token {
+            active.profile.clone()
+        } else {
+            None
+        }
+    }
+    .ok_or("the device has no saved profile; calibrate it first")?;
+    stream.finish_drill();
+    let mut run = DrillRun::new(drill, sct_core::drill_engine::DEFAULT_REST_MS);
+    let t_us = u64::try_from(epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
+    for event in run.start(t_us) {
+        let _ = channel.send(event);
+    }
+    stream.active_drill = Some(ActiveDrill {
+        run,
+        channel,
+        profile,
+    });
+    Ok(())
+}
+
+/// Handles all queued commands. Returns `false` once the service is gone.
+fn drain_commands(
+    commands: &Receiver<Command>,
+    service: &InputService,
+    epoch: Instant,
+    stream: &mut Option<Stream>,
+    next_tick: &mut Instant,
+) -> bool {
+    loop {
+        match commands.try_recv() {
+            Ok(Command::Start {
+                token,
+                device_id,
+                channel,
+            }) => {
+                end_stream(stream);
+                // Cleared here, not in `start_stream`, so no sample of the previous
+                // stream can land after the clear.
+                lock(&service.recent).clear();
+                *stream = Some(Stream::new(token, device_id, channel));
+                *next_tick = Instant::now();
+            }
+            Ok(Command::Stop { token }) => {
+                if stream.as_ref().is_some_and(|s| s.token == token) {
+                    end_stream(stream);
+                }
+            }
+            Ok(Command::StartDrill {
+                token,
+                drill,
+                channel,
+                reply,
+            }) => {
+                let result = start_drill(stream.as_mut(), service, epoch, token, drill, channel);
+                let _ = reply.send(result);
+            }
+            Ok(Command::AbortDrill { token }) => {
+                if let Some(active) = stream.as_mut().filter(|s| s.token == token) {
+                    active.finish_drill();
+                }
+            }
+            Err(TryRecvError::Empty) => return true,
+            // The service (and with it the app) is gone.
+            Err(TryRecvError::Disconnected) => {
+                end_stream(stream);
+                return false;
+            }
+        }
+    }
 }
 
 fn run(
@@ -382,57 +524,8 @@ fn run(
     let mut stream: Option<Stream> = None;
     let mut next_tick = Instant::now();
     loop {
-        loop {
-            match commands.try_recv() {
-                Ok(Command::Start {
-                    token,
-                    device_id,
-                    channel,
-                }) => {
-                    // Cleared here, not in `start_stream`, so no sample of the previous
-                    // stream can land after the clear.
-                    lock(&service.recent).clear();
-                    stream = Some(Stream::new(token, device_id, channel));
-                    next_tick = Instant::now();
-                }
-                Ok(Command::Stop { token }) => {
-                    if stream.as_ref().is_some_and(|s| s.token == token) {
-                        stream = None;
-                    }
-                }
-                Ok(Command::StartDrill {
-                    token,
-                    drill,
-                    channel,
-                }) => {
-                    if let Some(active) = stream.as_mut() {
-                        if active.token == token {
-                            let mut run =
-                                DrillRun::new(drill, sct_core::drill_engine::DEFAULT_REST_MS);
-                            let t_us = u64::try_from(epoch.elapsed().as_micros()).unwrap_or(0);
-                            let events = run.start(t_us);
-                            for event in events {
-                                let _ = channel.send(event);
-                            }
-                            active.active_drill = Some(ActiveDrill { run, channel });
-                        }
-                    }
-                }
-                Ok(Command::AbortDrill { token }) => {
-                    if let Some(active) = stream.as_mut() {
-                        if active.token == token {
-                            if let Some(drill) = active.active_drill.as_mut() {
-                                let summary = drill.run.abort();
-                                let _ = drill.channel.send(DrillEvent::SetFinished { summary });
-                            }
-                            active.active_drill = None;
-                        }
-                    }
-                }
-                Err(TryRecvError::Empty) => break,
-                // The service (and with it the app) is gone.
-                Err(TryRecvError::Disconnected) => return Ok(()),
-            }
+        if !drain_commands(commands, service, epoch, &mut stream, &mut next_tick) {
+            return Ok(());
         }
 
         // Idle: block on events. Streaming: pumping events also refreshes joystick state.
@@ -450,35 +543,18 @@ fn run(
         };
         let Some(joystick) = open.get(&active.device_id) else {
             // Unplugged; the UI learns about it from `devices-changed`.
-            stream = None;
+            end_stream(&mut stream);
             continue;
         };
         let t_us = u64::try_from(epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
         let raw_sample = read_sample(joystick, t_us);
         active.pending.push(raw_sample);
         active.rate.record(t_us);
-
-        if let Some(drill_ctx) = &mut active.active_drill {
-            if let Some(profile) = lock(&service.active).profile.as_ref() {
-                let frame = PedalFrame::from_sample(profile, &raw_sample);
-                let val = match drill_ctx.run.drill().pedal {
-                    Pedal::Brake => frame.brake,
-                    Pedal::Throttle => frame.throttle,
-                    Pedal::Clutch => frame.clutch,
-                };
-                let events = drill_ctx.run.push(ValueSample::new(t_us, val));
-                for event in events {
-                    let _ = drill_ctx.channel.send(event);
-                }
-                if matches!(drill_ctx.run.phase(), Phase::Finished | Phase::Aborted) {
-                    active.active_drill = None;
-                }
-            }
-        }
+        active.step_drill(&raw_sample);
 
         if active.last_send.elapsed() >= BATCH_INTERVAL && !send_batch(active, service, epoch) {
             // The webview dropped the channel (e.g. a page reload).
-            stream = None;
+            end_stream(&mut stream);
             continue;
         }
 
@@ -557,36 +633,34 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
             _ => Vec::new(),
         }
     };
+    if let Some(drill) = &stream.active_drill {
+        send_audio_feedback(drill, &frames);
+    }
     let batch = SampleBatch {
         samples: std::mem::take(&mut stream.pending),
-        frames: frames.clone(),
+        frames,
         stats: StreamStats {
             sample_rate_hz: stream.rate.rate_hz(),
             batch_age_ms,
         },
     };
-
-    if let Some(drill_ctx) = &stream.active_drill {
-        let tolerance = drill_ctx.run.drill().tolerance_fraction();
-        let mut audio_data = Vec::with_capacity(frames.len());
-        for frame in &frames {
-            let val = match drill_ctx.run.drill().pedal {
-                Pedal::Brake => frame.brake,
-                Pedal::Throttle => frame.throttle,
-                Pedal::Clutch => frame.clutch,
-            };
-            if let Some(target) = drill_ctx.run.target_at(frame.t_us) {
-                let err = val - target;
-                let in_band = err.abs() <= tolerance;
-                audio_data.push((err, in_band));
-            }
-        }
-        if !audio_data.is_empty() {
-            audio_feedback_hook(&audio_data);
-        }
-    }
-
     stream.channel.send(batch).is_ok()
+}
+
+/// Passes the signed error and in-band flag of each frame to the audio hook.
+fn send_audio_feedback(drill: &ActiveDrill, frames: &[PedalFrame]) {
+    let tolerance = drill.run.drill().tolerance_fraction();
+    let pedal = drill.run.drill().pedal;
+    let audio_data: Vec<(f32, bool)> = frames
+        .iter()
+        .filter_map(|frame| {
+            let err = pedal_value(frame, pedal) - drill.run.target_at(frame.t_us)?;
+            Some((err, err.abs() <= tolerance))
+        })
+        .collect();
+    if !audio_data.is_empty() {
+        audio_feedback_hook(&audio_data);
+    }
 }
 
 /// TODO(SCT-038): Audio feedback hook.

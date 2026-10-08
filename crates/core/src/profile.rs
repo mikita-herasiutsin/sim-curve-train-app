@@ -5,16 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-/// Migrations to be applied to the database in order.
-const MIGRATIONS: &[&str] = &["CREATE TABLE device_profile (\
-        guid TEXT NOT NULL, \
-        axis_count INTEGER NOT NULL, \
-        button_count INTEGER NOT NULL, \
-        profile_json TEXT NOT NULL, \
-        updated_at INTEGER NOT NULL, \
-        PRIMARY KEY (guid, axis_count, button_count)\
-    );"];
-
 /// Unique identifier for an input device.
 ///
 /// SDL GUIDs are not unique, so the key adds the axis and button counts.
@@ -58,6 +48,41 @@ pub enum Pedal {
 impl Pedal {
     /// All available pedal variants.
     pub const ALL: [Pedal; 3] = [Pedal::Throttle, Pedal::Brake, Pedal::Clutch];
+
+    /// Lowercase string representation matching serde serialization.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Throttle => "throttle",
+            Self::Brake => "brake",
+            Self::Clutch => "clutch",
+        }
+    }
+
+    /// Parses a lowercase pedal name into a [`Pedal`] variant.
+    #[must_use]
+    pub fn parse_str(s: &str) -> Option<Self> {
+        match s {
+            "throttle" => Some(Self::Throttle),
+            "brake" => Some(Self::Brake),
+            "clutch" => Some(Self::Clutch),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for Pedal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Pedal {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse_str(s).ok_or(())
+    }
 }
 
 /// Assigned device axis and calibration configuration for a pedal.
@@ -160,20 +185,7 @@ impl From<std::io::Error> for ProfileError {
 
 /// Applies pending schema migrations inside a transaction.
 fn apply_migrations(conn: &mut rusqlite::Connection) -> Result<(), ProfileError> {
-    let current_version: u32 = conn.query_row("PRAGMA user_version;", [], |row| row.get(0))?;
-    let start_idx = usize::try_from(current_version).unwrap_or(usize::MAX);
-
-    if start_idx < MIGRATIONS.len() {
-        let tx = conn.transaction()?;
-        for (idx, sql) in MIGRATIONS.iter().enumerate().skip(start_idx) {
-            tx.execute_batch(sql)?;
-            let new_version = u32::try_from(idx + 1).unwrap_or(u32::MAX);
-            tx.pragma_update(None, "user_version", new_version)?;
-        }
-        tx.commit()?;
-    }
-
-    Ok(())
+    crate::db::apply_migrations(conn).map_err(ProfileError::Sqlite)
 }
 
 /// SQLite-backed persistent store for device pedal profiles.
@@ -198,6 +210,7 @@ impl ProfileStore {
             std::fs::create_dir_all(parent)?;
         }
         let mut conn = rusqlite::Connection::open(path)?;
+        crate::db::configure_connection(&conn)?;
         apply_migrations(&mut conn)?;
         Ok(Self { conn })
     }
@@ -209,6 +222,7 @@ impl ProfileStore {
     /// Returns [`ProfileError::Sqlite`] if opening the database or applying migrations fails.
     pub fn open_in_memory() -> Result<Self, ProfileError> {
         let mut conn = rusqlite::Connection::open_in_memory()?;
+        crate::db::configure_connection(&conn)?;
         apply_migrations(&mut conn)?;
         Ok(Self { conn })
     }
@@ -520,22 +534,83 @@ mod tests {
         {
             let store = ProfileStore::open(&temp_file).unwrap();
             store.save(&key, &profile).unwrap();
-            assert_eq!(store.user_version().unwrap(), 1);
+            assert_eq!(store.user_version().unwrap(), 2);
         }
 
         {
             let store2 = ProfileStore::open(&temp_file).unwrap();
             assert_eq!(store2.load(&key).unwrap(), Some(profile));
-            assert_eq!(store2.user_version().unwrap(), 1);
+            assert_eq!(store2.user_version().unwrap(), 2);
         }
     }
 
     #[test]
     fn running_migrations_twice_is_noop() {
         let mut store = ProfileStore::open_in_memory().unwrap();
-        assert_eq!(store.user_version().unwrap(), 1);
+        assert_eq!(store.user_version().unwrap(), 2);
         store.apply_migrations().unwrap();
-        assert_eq!(store.user_version().unwrap(), 1);
+        assert_eq!(store.user_version().unwrap(), 2);
+    }
+
+    #[test]
+    fn legacy_db_with_profile_table_and_user_version_0_upgrades_cleanly() {
+        let temp_file = std::env::temp_dir().join(format!(
+            "sct_test_legacy_profile_store_{}_{}.db",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _guard = TempFileGuard(temp_file.clone());
+
+        let key = DeviceKey::new("legacy-device", 2, 6);
+        let mut profile = DeviceProfile::default();
+        profile.set(
+            Pedal::Throttle,
+            Some(PedalAxis {
+                axis: 0,
+                calibration: crate::calibration::FULL_RANGE,
+            }),
+        );
+        let profile_json = serde_json::to_string(&profile).unwrap();
+
+        // Create legacy table directly without setting user_version
+        {
+            let conn = rusqlite::Connection::open(&temp_file).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE device_profile (\
+                    guid TEXT NOT NULL, \
+                    axis_count INTEGER NOT NULL, \
+                    button_count INTEGER NOT NULL, \
+                    profile_json TEXT NOT NULL, \
+                    updated_at INTEGER NOT NULL, \
+                    PRIMARY KEY (guid, axis_count, button_count)\
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO device_profile (guid, axis_count, button_count, profile_json, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5);",
+                rusqlite::params![&key.guid, key.axis_count, key.button_count, profile_json, 12345],
+            )
+            .unwrap();
+            let version: u32 = conn
+                .query_row("PRAGMA user_version;", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 0);
+        }
+
+        // ProfileStore::open must upgrade to version 2 cleanly and preserve the stored profile
+        {
+            let store = ProfileStore::open(&temp_file).unwrap();
+            assert_eq!(store.user_version().unwrap(), 2);
+            let loaded = store
+                .load(&key)
+                .unwrap()
+                .expect("legacy profile must survive");
+            assert_eq!(loaded, profile);
+        }
     }
 
     #[test]

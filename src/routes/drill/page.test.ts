@@ -115,4 +115,27 @@ describe("Drill page", () => {
     drillChannel!.onmessage({ event: "setFinished", summary: null });
     expect(await screen.findByText("No scored reps.")).toBeInTheDocument();
   });
+
+  it("shows best, average and consistency from the Rust summary", async () => {
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    // Field names exactly as sct_core::set_summary::SetSummary serializes them.
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [70, 90],
+        best: 90,
+        average: 80,
+        grade: "B",
+        consistency: 87.5,
+        stdDev: 10,
+      },
+    });
+    const card = (await screen.findByText("Set Summary")).closest("div")!;
+    expect(card).toHaveTextContent("Best: 90");
+    expect(card).toHaveTextContent("Average: 80 (B)");
+    expect(card).toHaveTextContent("Consistency: 88%");
+    expect(card).not.toHaveTextContent("NaN");
+  });
 });

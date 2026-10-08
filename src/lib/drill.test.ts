@@ -2,11 +2,12 @@ import { describe, expect, it } from "vitest";
 import { applyDrillEvent, IDLE_VIEW, type SetSummary } from "./drill";
 
 const summary: SetSummary = {
-  repsCount: 1,
   repTotals: [80],
-  bestTotal: 80,
-  avgTotal: 80,
-  consistency: 100,
+  best: 80,
+  average: 80,
+  grade: "B",
+  consistency: null,
+  stdDev: 0,
 };
 
 describe("applyDrillEvent", () => {

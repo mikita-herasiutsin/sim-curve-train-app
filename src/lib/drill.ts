@@ -53,12 +53,15 @@ export interface TraceScore {
 
 export type RepScore = HoldScore | TraceScore;
 
+// Mirrors sct_core::set_summary::SetSummary (camelCase).
 export interface SetSummary {
-  repsCount: number;
   repTotals: number[];
-  bestTotal: number;
-  avgTotal: number;
-  consistency: number;
+  best: number;
+  average: number;
+  grade: string;
+  // null with fewer than two scored reps.
+  consistency: number | null;
+  stdDev: number;
 }
 
 export type DrillEvent =

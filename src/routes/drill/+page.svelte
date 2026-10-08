@@ -272,9 +272,17 @@
             <div class="summary-card panel">
               <h3>Set Summary</h3>
               <div class="summary-stats">
-                <div><strong>Best:</strong> {Math.round(view.summary.bestTotal)}</div>
-                <div><strong>Average:</strong> {Math.round(view.summary.avgTotal)}</div>
-                <div><strong>Consistency:</strong> {Math.round(view.summary.consistency)}%</div>
+                <div><strong>Best:</strong> {Math.round(view.summary.best)}</div>
+                <div>
+                  <strong>Average:</strong>
+                  {Math.round(view.summary.average)} ({view.summary.grade})
+                </div>
+                <div>
+                  <strong>Consistency:</strong>
+                  {view.summary.consistency === null
+                    ? "n/a (one rep)"
+                    : `${Math.round(view.summary.consistency)}%`}
+                </div>
               </div>
               <h4>All Reps:</h4>
               <div class="rep-totals">

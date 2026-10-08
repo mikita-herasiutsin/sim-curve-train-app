@@ -109,13 +109,15 @@
     const loop = () => {
       if (view.runState === "countdown" && view.countdownEndsUs > 0) {
         const remainingUs = view.countdownEndsUs - pedalStream.dataNowUs();
-        countdownMs = Math.max(0, Math.ceil(remainingUs / 1000));
+        const ms = Math.max(0, Math.ceil(remainingUs / 1000));
+        countdownMs = Math.ceil(ms / 100) * 100;
       } else if (view.runState === "active" && selectedDrill?.type === "hold") {
         const endUs = view.repStartUs + selectedDrill.holdMs * 1000;
-        holdRemainingMs = Math.min(
+        const ms = Math.min(
           selectedDrill.holdMs,
           Math.max(0, Math.ceil((endUs - pedalStream.dataNowUs()) / 1000)),
         );
+        holdRemainingMs = Math.ceil(ms / 100) * 100;
       }
       rafId = requestAnimationFrame(loop);
     };
@@ -255,10 +257,10 @@
         <div class="left-col">
           <div class="bars-container panel">
             {#if view.runState === "countdown"}
-              <div class="overlay">
+              <div class="overlay" aria-live="assertive">
                 <p class="countdown-label">Get ready</p>
                 {#key countdownSeconds}
-                  <p class="countdown-number" aria-live="assertive">{countdownSeconds}</p>
+                  <p class="countdown-number">{countdownSeconds}</p>
                 {/key}
               </div>
             {:else if view.runState === "finished"}
@@ -294,22 +296,21 @@
             <div class="hold-hud-card panel" data-testid="hold-hud">
               {#if showGo}
                 <p class="go-label">GO!</p>
-              {:else}
-                <p class="hold-time">Hold <span>{(holdRemainingMs / 1000).toFixed(1)}s</span></p>
-                <p class="hold-target">
-                  Target {selectedDrill.target}% &plusmn;{selectedDrill.tolerance}
-                </p>
-                <div
-                  class="hold-progress"
-                  role="progressbar"
-                  aria-label="Hold time left"
-                  aria-valuemin={0}
-                  aria-valuemax={selectedDrill.holdMs}
-                  aria-valuenow={holdRemainingMs}
-                >
-                  <span style:width="{(holdRemainingMs / selectedDrill.holdMs) * 100}%"></span>
-                </div>
               {/if}
+              <p class="hold-time">Hold <span>{(holdRemainingMs / 1000).toFixed(1)}s</span></p>
+              <p class="hold-target">
+                Target {selectedDrill.target}% &plusmn;{selectedDrill.tolerance}%
+              </p>
+              <div
+                class="hold-progress"
+                role="progressbar"
+                aria-label="Hold time left"
+                aria-valuemin={0}
+                aria-valuemax={selectedDrill.holdMs}
+                aria-valuenow={holdRemainingMs}
+              >
+                <span style:width="{(holdRemainingMs / selectedDrill.holdMs) * 100}%"></span>
+              </div>
             </div>
           {/if}
 
@@ -561,13 +562,6 @@
     color: var(--accent);
     font-variant-numeric: tabular-nums;
     animation: pop-in 0.45s ease-out;
-  }
-  .countdown-number.go {
-    color: #22c55e;
-  }
-  .go-overlay {
-    background: rgba(0, 0, 0, 0.35);
-    pointer-events: none;
   }
 
   @keyframes pop-in {

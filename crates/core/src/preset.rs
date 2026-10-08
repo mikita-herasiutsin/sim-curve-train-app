@@ -1149,6 +1149,14 @@ mod tests {
         assert_eq!(preset.drills[2].pedal, Pedal::Brake);
         assert_eq!(preset.drills[3].id, "throttle-rolling-start-35");
         assert_eq!(preset.drills[3].pedal, Pedal::Throttle);
+        assert_eq!(preset.drills[3].tolerance, 10.0);
+        match &preset.drills[3].kind {
+            DrillKind::Hold { target, hold_ms } => {
+                assert!((target - 35.0).abs() < 1e-6);
+                assert_eq!(*hold_ms, 10000);
+            }
+            DrillKind::Trace { .. } => panic!("Expected DrillKind::Hold for drill 3"),
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { scrollIntoViewSoon } from "$lib/scroll";
   import type { DeviceStream } from "$lib/stream";
+  import { normaliseRaw } from "$lib/stream";
   import {
     WIZARD_STEPS,
     assignedAxes,
@@ -143,12 +144,8 @@
   // Live input bars: one rAF loop writes straight to the DOM, so no reactive churn per sample.
   const fills: Partial<Record<PedalName, HTMLElement>> = {};
   const labels: Partial<Record<PedalName, HTMLElement>> = {};
+  const lastRenderedPct: Partial<Record<PedalName, number>> = {};
   let frame = 0;
-
-  /** Raw -32768..32767 mapped linearly to 0..100 (calibration is not known yet). */
-  function rawPercent(raw: number): number {
-    return Math.min(100, Math.max(0, ((raw + 32768) / 65535) * 100));
-  }
 
   function paint() {
     frame = requestAnimationFrame(paint);
@@ -160,10 +157,15 @@
       if (!a || !fill || !label) continue;
       const raw = latest?.axes[a.axis];
       if (raw === undefined) continue;
-      const pct = rawPercent(raw);
-      fill.style.width = `${pct}%`;
-      label.textContent = `${pct.toFixed(0)}%`;
-      fill.parentElement?.setAttribute("aria-valuenow", pct.toFixed(0));
+      const pct = normaliseRaw(raw) * 100;
+      const pctInt = Math.round(pct);
+      // Only update DOM if the integer percentage changed
+      if (lastRenderedPct[pedal] !== pctInt) {
+        lastRenderedPct[pedal] = pctInt;
+        fill.style.width = `${pct}%`;
+        label.textContent = `${pctInt}%`;
+        fill.parentElement?.setAttribute("aria-valuenow", pctInt.toString());
+      }
     }
   }
 
@@ -215,19 +217,21 @@
               {/each}
             </select>
           </td>
-          <td class="live">
+          <td>
             {#if assignments[pedal]}
-              <span
-                class="bar"
-                role="meter"
-                aria-label="{pedalLabel(pedal)} live input"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={0}
-              >
-                <span class="fill" bind:this={fills[pedal]}></span>
-              </span>
-              <span class="pct" bind:this={labels[pedal]}>0%</span>
+              <div class="live">
+                <span
+                  class="bar"
+                  role="meter"
+                  aria-label="{pedalLabel(pedal)} live input"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={0}
+                >
+                  <span class="fill" bind:this={fills[pedal]}></span>
+                </span>
+                <span class="pct" bind:this={labels[pedal]}>0%</span>
+              </div>
             {/if}
           </td>
         </tr>
@@ -290,7 +294,7 @@
     border-collapse: collapse;
   }
 
-  .live {
+  td .live {
     display: flex;
     align-items: center;
     gap: 0.5rem;

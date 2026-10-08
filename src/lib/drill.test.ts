@@ -28,6 +28,15 @@ const summary: SetSummary = {
 };
 
 describe("applyDrillEvent", () => {
+  it("initializes repStartUs to 0", () => {
+    expect(IDLE_VIEW.repStartUs).toBe(0);
+  });
+
+  it("sets repStartUs when a rep starts", () => {
+    const view = applyDrillEvent(IDLE_VIEW, { event: "repStarted", rep: 0, startUs: 1000 });
+    expect(view.repStartUs).toBe(1000);
+  });
+
   it("tracks the countdown", () => {
     const view = applyDrillEvent(IDLE_VIEW, {
       event: "countdownStarted",

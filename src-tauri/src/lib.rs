@@ -6,7 +6,6 @@ use audio::AudioFeedback;
 use input::InputService;
 use sct_core::AppInfo;
 use sct_core::attempts::{Attempt, AttemptStore, NewAttempt};
-use sct_core::audio_map::ToneTarget;
 use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
@@ -280,25 +279,15 @@ fn abort_drill_run(token: u64, input: tauri::State<'_, InputService>) -> Result<
     input.abort_drill(token)
 }
 
+/// Plays a short test tone. Registered in debug builds only (see `run`).
+#[cfg(debug_assertions)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri commands require State by value"
 )]
 #[tauri::command]
 fn audio_test_tone(audio: tauri::State<'_, AudioFeedback>) {
-    let a = audio.inner().clone();
-    a.chime();
-    std::thread::spawn(move || {
-        a.update(ToneTarget {
-            frequency_hz: 600.0,
-            gain: 0.3,
-        });
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        a.update(ToneTarget {
-            frequency_hz: 0.0,
-            gain: 0.0,
-        });
-    });
+    audio.test_tone();
 }
 
 #[expect(
@@ -383,6 +372,7 @@ pub fn run() {
             save_attempt,
             list_attempts,
             best_total,
+            #[cfg(debug_assertions)]
             audio_test_tone,
             audio_set_enabled,
             audio_set_volume

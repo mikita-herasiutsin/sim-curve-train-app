@@ -25,12 +25,10 @@ pub fn map_tone(error_pct: f32, in_band: bool, drill_kind: &DrillKind) -> ToneTa
 
     match drill_kind {
         DrillKind::Hold { .. } => {
+            // Symmetric log-pitch mapping: one octave per 100 % of error, so the tone spans
+            // 220 Hz (pressed 100 % too little) to 880 Hz (100 % too far), 440 Hz on target.
             let clamped_err = error_pct.clamp(-100.0, 100.0);
-
-            // Map -100..100% error to roughly 200..880 Hz
-            // BASE_FREQ_HZ is 440. We add up to 440 for positive, subtract up to 240 for negative.
-            let freq = BASE_FREQ_HZ + (clamped_err * 3.0);
-            let frequency_hz = freq.clamp(150.0, 1000.0);
+            let frequency_hz = BASE_FREQ_HZ * (clamped_err / 100.0).exp2();
 
             ToneTarget {
                 frequency_hz,
@@ -110,6 +108,19 @@ mod tests {
 
         let t_very_high = map_tone(50.0, false, &dummy_hold());
         assert!(t_very_high.frequency_hz > t_high.frequency_hz);
+    }
+
+    #[test]
+    fn log_pitch_is_symmetric_octaves() {
+        let on = map_tone(0.0001, false, &dummy_hold()).frequency_hz;
+        assert!((on - 440.0).abs() < 0.5);
+        let hi = map_tone(100.0, false, &dummy_hold()).frequency_hz;
+        let lo = map_tone(-100.0, false, &dummy_hold()).frequency_hz;
+        assert!((hi - 880.0).abs() < 0.01);
+        assert!((lo - 220.0).abs() < 0.01);
+        let hi50 = map_tone(50.0, false, &dummy_hold()).frequency_hz;
+        let lo50 = map_tone(-50.0, false, &dummy_hold()).frequency_hz;
+        assert!((hi50 / 440.0 - 440.0 / lo50).abs() < 1e-4);
     }
 
     #[test]

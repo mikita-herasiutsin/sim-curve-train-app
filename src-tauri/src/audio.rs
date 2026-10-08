@@ -1,12 +1,14 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, SampleFormat, Stream, StreamConfig};
+use cpal::{BufferSize, Stream, StreamConfig};
 use sct_core::audio_map::{BASE_FREQ_HZ, ToneTarget};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 const CHIME_FREQ_HZ: f32 = 1000.0;
 const CHIME_GAIN: f32 = 0.3;
 const CHIME_DECAY_TIME_S: f32 = 0.08;
+const CHIME_ATTACK_TIME_S: f32 = 0.002;
 const DENORMAL_THRESHOLD: f32 = 1e-6;
 pub const DEFAULT_AUDIO_VOLUME: f32 = 0.2;
 
@@ -87,11 +89,14 @@ pub struct Synth {
     dt: f32,
     smooth_factor: f32,
     chime_decay: f32,
+    chime_attack_step: f32,
     current_freq: f32,
     current_gain: f32,
+    current_vol: f32,
     phase: f32,
     chime_phase: f32,
     chime_env: f32,
+    chime_attacking: bool,
 }
 
 impl Synth {
@@ -105,16 +110,20 @@ impl Synth {
         let dt = 1.0 / sr;
         let smooth_factor = (dt * 150.0).clamp(0.0, 1.0);
         let chime_decay = (-dt / CHIME_DECAY_TIME_S).exp();
+        let chime_attack_step = (dt / CHIME_ATTACK_TIME_S).clamp(0.0, 1.0);
 
         Self {
             dt,
             smooth_factor,
             chime_decay,
+            chime_attack_step,
             current_freq: BASE_FREQ_HZ,
             current_gain: 0.0,
+            current_vol: 0.0,
             phase: 0.0,
             chime_phase: 0.0,
             chime_env: 0.0,
+            chime_attacking: false,
         }
     }
 
@@ -130,6 +139,9 @@ impl Synth {
         }
         if !self.chime_phase.is_finite() {
             self.chime_phase = 0.0;
+        }
+        if !self.current_vol.is_finite() {
+            self.current_vol = 0.0;
         }
         if !self.chime_env.is_finite() {
             self.chime_env = 0.0;
@@ -156,29 +168,34 @@ impl Synth {
             0.0
         };
 
-        // Chime triggering and gating: enabled gates the chime
+        // Chime triggering: a disabled synth ignores (but consumes) the trigger. The envelope
+        // ramps up quickly instead of jumping, and never resets the chime phase, so a retrigger
+        // cannot click.
         let chime_triggered = shared.chime_trigger.load(Ordering::Relaxed)
             && shared.chime_trigger.swap(false, Ordering::Relaxed);
-
-        if enabled {
-            if chime_triggered {
-                self.chime_phase = 0.0;
-                self.chime_env = 1.0;
-            }
-        } else {
-            self.chime_env = 0.0;
+        if !enabled {
+            self.chime_attacking = false;
+        } else if chime_triggered {
+            self.chime_attacking = true;
         }
 
         // Toggling enabled fades gain smoothly (treat disabled as target gain 0)
         let effective_target_gain = if enabled { target_gain } else { 0.0 };
 
-        // Only slew frequency while target gain > 0 (hold the last frequency while fading out)
-        if effective_target_gain > 0.0 {
+        // A new tone starts at its own pitch: snap the frequency while silent, otherwise slew it
+        // (and hold the last frequency while fading out).
+        if self.current_gain == 0.0 {
+            self.current_freq = target_freq;
+        } else if effective_target_gain > 0.0 {
             self.current_freq += (target_freq - self.current_freq) * self.smooth_factor;
         }
         self.current_gain += (effective_target_gain - self.current_gain) * self.smooth_factor;
+        self.current_vol += (master_vol - self.current_vol) * self.smooth_factor;
 
         // Flush denormals
+        if master_vol == 0.0 && self.current_vol.abs() < DENORMAL_THRESHOLD {
+            self.current_vol = 0.0;
+        }
         if effective_target_gain == 0.0 && self.current_gain.abs() < DENORMAL_THRESHOLD {
             self.current_gain = 0.0;
         }
@@ -190,18 +207,30 @@ impl Synth {
             0.0
         };
 
+        if self.chime_attacking {
+            self.chime_env += self.chime_attack_step;
+            if self.chime_env >= 1.0 {
+                self.chime_env = 1.0;
+                self.chime_attacking = false;
+            }
+        } else if enabled {
+            self.chime_env *= self.chime_decay;
+        } else {
+            // Muted: fade the chime out at the gain slew rate instead of cutting it.
+            self.chime_env -= self.chime_env * self.smooth_factor;
+        }
+        if !self.chime_attacking && self.chime_env.abs() < DENORMAL_THRESHOLD {
+            self.chime_env = 0.0;
+        }
+
         let mut chime_sample = 0.0;
-        if enabled && self.chime_env > 0.0 {
+        if self.chime_env > 0.0 {
             self.chime_phase = (self.chime_phase + CHIME_FREQ_HZ * self.dt) % 1.0;
             chime_sample =
                 (self.chime_phase * std::f32::consts::TAU).sin() * self.chime_env * CHIME_GAIN;
-            self.chime_env *= self.chime_decay;
-            if self.chime_env.abs() < DENORMAL_THRESHOLD {
-                self.chime_env = 0.0;
-            }
         }
 
-        let out_sample = (tone_sample + chime_sample) * master_vol;
+        let out_sample = (tone_sample + chime_sample) * self.current_vol;
         if out_sample.is_finite() {
             out_sample.clamp(-1.0, 1.0)
         } else {
@@ -228,9 +257,46 @@ impl Synth {
     }
 }
 
-#[derive(Clone)]
+/// First retry delay after the output stream is lost or could not be opened.
+const BACKOFF_INITIAL: Duration = Duration::from_millis(500);
+/// The retry delay never grows beyond this.
+const BACKOFF_MAX: Duration = Duration::from_secs(5);
+/// A stream that survived this long counts as healthy and resets the backoff.
+const STABLE_AFTER: Duration = Duration::from_secs(10);
+
+/// Retry delays for the stream supervisor: 0.5 s, 1 s, 2 s, 4 s, then 5 s.
+#[derive(Debug, Default)]
+struct Backoff {
+    attempt: u32,
+}
+
+impl Backoff {
+    fn next_delay(&mut self) -> Duration {
+        let factor = 1_u32.checked_shl(self.attempt).unwrap_or(u32::MAX);
+        self.attempt = self.attempt.saturating_add(1);
+        BACKOFF_INITIAL.saturating_mul(factor).min(BACKOFF_MAX)
+    }
+
+    fn reset(&mut self) {
+        self.attempt = 0;
+    }
+}
+
+/// Whether a stream error means the stream is dead and must be rebuilt (device unplugged,
+/// default device changed, stream invalidated). Other errors, such as under-runs, are
+/// transient and the stream keeps running.
+fn needs_rebuild(kind: cpal::ErrorKind) -> bool {
+    matches!(
+        kind,
+        cpal::ErrorKind::DeviceNotAvailable
+            | cpal::ErrorKind::StreamInvalidated
+            | cpal::ErrorKind::DeviceChanged
+    )
+}
+
+/// Audio output. The cpal stream lives on a supervisor thread that rebuilds it when the device
+/// goes away or the default device changes; the synth state in [`SharedState`] survives rebuilds.
 pub struct AudioFeedback {
-    _stream: Option<Arc<Stream>>,
     state: Arc<SharedState>,
     test_tone_generation: Arc<AtomicU64>,
 }
@@ -245,10 +311,15 @@ impl AudioFeedback {
     #[must_use]
     pub fn new() -> Self {
         let state = Arc::new(SharedState::new());
-        let stream = Self::start_audio_stream(state.clone());
+        let supervisor_state = state.clone();
+        if let Err(err) = std::thread::Builder::new()
+            .name("audio-supervisor".into())
+            .spawn(move || supervise(&supervisor_state))
+        {
+            eprintln!("Audio: failed to start supervisor thread: {err}");
+        }
 
         Self {
-            _stream: stream.map(Arc::new),
             state,
             test_tone_generation: Arc::new(AtomicU64::new(0)),
         }
@@ -262,14 +333,32 @@ impl AudioFeedback {
         self.state.set_volume(volume);
     }
 
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(
+            dead_code,
+            reason = "drill wiring comes with SCT-031; test tone is debug-only"
+        )
+    )]
     pub fn update(&self, target: ToneTarget) {
         self.state.update(target);
     }
 
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(
+            dead_code,
+            reason = "drill wiring comes with SCT-031; test tone is debug-only"
+        )
+    )]
     pub fn chime(&self) {
         self.state.chime();
     }
 
+    #[cfg_attr(
+        not(debug_assertions),
+        expect(dead_code, reason = "test tone is debug-only")
+    )]
     pub fn test_tone(&self) {
         self.chime();
         let generation = self.test_tone_generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -277,153 +366,86 @@ impl AudioFeedback {
             frequency_hz: 600.0,
             gain: 0.3,
         });
-        let audio = self.clone();
+        let state = self.state.clone();
+        let latest = self.test_tone_generation.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if audio.test_tone_generation.load(Ordering::Relaxed) == generation {
-                audio.update(ToneTarget {
+            std::thread::sleep(Duration::from_millis(500));
+            if latest.load(Ordering::Relaxed) == generation {
+                state.update(ToneTarget {
                     frequency_hz: BASE_FREQ_HZ,
                     gain: 0.0,
                 });
             }
         });
     }
+}
 
-    fn start_audio_stream(state: Arc<SharedState>) -> Option<Stream> {
-        let host = cpal::default_host();
-        let Some(device) = host.default_output_device() else {
-            eprintln!("Audio: no default output device available");
-            return None;
-        };
-
-        let supported_config = match device.default_output_config() {
-            Ok(config) => config,
-            Err(err) => {
-                eprintln!("Audio: failed to get default output config: {err}");
-                return None;
+/// Owns the cpal stream (it is not `Send` on every platform): opens it, waits for a fatal
+/// error from the stream's error callback, then drops it and opens a new one with backoff.
+/// Also retries when there was no usable output device at startup.
+fn supervise(state: &Arc<SharedState>) {
+    let (tx, rx) = mpsc::channel::<()>();
+    let mut backoff = Backoff::default();
+    loop {
+        let started = Instant::now();
+        match open_stream(state, &tx) {
+            Ok(stream) => {
+                // The error callback sends one message per fatal error; `tx` stays alive here,
+                // so this blocks until the stream dies.
+                let _ = rx.recv();
+                drop(stream);
+                while rx.try_recv().is_ok() {}
+                if started.elapsed() >= STABLE_AFTER {
+                    backoff.reset();
+                }
+                eprintln!("Audio: output stream lost, rebuilding");
             }
-        };
-
-        let fixed_frames = match supported_config.buffer_size() {
-            cpal::SupportedBufferSize::Range { min, max } => Some((*min).max(256).min(*max)),
-            cpal::SupportedBufferSize::Unknown => None,
-        };
-
-        let sample_format = supported_config.sample_format();
-        let config: StreamConfig = supported_config.into();
-
-        let stream = build_stream_with_retry(&device, config, sample_format, fixed_frames, state)?;
-
-        match stream.play() {
-            Ok(()) => Some(stream),
-            Err(err) => {
-                eprintln!("Audio: failed to play audio stream: {err}");
-                None
-            }
+            Err(err) => eprintln!("Audio: {err}"),
         }
+        std::thread::sleep(backoff.next_delay());
     }
 }
 
-fn try_build_f32_stream(
-    device: &cpal::Device,
-    config: &StreamConfig,
-    state: Arc<SharedState>,
-) -> Result<Stream, cpal::Error> {
-    #[expect(clippy::cast_precision_loss, reason = "sample rate fits in f32")]
-    let sample_rate = config.sample_rate as f32;
-    let mut synth = Synth::new(sample_rate);
-    let channels = config.channels as usize;
-    let err_fn = |err| eprintln!("Audio output error: {err}");
-
-    device.build_output_stream(
-        *config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            for frame in data.chunks_mut(channels) {
-                let sample = synth.next_sample(&state);
-                for s in frame.iter_mut() {
-                    *s = sample;
-                }
-            }
-        },
-        err_fn,
-        None,
-    )
-}
-
-fn try_build_i16_stream(
-    device: &cpal::Device,
-    config: &StreamConfig,
-    state: Arc<SharedState>,
-) -> Result<Stream, cpal::Error> {
-    #[expect(clippy::cast_precision_loss, reason = "sample rate fits in f32")]
-    let sample_rate = config.sample_rate as f32;
-    let mut synth = Synth::new(sample_rate);
-    let channels = config.channels as usize;
-    let err_fn = |err| eprintln!("Audio output error: {err}");
-
-    device.build_output_stream(
-        *config,
-        move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
-            for frame in data.chunks_mut(channels) {
-                let sample = synth.next_sample(&state);
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "clamped audio sample fits in i16"
-                )]
-                let i16_sample = (sample.clamp(-1.0, 1.0) * 32767.0).round() as i16;
-                for s in frame.iter_mut() {
-                    *s = i16_sample;
-                }
-            }
-        },
-        err_fn,
-        None,
-    )
-}
-
-fn build_stream_with_retry(
-    device: &cpal::Device,
-    mut config: StreamConfig,
-    sample_format: SampleFormat,
-    fixed_frames: Option<u32>,
-    state: Arc<SharedState>,
-) -> Option<Stream> {
-    if let Some(frames) = fixed_frames {
-        config.buffer_size = BufferSize::Fixed(frames);
-        let res = match sample_format {
-            SampleFormat::F32 => try_build_f32_stream(device, &config, state.clone()),
-            SampleFormat::I16 => try_build_i16_stream(device, &config, state.clone()),
-            other => {
-                eprintln!("Audio: unsupported sample format: {other:?}");
-                return None;
-            }
-        };
-        match res {
-            Ok(stream) => return Some(stream),
-            Err(err) => {
-                eprintln!(
-                    "Audio: build_output_stream failed with fixed buffer size ({err}), retrying with default buffer size"
-                );
-            }
-        }
-    }
-
+fn open_stream(state: &Arc<SharedState>, lost: &mpsc::Sender<()>) -> Result<Stream, String> {
+    let device = cpal::default_host()
+        .default_output_device()
+        .ok_or("no default output device available")?;
+    let mut config: StreamConfig = device
+        .default_output_config()
+        .map_err(|err| format!("failed to get default output config: {err}"))?
+        .into();
+    // WASAPI opens shared-mode streams with AUTOCONVERTPCM, so f32 works whatever the
+    // device's native format is.
     config.buffer_size = BufferSize::Default;
-    let res = match sample_format {
-        SampleFormat::F32 => try_build_f32_stream(device, &config, state),
-        SampleFormat::I16 => try_build_i16_stream(device, &config, state),
-        other => {
-            eprintln!("Audio: unsupported sample format: {other:?}");
-            return None;
-        }
-    };
-    match res {
-        Ok(stream) => Some(stream),
-        Err(err) => {
-            eprintln!("Audio: failed to build output stream: {err}");
-            None
-        }
-    }
+
+    #[expect(clippy::cast_precision_loss, reason = "sample rate fits in f32")]
+    let mut synth = Synth::new(config.sample_rate as f32);
+    let channels = usize::from(config.channels).max(1);
+    let callback_state = state.clone();
+    let lost = lost.clone();
+
+    let stream = device
+        .build_output_stream(
+            config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                for frame in data.chunks_mut(channels) {
+                    let sample = synth.next_sample(&callback_state);
+                    frame.fill(sample);
+                }
+            },
+            move |err: cpal::Error| {
+                eprintln!("Audio output error: {err}");
+                if needs_rebuild(err.kind()) {
+                    let _ = lost.send(());
+                }
+            },
+            None,
+        )
+        .map_err(|err| format!("failed to build output stream: {err}"))?;
+    stream
+        .play()
+        .map_err(|err| format!("failed to play audio stream: {err}"))?;
+    Ok(stream)
 }
 
 #[cfg(test)]
@@ -505,9 +527,8 @@ mod tests {
         shared.set_enabled(false);
 
         // Next sample should NOT instantly drop to 0 (smooth fade)
-        let sample = synth.next_sample(&shared);
+        synth.next_sample(&shared);
         assert!(synth.current_gain() > 0.3);
-        assert!(sample.abs() > 0.0 || synth.current_gain() > 0.0);
 
         // Run until flush denormals takes it to 0
         for _ in 0..6000 {
@@ -585,10 +606,13 @@ mod tests {
         }
         assert!(synth.current_gain() < 0.5);
 
-        // Run until completely faded
+        // Run until completely faded; the frequency stays held while any gain is left
         for _ in 0..5000 {
             synth.next_sample(&shared);
             assert_eq!(synth.current_freq(), held_freq);
+            if synth.current_gain() == 0.0 {
+                break;
+            }
         }
         assert_eq!(synth.current_gain(), 0.0);
     }
@@ -600,13 +624,13 @@ mod tests {
         let shared = SharedState::new();
         shared.chime();
 
-        // Sample 0: triggers chime
+        // Sample 0: starts the attack ramp instead of jumping to full level
         let s0 = synth48.next_sample(&shared);
         assert!(s0.is_finite());
-        assert!((synth48.chime_env() - synth48.chime_decay).abs() < 1e-5);
+        assert!(synth48.chime_env() < 0.05);
 
-        // At 0.08s (48000 * 0.08 = 3840 samples), envelope should be around 1/e (~0.368)
-        for _ in 1..3840 {
+        // 2 ms attack (96 samples), then 0.08 s (3840 samples) of decay: envelope is about 1/e
+        for _ in 1..(96 + 3840) {
             synth48.next_sample(&shared);
         }
         let env_48_80ms = synth48.chime_env();
@@ -614,7 +638,7 @@ mod tests {
         assert!((env_48_80ms - expected_e_decay).abs() < 0.01);
 
         // At ~1.15s (55200 samples total), envelope should be flushed to 0.0
-        for _ in 3840..55_200 {
+        for _ in (96 + 3840)..55_200 {
             synth48.next_sample(&shared);
         }
         assert_eq!(synth48.chime_env(), 0.0);
@@ -624,17 +648,181 @@ mod tests {
         shared.chime();
 
         synth96.next_sample(&shared);
-        // At 0.08s (96000 * 0.08 = 7680 samples), envelope should be around 1/e (~0.368)
-        for _ in 1..7680 {
+        for _ in 1..(192 + 7680) {
             synth96.next_sample(&shared);
         }
         let env_96_80ms = synth96.chime_env();
         assert!((env_96_80ms - expected_e_decay).abs() < 0.01);
 
         // At ~1.15s (110400 samples total), envelope should be flushed to 0.0
-        for _ in 7680..110_400 {
+        for _ in (192 + 7680)..110_400 {
             synth96.next_sample(&shared);
         }
         assert_eq!(synth96.chime_env(), 0.0);
+    }
+    #[test]
+    fn new_tone_starts_at_its_own_pitch() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        shared.update(ToneTarget {
+            frequency_hz: 800.0,
+            gain: 0.3,
+        });
+        synth.next_sample(&shared);
+        assert_eq!(synth.current_freq(), 800.0);
+
+        // Fade out completely, then start a different tone: no glide from the old pitch.
+        shared.update(ToneTarget {
+            frequency_hz: 800.0,
+            gain: 0.0,
+        });
+        for _ in 0..20_000 {
+            synth.next_sample(&shared);
+        }
+        assert_eq!(synth.current_gain(), 0.0);
+        shared.update(ToneTarget {
+            frequency_hz: 300.0,
+            gain: 0.3,
+        });
+        synth.next_sample(&shared);
+        assert_eq!(synth.current_freq(), 300.0);
+    }
+
+    /// Largest per-sample jump allowed at 48 kHz. A 0.3-amplitude 1 kHz chime has a natural
+    /// slope of about 0.039 per sample, and a 0.3-amplitude 600 Hz tone about 0.024.
+    const MAX_STEP: f32 = 0.05;
+
+    struct StepMeter {
+        prev: f32,
+        max_step: f32,
+    }
+
+    impl StepMeter {
+        fn new() -> Self {
+            Self {
+                prev: 0.0,
+                max_step: 0.0,
+            }
+        }
+
+        fn run(&mut self, synth: &mut Synth, shared: &SharedState, samples: usize) {
+            for _ in 0..samples {
+                let s = synth.next_sample(shared);
+                self.max_step = self.max_step.max((s - self.prev).abs());
+                self.prev = s;
+            }
+        }
+
+        fn assert_smooth(&self, what: &str) {
+            assert!(
+                self.max_step <= MAX_STEP,
+                "{what}: per-sample step {} exceeds {MAX_STEP}",
+                self.max_step
+            );
+        }
+    }
+
+    fn tone_600(gain: f32) -> ToneTarget {
+        ToneTarget {
+            frequency_hz: 600.0,
+            gain,
+        }
+    }
+
+    #[test]
+    fn enable_disable_has_no_clicks() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        shared.update(tone_600(0.3));
+        let mut meter = StepMeter::new();
+        meter.run(&mut synth, &shared, 6000);
+        shared.set_enabled(false);
+        meter.run(&mut synth, &shared, 6000);
+        shared.set_enabled(true);
+        meter.run(&mut synth, &shared, 6000);
+        meter.assert_smooth("enable/disable");
+    }
+
+    #[test]
+    fn volume_steps_have_no_clicks() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(0.0);
+        shared.update(tone_600(0.3));
+        let mut meter = StepMeter::new();
+        meter.run(&mut synth, &shared, 3000);
+        shared.set_volume(1.0);
+        meter.run(&mut synth, &shared, 6000);
+        shared.set_volume(0.0);
+        meter.run(&mut synth, &shared, 6000);
+        meter.assert_smooth("volume step");
+    }
+
+    #[test]
+    fn mute_during_chime_fades_out() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        let mut meter = StepMeter::new();
+        meter.run(&mut synth, &shared, 3000);
+        shared.chime();
+        meter.run(&mut synth, &shared, 200);
+        assert!(synth.chime_env() > 0.5);
+        shared.set_enabled(false);
+        meter.run(&mut synth, &shared, 1);
+        assert!(synth.chime_env() > 0.0, "chime must fade, not cut");
+        meter.run(&mut synth, &shared, 8000);
+        meter.assert_smooth("mute during chime");
+        assert_eq!(synth.chime_env(), 0.0);
+    }
+
+    #[test]
+    fn chime_retrigger_has_no_clicks() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        let mut meter = StepMeter::new();
+        meter.run(&mut synth, &shared, 3000);
+        shared.chime();
+        meter.run(&mut synth, &shared, 1500);
+        let before = synth.chime_env();
+        assert!(before < 0.9 && before > 0.1);
+        shared.chime();
+        meter.run(&mut synth, &shared, 300);
+        assert!(
+            synth.chime_env() > before,
+            "retrigger must raise the envelope"
+        );
+        meter.run(&mut synth, &shared, 6000);
+        meter.assert_smooth("chime retrigger");
+    }
+
+    #[test]
+    fn backoff_grows_and_caps() {
+        let mut backoff = Backoff::default();
+        let ms: Vec<u128> = (0..8).map(|_| backoff.next_delay().as_millis()).collect();
+        assert_eq!(ms, [500, 1000, 2000, 4000, 5000, 5000, 5000, 5000]);
+        backoff.reset();
+        assert_eq!(backoff.next_delay(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn backoff_never_overflows() {
+        let mut backoff = Backoff::default();
+        for _ in 0..200 {
+            assert!(backoff.next_delay() <= BACKOFF_MAX);
+        }
+    }
+
+    #[test]
+    fn only_fatal_errors_trigger_a_rebuild() {
+        use cpal::ErrorKind;
+        assert!(needs_rebuild(ErrorKind::DeviceNotAvailable));
+        assert!(needs_rebuild(ErrorKind::StreamInvalidated));
+        assert!(needs_rebuild(ErrorKind::DeviceChanged));
+        assert!(!needs_rebuild(ErrorKind::Xrun));
+        assert!(!needs_rebuild(ErrorKind::Other));
     }
 }

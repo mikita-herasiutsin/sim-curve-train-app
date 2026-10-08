@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { pedalStream, type PedalStream } from "$lib/pedals/stream";
   import { readThemeColors, type AppThemeColors } from "$lib/pedals/theme";
+  import { onThemeChange } from "$lib/settings";
   import { ColumnDecimator, drawGraph } from "$lib/pedals/graphDraw";
   import { getGraphX } from "$lib/pedals/geometry";
 
@@ -17,6 +18,7 @@
 
   let rafId: number | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  let unsubTheme: (() => void) | null = null;
   let width = 0;
   let height = 0;
   let dpr = 1;
@@ -38,9 +40,11 @@
   }
 
   function render(): void {
-    if (!canvasEl || !theme || !decimator || width <= 0 || height <= 0) return;
+    if (!canvasEl || !decimator || width <= 0 || height <= 0) return;
     const ctx = canvasEl.getContext("2d");
     if (!ctx) return;
+    // Colours are cached: read on mount and refreshed by onThemeChange, not per frame.
+    if (!theme) return;
 
     ctx.save();
     ctx.scale(dpr, dpr);
@@ -71,6 +75,12 @@
     height = containerEl.clientHeight || 360;
     updateResolution();
 
+    // Redraw immediately when theme changes
+    unsubTheme = onThemeChange(() => {
+      theme = readThemeColors(containerEl);
+      render();
+    });
+
     if (typeof ResizeObserver !== "undefined") {
       resizeObserver = new ResizeObserver((entries) => {
         for (const entry of entries) {
@@ -84,6 +94,9 @@
       });
       resizeObserver.observe(containerEl);
     }
+
+    // Initial render
+    render();
 
     const loop = () => {
       render();
@@ -100,6 +113,10 @@
     if (resizeObserver) {
       resizeObserver.disconnect();
       resizeObserver = null;
+    }
+    if (unsubTheme) {
+      unsubTheme();
+      unsubTheme = null;
     }
   });
 </script>

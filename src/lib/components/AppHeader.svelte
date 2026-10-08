@@ -3,21 +3,42 @@
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
   import { formatVersion, getAppInfo, type AppInfo } from "$lib/appInfo";
+  import {
+    loadTheme,
+    onThemeChange,
+    resolveTheme,
+    toggleTheme,
+    type ResolvedTheme,
+  } from "$lib/settings";
 
   let info = $state<AppInfo | null>(null);
   let failed = $state(false);
+  let currentTheme = $state<ResolvedTheme>(resolveTheme(loadTheme()));
 
   const current = (path: "/" | "/devices" | "/live") =>
     page.url.pathname === resolve(path) ? ("page" as const) : undefined;
 
   onMount(() => {
+    currentTheme = resolveTheme(loadTheme());
+    const unsubTheme = onThemeChange((resolved) => {
+      currentTheme = resolved;
+    });
+
     getAppInfo()
       .then((result) => (info = result))
       .catch((error: unknown) => {
         console.error("Failed to load app info", error);
         failed = true;
       });
+
+    return () => {
+      unsubTheme();
+    };
   });
+
+  function handleToggleTheme(): void {
+    currentTheme = toggleTheme();
+  }
 </script>
 
 <header class="app-header">
@@ -30,11 +51,57 @@
     <a href={resolve("/devices")} aria-current={current("/devices")}>Devices</a>
     <a href={resolve("/live")} aria-current={current("/live")}>Live</a>
   </nav>
-  {#if info}
-    <span class="version" data-testid="app-version">{formatVersion(info.version)}</span>
-  {:else if failed}
-    <span class="version version--error" data-testid="app-version">version unavailable</span>
-  {/if}
+  <div class="header-actions">
+    <button
+      type="button"
+      class="theme-toggle"
+      data-testid="theme-toggle"
+      onclick={handleToggleTheme}
+      aria-label={currentTheme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+      title={currentTheme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+    >
+      {#if currentTheme === "dark"}
+        <svg
+          class="theme-icon"
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <circle cx="12" cy="12" r="4" />
+          <path d="M12 2v2" />
+          <path d="M12 20v2" />
+          <path d="m4.93 4.93 1.41 1.41" />
+          <path d="m17.66 17.66 1.41 1.41" />
+          <path d="M2 12h2" />
+          <path d="M20 12h2" />
+          <path d="m6.34 17.66-1.41 1.41" />
+          <path d="m19.07 4.93-1.41 1.41" />
+        </svg>
+      {:else}
+        <svg
+          class="theme-icon"
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+        </svg>
+      {/if}
+    </button>
+    {#if info}
+      <span class="version" data-testid="app-version">{formatVersion(info.version)}</span>
+    {:else if failed}
+      <span class="version version--error" data-testid="app-version">version unavailable</span>
+    {/if}
+  </div>
 </header>
 
 <style>
@@ -99,5 +166,39 @@
 
   .version--error {
     color: var(--brake);
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--surface-raised);
+    color: var(--text-muted);
+    cursor: pointer;
+    transition:
+      color 0.15s ease,
+      background 0.15s ease,
+      border-color 0.15s ease;
+  }
+
+  .theme-toggle:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+  .theme-icon {
+    width: 1.125rem;
+    height: 1.125rem;
   }
 </style>

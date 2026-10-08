@@ -89,7 +89,7 @@
   .flash-overlay {
     position: fixed;
     inset: 0;
-    background-color: #ffffff;
+    background-color: var(--flash);
     z-index: 9999;
     pointer-events: none;
   }
@@ -107,7 +107,7 @@
     border-radius: 999px;
     font-size: 0.8125rem;
     font-weight: 500;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 4px 16px color-mix(in srgb, var(--border) 60%, transparent);
     pointer-events: none;
     white-space: nowrap;
   }

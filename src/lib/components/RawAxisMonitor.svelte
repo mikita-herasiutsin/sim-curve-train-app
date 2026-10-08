@@ -140,6 +140,7 @@
 
   .value {
     text-align: right;
+    color: var(--text);
     font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
     font-size: 0.8125rem;
     font-variant-numeric: tabular-nums;

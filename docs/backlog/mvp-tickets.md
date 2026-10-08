@@ -223,7 +223,7 @@ Save every finished rep and set to SQLite: drill, preset, time, total score, sub
 - **AC:** the PB updates right away; the leaderboard level is set by Q-02.
 - **Deps:** SCT-050
 
-### SCT-023 · Dark/light theme switch ⬜ · S
+### SCT-023 · Dark/light theme switch ✅ · S
 Theme tokens (CSS variables) for dark and light HUD palettes, including the canvas colours. The toggle is in the header and the choice is persisted.
 - **AC:** every screen and canvas is readable in both themes.
 - **Deps:** SCT-020

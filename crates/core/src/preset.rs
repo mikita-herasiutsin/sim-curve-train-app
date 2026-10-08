@@ -19,6 +19,10 @@ const fn default_reps() -> u32 {
     DEFAULT_REPS
 }
 
+const fn default_tolerance() -> f32 {
+    10.0
+}
+
 const fn default_lead_in() -> u32 {
     DEFAULT_LEAD_IN_MS
 }
@@ -63,6 +67,7 @@ pub struct Drill {
     #[serde(default = "default_lead_in")]
     pub lead_in_ms: u32,
     /// Permissible error tolerance in percent (`0.5..=50.0`).
+    #[serde(default = "default_tolerance")]
     pub tolerance: f32,
     /// Drill type and parameters (flattened in JSON).
     #[serde(flatten)]
@@ -511,6 +516,24 @@ pub fn parse_preset(json: &str) -> Result<Preset, PresetError> {
     let preset: Preset = serde_json::from_value(value)?;
     preset.validate()?;
     Ok(preset)
+}
+
+/// Finds the drill `drill_id` inside the preset `preset_id`.
+///
+/// # Errors
+///
+/// Returns a message naming the missing preset or drill.
+pub fn find_drill(presets: &[Preset], preset_id: &str, drill_id: &str) -> Result<Drill, String> {
+    let preset = presets
+        .iter()
+        .find(|p| p.id == preset_id)
+        .ok_or_else(|| format!("preset '{preset_id}' not found"))?;
+    preset
+        .drills
+        .iter()
+        .find(|d| d.id == drill_id)
+        .cloned()
+        .ok_or_else(|| format!("drill '{drill_id}' not found in preset '{preset_id}'"))
 }
 
 /// Loads and validates all preset files from a directory.
@@ -1120,10 +1143,20 @@ mod tests {
         let json = include_str!("../../../presets/sample.json");
         let preset = parse_preset(json).expect("presets/sample.json must be valid");
         assert_eq!(preset.id, "sample");
-        assert_eq!(preset.drills.len(), 3);
+        assert_eq!(preset.drills.len(), 4);
         assert_eq!(preset.drills[0].pedal, Pedal::Brake);
         assert_eq!(preset.drills[1].pedal, Pedal::Throttle);
         assert_eq!(preset.drills[2].pedal, Pedal::Brake);
+        assert_eq!(preset.drills[3].id, "throttle-rolling-start-35");
+        assert_eq!(preset.drills[3].pedal, Pedal::Throttle);
+        assert_eq!(preset.drills[3].tolerance, 10.0);
+        match &preset.drills[3].kind {
+            DrillKind::Hold { target, hold_ms } => {
+                assert!((target - 35.0).abs() < 1e-6);
+                assert_eq!(*hold_ms, 10000);
+            }
+            DrillKind::Trace { .. } => panic!("Expected DrillKind::Hold for drill 3"),
+        }
     }
 
     #[test]
@@ -1205,5 +1238,36 @@ mod tests {
         };
         assert!(err_in_file.to_string().contains("in 'bar.json'"));
         assert!(err_in_file.source().is_some());
+    }
+
+    #[test]
+    fn find_drill_looks_up_by_preset_and_drill_id() {
+        let preset = Preset {
+            schema_version: SCHEMA_VERSION,
+            id: "p".to_string(),
+            name: "P".to_string(),
+            description: String::new(),
+            drills: vec![valid_hold_drill(), valid_trace_drill()],
+        };
+        let presets = [preset];
+        assert_eq!(
+            find_drill(&presets, "p", "hairpin").unwrap(),
+            valid_trace_drill()
+        );
+        assert_eq!(
+            find_drill(&presets, "x", "hairpin").unwrap_err(),
+            "preset 'x' not found"
+        );
+        assert_eq!(
+            find_drill(&presets, "p", "nope").unwrap_err(),
+            "drill 'nope' not found in preset 'p'"
+        );
+    }
+
+    #[test]
+    fn tolerance_defaults_to_ten_when_omitted() {
+        let json = r#"{"schemaVersion":1,"id":"p","name":"P","drills":[{"id":"d","name":"D","type":"hold","pedal":"brake","target":70,"holdMs":2000}]}"#;
+        let preset = parse_preset(json).unwrap();
+        assert!((preset.drills[0].tolerance - 10.0).abs() < f32::EPSILON);
     }
 }

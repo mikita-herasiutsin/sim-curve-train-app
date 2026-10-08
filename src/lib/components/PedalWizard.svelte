@@ -1,6 +1,8 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
+  import { scrollIntoViewSoon } from "$lib/scroll";
   import type { DeviceStream } from "$lib/stream";
+  import { normaliseRaw } from "$lib/stream";
   import {
     WIZARD_STEPS,
     assignedAxes,
@@ -45,11 +47,14 @@
 
   // Assignments from before "Detect pedals", restored on Cancel (the saved profile stays as is).
   let beforeWizard: Assignments = {};
+  let sectionEl = $state<HTMLElement | null>(null);
 
   function start() {
     beforeWizard = assignments;
     assignments = {};
     beginStep(0);
+    // Bring the instructions and the axis bars below them into view.
+    void scrollIntoViewSoon(() => sectionEl?.parentElement);
   }
 
   function beginStep(index: number) {
@@ -136,10 +141,45 @@
     timer = undefined;
   }
 
-  onDestroy(stopTimer);
+  // Live input bars: one rAF loop writes straight to the DOM, so no reactive churn per sample.
+  const fills: Partial<Record<PedalName, HTMLElement>> = {};
+  const labels: Partial<Record<PedalName, HTMLElement>> = {};
+  const lastRenderedPct: Partial<Record<PedalName, number>> = {};
+  let frame = 0;
+
+  function paint() {
+    frame = requestAnimationFrame(paint);
+    const latest = stream.latest;
+    for (const { pedal } of WIZARD_STEPS) {
+      const a = assignments[pedal];
+      const fill = fills[pedal];
+      const label = labels[pedal];
+      if (!a || !fill || !label) continue;
+      const raw = latest?.axes[a.axis];
+      if (raw === undefined) continue;
+      const pct = normaliseRaw(raw) * 100;
+      const pctInt = Math.round(pct);
+      // Only update DOM if the integer percentage changed
+      if (lastRenderedPct[pedal] !== pctInt) {
+        lastRenderedPct[pedal] = pctInt;
+        fill.style.width = `${pct}%`;
+        label.textContent = `${pctInt}%`;
+        fill.parentElement?.setAttribute("aria-valuenow", pctInt.toString());
+      }
+    }
+  }
+
+  onMount(() => {
+    frame = requestAnimationFrame(paint);
+  });
+
+  onDestroy(() => {
+    stopTimer();
+    cancelAnimationFrame(frame);
+  });
 </script>
 
-<section class="wizard" aria-label="Pedal setup">
+<section class="wizard" aria-label="Pedal setup" bind:this={sectionEl}>
   {#if step}
     <p class="prompt" aria-live="polite">
       Press <strong>{step.pedal}</strong> fully and release.
@@ -176,6 +216,23 @@
                 <option value={axis.toString()}>Axis {axis}</option>
               {/each}
             </select>
+          </td>
+          <td>
+            {#if assignments[pedal]}
+              <div class="live">
+                <span
+                  class="bar"
+                  role="meter"
+                  aria-label="{pedalLabel(pedal)} live input"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={0}
+                >
+                  <span class="fill" bind:this={fills[pedal]}></span>
+                </span>
+                <span class="pct" bind:this={labels[pedal]}>0%</span>
+              </div>
+            {/if}
           </td>
         </tr>
       {/each}
@@ -235,6 +292,38 @@
 
   table {
     border-collapse: collapse;
+  }
+
+  td .live {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-left: 0.75rem;
+  }
+
+  .bar {
+    display: inline-block;
+    width: 10rem;
+    height: 0.75rem;
+    border-radius: 999px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .fill {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+  }
+
+  .pct {
+    min-width: 4.5ch;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-muted);
+    font-size: 0.875rem;
   }
 
   th {

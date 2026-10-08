@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { normaliseRaw, type DeviceStream, type SampleBatch } from "$lib/stream";
+  import { rawDisplay } from "$lib/rawDisplay";
 
   let { stream, error = null }: { stream: DeviceStream; error?: string | null } = $props();
 
@@ -63,18 +64,19 @@
     <ol class="axes">
       {#each axes as raw, i (i)}
         {@const value = normaliseRaw(raw)}
+        {@const displayRaw = rawDisplay(raw)}
         <li>
           <span class="label">Axis {i}</span>
           <span
             class="bar"
             role="meter"
-            aria-valuenow={raw}
-            aria-valuemin={-32768}
-            aria-valuemax={32767}
+            aria-valuenow={displayRaw}
+            aria-valuemin={0}
+            aria-valuemax={65535}
           >
             <span class="fill" style:width="{value * 100}%"></span>
           </span>
-          <span class="value">{raw}</span>
+          <span class="value">{displayRaw}</span>
           <span class="value">{(value * 100).toFixed(1)}%</span>
         </li>
       {/each}

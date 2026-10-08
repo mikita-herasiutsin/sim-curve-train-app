@@ -95,7 +95,7 @@ describe("startRealSource", () => {
     startRealSource(stream, (status) => statuses.push(status));
 
     await vi.waitFor(() => {
-      expect(statuses[statuses.length - 1]).toEqual({ kind: "live", device: pedals });
+      expect(statuses[statuses.length - 1]).toMatchObject({ kind: "live", device: pedals });
       expect(calls.startStream).toContain(1);
     });
   });
@@ -121,7 +121,7 @@ describe("startRealSource", () => {
     await emit("devices-changed", { devices: state.devices, error: null });
 
     await vi.waitFor(() => {
-      expect(statuses[statuses.length - 1]).toEqual({ kind: "live", device: pedals });
+      expect(statuses[statuses.length - 1]).toMatchObject({ kind: "live", device: pedals });
       expect(calls.startStream).toContain(1);
     });
   });
@@ -139,7 +139,7 @@ describe("startRealSource", () => {
     startRealSource(stream, (status) => statuses.push(status));
 
     await vi.waitFor(() => {
-      expect(statuses[statuses.length - 1]).toEqual({ kind: "live", device: pedals });
+      expect(statuses[statuses.length - 1]).toMatchObject({ kind: "live", device: pedals });
     });
 
     state.devices = [];
@@ -166,7 +166,7 @@ describe("startRealSource", () => {
     const stop = startRealSource(stream, (status) => statuses.push(status));
 
     await vi.waitFor(() => {
-      expect(statuses[statuses.length - 1]).toEqual({ kind: "live", device: pedals });
+      expect(statuses[statuses.length - 1]).toMatchObject({ kind: "live", device: pedals });
     });
 
     stop();

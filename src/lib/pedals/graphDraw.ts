@@ -1,3 +1,4 @@
+import { bandColor } from "./barsDraw";
 import { getGraphX, getGraphY } from "./geometry";
 import type { AppThemeColors } from "./theme";
 
@@ -181,6 +182,40 @@ export function buildSignalSegments(
   return segments;
 }
 
+/** A target band (target +- tolerance, as 0..1 fractions) for one pedal. */
+export interface TargetBand {
+  pedal: "brake" | "throttle" | "clutch";
+  target: number;
+  tolerance: number;
+}
+
+/** Shades the target band across the whole graph: green while the pedal is inside it, red outside. */
+export function drawTargetBand(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  band: TargetBand,
+  theme: AppThemeColors,
+  paddingTop: number,
+  paddingBottom: number,
+  inBand: boolean,
+): void {
+  const top = getGraphY(
+    Math.min(1, band.target + band.tolerance),
+    height,
+    paddingTop,
+    paddingBottom,
+  );
+  const bottom = getGraphY(
+    Math.max(0, band.target - band.tolerance),
+    height,
+    paddingTop,
+    paddingBottom,
+  );
+  ctx.fillStyle = bandColor(inBand, theme);
+  ctx.fillRect(0, top, width, bottom - top);
+}
+
 /**
  * Draws the complete pedal graph onto a CanvasRenderingContext2D.
  */
@@ -195,6 +230,9 @@ export function drawGraph(
   paddingTop = 18,
   paddingBottom = 26,
   dpr = 1,
+  band: TargetBand | null = null,
+  /** Whether the latest value of the band's pedal is inside the band. */
+  bandInBand = false,
 ): void {
   // Clear canvas
   ctx.clearRect(0, 0, width, height);
@@ -244,6 +282,8 @@ export function drawGraph(
     if (line.x >= 16 && line.x <= width - 16) ctx.fillText(line.label, line.x, height - 6);
   }
   ctx.setLineDash([]);
+
+  if (band) drawTargetBand(ctx, width, height, band, theme, paddingTop, paddingBottom, bandInBand);
 
   // Draw Brake line
   const brakeSegments = buildSignalSegments(

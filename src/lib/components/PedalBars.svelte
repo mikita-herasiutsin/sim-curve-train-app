@@ -7,9 +7,17 @@
 
   interface Props {
     stream?: PedalStream;
+    targetPedal?: "brake" | "throttle" | "clutch";
+    targetVal?: number | null;
+    targetTolerance?: number | null;
   }
 
-  let { stream = pedalStream }: Props = $props();
+  let {
+    stream = pedalStream,
+    targetPedal,
+    targetVal = null,
+    targetTolerance = null,
+  }: Props = $props();
 
   let containerEl = $state<HTMLDivElement | null>(null);
   let canvasEl = $state<HTMLCanvasElement | null>(null);
@@ -43,7 +51,17 @@
     const brake = latest?.brake ?? 0;
     const throttle = latest?.throttle ?? 0;
 
-    drawPedalBars(ctx, width, height, brake, throttle, theme);
+    drawPedalBars(
+      ctx,
+      width,
+      height,
+      brake,
+      throttle,
+      theme,
+      targetPedal,
+      targetVal,
+      targetTolerance,
+    );
     ctx.restore();
   }
 

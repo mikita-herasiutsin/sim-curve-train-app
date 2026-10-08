@@ -7,7 +7,7 @@ export type SourceStatus =
   | { kind: "connecting" }
   /** No connected device has a saved profile: the user has to set up pedals first. */
   | { kind: "noProfile" }
-  | { kind: "live"; device: DeviceInfo }
+  | { kind: "live"; device: DeviceInfo; token: number }
   /** The device that was live got unplugged; it reconnects when it comes back. */
   | { kind: "disconnected"; device: DeviceInfo }
   | { kind: "error"; message: string };
@@ -76,7 +76,7 @@ export function startRealSource(
         device = next;
         lastLive = target;
         // A device that disappeared during start() set `dirty`, and the next pass detaches it.
-        onStatus({ kind: "live", device: target });
+        onStatus({ kind: "live", device: target, token: next.streamToken! });
       } while (dirty && !stopped);
     } catch (e: unknown) {
       onStatus({ kind: "error", message: String(e) });

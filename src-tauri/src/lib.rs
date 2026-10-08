@@ -1,4 +1,5 @@
 mod input;
+mod window;
 
 use input::InputService;
 use sct_core::AppInfo;
@@ -6,6 +7,8 @@ use sct_core::attempts::{Attempt, AttemptStore, NewAttempt};
 use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
+use sct_core::drill_engine::DrillEvent;
+use sct_core::preset::{Preset, find_drill, load_dir};
 use sct_core::profile::{DeviceProfile, ProfileStore};
 use sct_core::stream::SampleBatch;
 use tauri::Manager;
@@ -223,6 +226,57 @@ fn best_total(
     store.best_total(&drill_id).map_err(|e| e.to_string())
 }
 
+/// Loads the bundled presets from `<resource dir>/presets`.
+fn load_presets(app: &tauri::AppHandle) -> Result<Vec<Preset>, String> {
+    let resources = app
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Failed to get resource dir: {e}"))?;
+    load_dir(&resources.join("presets")).map_err(|e| format!("Failed to load presets: {e}"))
+}
+
+/// Lists all bundled drill presets.
+/// `async` so the file reads run off the main thread.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn list_presets(app: tauri::AppHandle) -> Result<Vec<Preset>, String> {
+    load_presets(&app)
+}
+
+/// Starts a drill run for a bundled drill, feeding samples from the active stream.
+///
+/// The drill is looked up on the Rust side; the webview only names it.
+/// `async` so it can wait for the input thread without blocking the main thread.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn start_drill_run(
+    token: u64,
+    preset_id: String,
+    drill_id: String,
+    on_event: Channel<DrillEvent>,
+    app: tauri::AppHandle,
+    input: tauri::State<'_, InputService>,
+) -> Result<(), String> {
+    let drill = find_drill(&load_presets(&app)?, &preset_id, &drill_id)?;
+    input.start_drill(token, drill, on_event)
+}
+
+/// Aborts the active drill run.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn abort_drill_run(token: u64, input: tauri::State<'_, InputService>) -> Result<(), String> {
+    input.abort_drill(token)
+}
+
 /// Opens the profile database in the app data directory. The app still runs without it.
 fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
     let path = match app.path().app_data_dir() {
@@ -260,6 +314,7 @@ fn open_attempt_store(app: &tauri::App) -> Option<AttemptStore> {
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            window::fit_main_window(app);
             let store = open_profile_store(app);
             app.manage(InputService::spawn(app.handle().clone(), store));
 
@@ -279,6 +334,9 @@ pub fn run() {
             save_profile,
             reset_profile,
             profiled_devices,
+            list_presets,
+            start_drill_run,
+            abort_drill_run,
             save_attempt,
             list_attempts,
             best_total

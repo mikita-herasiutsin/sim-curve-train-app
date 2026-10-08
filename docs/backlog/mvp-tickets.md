@@ -113,12 +113,12 @@ Define a JSON schema for presets and drills (types: hold, trace, sequence later)
 - **AC:** an invalid preset gives a clear error; unit tests cover parsing and validation; `docs/preset-format.md` is written as part of SCT-030 to document the format.
 - **Deps:** SCT-001
 
-### SCT-031 · Hold drill, single rep 🟨 · M
+### SCT-031 · Hold drill, single rep ✅ · M
 A countdown runs, then the screen shows the target % (**as a large number**) and a tolerance band on the bar and the graph. The user holds the pedal inside the band for the set time. The band turns green inside and red outside.
 - **AC:** works for both brake and throttle (from the `pedal` field); rep timing comes from the sample timestamps, not the UI clock.
 - **Deps:** SCT-021, SCT-030
 
-### SCT-032 · Hold scoring + result card 🟨 · M
+### SCT-032 · Hold scoring + result card ✅ · M
 Score each rep in Rust on the full-rate samples:
 - **Accuracy:** time in the band and RMSE
 - **Timing:** time until the pedal is first inside the band
@@ -128,7 +128,7 @@ These combine into a total from 0 to 100 and a grade (S ≥ 95 / A ≥ 85 / B �
 - **AC:** scoring has unit tests on synthetic sample series (a perfect hold scores ≥ 98; a 10% offset scores below C).
 - **Deps:** SCT-031
 
-### SCT-033 · Reps + set summary 🟨 · S
+### SCT-033 · Reps + set summary ✅ · S
 A drill runs N reps (from the preset; default 5) with a short pause between reps. The set summary shows the score for each rep and adds a **consistency** sub-score (spread of the rep scores).
 - **AC:** you can abort mid-set; the summary shows the best, average and consistency.
 - **Deps:** SCT-032

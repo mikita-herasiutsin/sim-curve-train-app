@@ -3,15 +3,17 @@
   import { pedalStream, type PedalStream } from "$lib/pedals/stream";
   import { readThemeColors, type AppThemeColors } from "$lib/pedals/theme";
   import { onThemeChange } from "$lib/settings";
-  import { ColumnDecimator, drawGraph } from "$lib/pedals/graphDraw";
+  import { ColumnDecimator, drawGraph, type TargetBand } from "$lib/pedals/graphDraw";
   import { getGraphX } from "$lib/pedals/geometry";
 
   interface Props {
     stream?: PedalStream;
     windowSeconds?: number;
+    /** Optional target band drawn behind the lines (drill screen). */
+    band?: TargetBand | null;
   }
 
-  let { stream = pedalStream, windowSeconds = 5 }: Props = $props();
+  let { stream = pedalStream, windowSeconds = 5, band = null }: Props = $props();
 
   let containerEl = $state<HTMLDivElement | null>(null);
   let canvasEl = $state<HTMLCanvasElement | null>(null);
@@ -39,6 +41,14 @@
     }
   }
 
+  /** Whether the latest value of the band's pedal sits inside the band. */
+  function inBand(b: TargetBand | null): boolean {
+    const latest = b ? stream.history.latest() : undefined;
+    if (!b || !latest) return false;
+    const value = b.pedal === "brake" ? latest.brake : latest.throttle;
+    return Math.abs(value - b.target) <= b.tolerance;
+  }
+
   function render(): void {
     if (!canvasEl || !decimator || width <= 0 || height <= 0) return;
     const ctx = canvasEl.getContext("2d");
@@ -62,7 +72,20 @@
       decimator?.accumulate(xDevice, frame.brake, frame.throttle);
     });
 
-    drawGraph(ctx, width, height, decimator, nowUs, windowUs, theme, 18, 26, dpr);
+    drawGraph(
+      ctx,
+      width,
+      height,
+      decimator,
+      nowUs,
+      windowUs,
+      theme,
+      18,
+      26,
+      dpr,
+      band,
+      inBand(band),
+    );
     ctx.restore();
   }
 

@@ -86,6 +86,9 @@ export function drawPedalBars(
   brake: number,
   throttle: number,
   theme: AppThemeColors,
+  targetPedal?: "brake" | "throttle" | "clutch",
+  targetVal?: number | null,
+  targetTolerance?: number | null,
 ): void {
   ctx.clearRect(0, 0, width, height);
 
@@ -100,26 +103,50 @@ export function drawPedalBars(
       val: brake,
       name: "BRAKE",
       color: theme.brake,
+      isTarget: targetPedal === "brake",
     },
     {
       col: layout.throttle,
       val: throttle,
       name: "THROTTLE",
       color: theme.throttle,
+      isTarget: targetPedal === "throttle",
     },
   ];
 
   for (const item of columns) {
-    const { col, val, name, color } = item;
+    const { col, val, name, color, isTarget } = item;
     const centerX = col.x + col.width / 2;
+    const hasTarget = isTarget && targetVal != null;
 
     // 1. Large % Number
-    ctx.fillStyle = color;
     ctx.textAlign = "center";
     ctx.textBaseline = "alphabetic";
     const percentFontSize = Math.min(32, Math.max(18, Math.floor(col.width * 0.45)));
     ctx.font = `700 ${percentFontSize}px "Inter", system-ui, sans-serif`;
-    ctx.fillText(`${getPercentLabel(val)}%`, centerX, col.percentY);
+
+    if (hasTarget) {
+      // Draw two numbers side by side: Target -> Current
+      const tLabel = getPercentLabel(targetVal!);
+      const cLabel = getPercentLabel(val);
+      const inBand = targetTolerance != null && Math.abs(val - targetVal!) <= targetTolerance;
+
+      const valColor = inBand ? theme.accent : color;
+
+      // We will place target on the left, current on the right
+      ctx.textAlign = "right";
+      ctx.fillStyle = theme.textMuted;
+      ctx.fillText(`${tLabel}%`, centerX - 6, col.percentY);
+
+      ctx.textAlign = "left";
+      ctx.fillStyle = valColor;
+      ctx.fillText(`${cLabel}%`, centerX + 6, col.percentY);
+
+      ctx.textAlign = "center"; // reset for label below
+    } else {
+      ctx.fillStyle = color;
+      ctx.fillText(`${getPercentLabel(val)}%`, centerX, col.percentY);
+    }
 
     // 2. Label
     ctx.fillStyle = theme.textMuted;
@@ -135,6 +162,29 @@ export function drawPedalBars(
     ctx.fill();
     ctx.stroke();
 
+    // Target Band (behind the fill)
+    let inBandFill = false;
+    if (hasTarget && targetTolerance != null) {
+      const bandTopVal = Math.min(1.0, targetVal! + targetTolerance!);
+      const bandBotVal = Math.max(0.0, targetVal! - targetTolerance!);
+      const topH = getBarFillHeight(bandTopVal, col.barHeight);
+      const botH = getBarFillHeight(bandBotVal, col.barHeight);
+
+      const bandY = col.barY + col.barHeight - topH;
+      const bandH = topH - botH;
+
+      inBandFill = Math.abs(val - targetVal!) <= targetTolerance!;
+
+      ctx.save();
+      roundRect(ctx, col.x, col.barY, col.width, col.barHeight, 8);
+      ctx.clip();
+
+      ctx.fillStyle = bandColor(inBandFill, theme);
+      ctx.fillRect(col.x, bandY, col.width, bandH);
+
+      ctx.restore();
+    }
+
     // 4. Bar Fill (grows from bottom)
     const fillH = getBarFillHeight(val, col.barHeight);
     if (fillH > 0) {
@@ -144,9 +194,27 @@ export function drawPedalBars(
       roundRect(ctx, col.x, col.barY, col.width, col.barHeight, 8);
       ctx.clip();
 
-      ctx.fillStyle = color;
+      ctx.fillStyle = hasTarget && inBandFill ? theme.accent : color;
       ctx.fillRect(col.x, fillY, col.width, fillH);
       ctx.restore();
     }
+
+    // Target Line (on top of fill)
+    if (hasTarget) {
+      const tH = getBarFillHeight(targetVal!, col.barHeight);
+      const tY = col.barY + col.barHeight - tH;
+
+      ctx.beginPath();
+      ctx.moveTo(col.x, tY);
+      ctx.lineTo(col.x + col.width, tY);
+      ctx.strokeStyle = theme.text;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
   }
+}
+
+/** Translucent green while the value is inside the target band, red outside it. */
+export function bandColor(inBand: boolean, theme: AppThemeColors): string {
+  return (inBand ? theme.throttle : theme.brake) + "50";
 }

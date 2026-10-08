@@ -14,6 +14,9 @@ fn main() {
             "save_profile",
             "reset_profile",
             "profiled_devices",
+            "save_attempt",
+            "list_attempts",
+            "best_total",
         ]),
     ))
     .expect("failed to run tauri-build");

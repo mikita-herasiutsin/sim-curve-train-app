@@ -2,6 +2,7 @@ mod input;
 
 use input::InputService;
 use sct_core::AppInfo;
+use sct_core::attempts::{Attempt, AttemptStore, NewAttempt};
 use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
@@ -147,6 +148,81 @@ fn profiled_devices(input: tauri::State<'_, InputService>) -> Vec<u32> {
     input.profiled_devices()
 }
 
+/// Shared handle to the attempts database, managed by Tauri.
+#[derive(Clone)]
+pub struct AttemptsService {
+    store: std::sync::Arc<std::sync::Mutex<Option<AttemptStore>>>,
+}
+
+impl AttemptsService {
+    #[must_use]
+    pub fn new(store: Option<AttemptStore>) -> Self {
+        Self {
+            store: std::sync::Arc::new(std::sync::Mutex::new(store)),
+        }
+    }
+}
+
+fn lock_attempts<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Saves a completed or aborted drill set attempt and each of its reps.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn save_attempt(
+    attempt: NewAttempt,
+    attempts: tauri::State<'_, AttemptsService>,
+) -> Result<i64, String> {
+    let guard = lock_attempts(&attempts.store);
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "attempts store is unavailable".to_string())?;
+    store.save_attempt(&attempt).map_err(|e| e.to_string())
+}
+
+/// Lists recorded attempts for a drill, ordered from newest to oldest.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn list_attempts(
+    drill_id: String,
+    limit: u32,
+    attempts: tauri::State<'_, AttemptsService>,
+) -> Result<Vec<Attempt>, String> {
+    let guard = lock_attempts(&attempts.store);
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "attempts store is unavailable".to_string())?;
+    store
+        .list_attempts(&drill_id, limit)
+        .map_err(|e| e.to_string())
+}
+
+/// Returns the highest total score recorded for a drill, or `None` if no attempts exist.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn best_total(
+    drill_id: String,
+    attempts: tauri::State<'_, AttemptsService>,
+) -> Result<Option<f32>, String> {
+    let guard = lock_attempts(&attempts.store);
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "attempts store is unavailable".to_string())?;
+    store.best_total(&drill_id).map_err(|e| e.to_string())
+}
+
 /// Opens the profile database in the app data directory. The app still runs without it.
 fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
     let path = match app.path().app_data_dir() {
@@ -160,6 +236,21 @@ fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
         .inspect_err(|error| eprintln!("failed to open {}: {error}", path.display()))
         .ok()
 }
+
+/// Opens the attempts database in the app data directory. The app still runs without it.
+fn open_attempt_store(app: &tauri::App) -> Option<AttemptStore> {
+    let path = match app.path().app_data_dir() {
+        Ok(dir) => dir.join("profiles.db"),
+        Err(error) => {
+            eprintln!("no app data directory, attempts won't be saved: {error}");
+            return None;
+        }
+    };
+    AttemptStore::open(&path)
+        .inspect_err(|error| eprintln!("failed to open attempts in {}: {error}", path.display()))
+        .ok()
+}
+
 /// Builds and runs the Tauri application.
 ///
 /// # Panics
@@ -171,6 +262,9 @@ pub fn run() {
         .setup(|app| {
             let store = open_profile_store(app);
             app.manage(InputService::spawn(app.handle().clone(), store));
+
+            let attempt_store = open_attempt_store(app);
+            app.manage(AttemptsService::new(attempt_store));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -184,7 +278,10 @@ pub fn run() {
             load_profile,
             save_profile,
             reset_profile,
-            profiled_devices
+            profiled_devices,
+            save_attempt,
+            list_attempts,
+            best_total
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

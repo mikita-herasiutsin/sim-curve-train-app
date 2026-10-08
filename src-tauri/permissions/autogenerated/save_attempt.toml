@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-attempt"
+description = "Enables the save_attempt command without any pre-configured scope."
+commands.allow = ["save_attempt"]
+
+[[permission]]
+identifier = "deny-save-attempt"
+description = "Denies the save_attempt command without any pre-configured scope."
+commands.deny = ["save_attempt"]

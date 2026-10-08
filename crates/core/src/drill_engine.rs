@@ -463,7 +463,7 @@ mod tests {
             pedal: Pedal::Brake,
             reps,
             lead_in_ms,
-            tolerance: 5.0,
+            tolerance: Some(5.0),
             kind: DrillKind::Hold { target, hold_ms },
         }
     }
@@ -475,7 +475,7 @@ mod tests {
             pedal: Pedal::Brake,
             reps,
             lead_in_ms,
-            tolerance: 6.0,
+            tolerance: Some(6.0),
             kind: DrillKind::Trace { points },
         }
     }

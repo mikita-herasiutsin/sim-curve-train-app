@@ -868,7 +868,7 @@ mod tests {
             pedal,
             reps: 2,
             lead_in_ms: 1000,
-            tolerance: 5.0,
+            tolerance: Some(5.0),
             kind: DrillKind::Hold {
                 target: 70.0,
                 hold_ms: 1000,

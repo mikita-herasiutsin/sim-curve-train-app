@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { applyDrillEvent, IDLE_VIEW, type SetSummary, type TraceScore } from "./drill";
+import {
+  applyDrillEvent,
+  DEFAULT_TOLERANCE,
+  IDLE_VIEW,
+  toleranceOf,
+  type HoldDrill,
+  type SetSummary,
+  type TraceScore,
+} from "./drill";
 
 function traceScore(total: number, grade: string): TraceScore {
   return {
@@ -101,5 +109,27 @@ describe("applyDrillEvent", () => {
     const view = applyDrillEvent(IDLE_VIEW, { event: "setFinished", summary: null });
     expect(view.runState).toBe("finished");
     expect(view.summary).toBeNull();
+  });
+});
+
+describe("toleranceOf", () => {
+  const base: HoldDrill = {
+    id: "d",
+    name: "D",
+    pedal: "brake",
+    reps: 5,
+    leadInMs: 3000,
+    type: "hold",
+    target: 70,
+    holdMs: 2000,
+  };
+
+  it("uses the drill's tolerance when set", () => {
+    expect(toleranceOf({ ...base, tolerance: 5 })).toBe(5);
+  });
+
+  it("falls back to the D-17 default when omitted", () => {
+    expect(DEFAULT_TOLERANCE).toBe(10);
+    expect(toleranceOf(base)).toBe(10);
   });
 });

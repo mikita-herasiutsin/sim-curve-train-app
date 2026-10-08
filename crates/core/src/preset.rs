@@ -1167,7 +1167,7 @@ mod tests {
         assert_eq!(preset.drills[2].pedal, Pedal::Brake);
         assert_eq!(preset.drills[3].id, "throttle-rolling-start-35");
         assert_eq!(preset.drills[3].pedal, Pedal::Throttle);
-        assert_eq!(preset.drills[3].tolerance, 10.0);
+        assert!((preset.drills[3].tolerance_fraction() - 0.10).abs() < f32::EPSILON);
         match &preset.drills[3].kind {
             DrillKind::Hold { target, hold_ms } => {
                 assert!((target - 35.0).abs() < 1e-6);
@@ -1286,6 +1286,7 @@ mod tests {
     fn tolerance_defaults_to_ten_when_omitted() {
         let json = r#"{"schemaVersion":1,"id":"p","name":"P","drills":[{"id":"d","name":"D","type":"hold","pedal":"brake","target":70,"holdMs":2000}]}"#;
         let preset = parse_preset(json).unwrap();
-        assert!((preset.drills[0].tolerance - 10.0).abs() < f32::EPSILON);
+        assert_eq!(preset.drills[0].tolerance, None);
+        assert!((preset.drills[0].tolerance_fraction() - 0.10).abs() < f32::EPSILON);
     }
 }

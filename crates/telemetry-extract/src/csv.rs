@@ -136,6 +136,8 @@ pub struct LapTelemetry {
     /// Vehicle forward speed in m/s at 60 Hz.
     #[expect(dead_code, reason = "speed channel preserved from telemetry")]
     pub speed: Vec<f32>,
+    /// Lap distance percentage in `0.0..=1.0` at 60 Hz.
+    pub lap_dist_pct: Vec<f32>,
 }
 
 impl LapTelemetry {
@@ -203,9 +205,14 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
         .iter()
         .position(|&h| h.eq_ignore_ascii_case("Speed"));
 
+    let lap_dist_idx = headers
+        .iter()
+        .position(|&h| h.eq_ignore_ascii_case("LapDistPct"));
+
     let mut brake = Vec::new();
     let mut throttle = Vec::new();
     let mut speed = Vec::new();
+    let mut lap_dist_pct = Vec::new();
 
     for line_res in lines {
         let line = line_res?;
@@ -231,10 +238,26 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
             .and_then(|idx| cols.get(idx))
             .and_then(|c| c.trim().parse().ok())
             .unwrap_or(0.0);
+        let d: Option<f32> = lap_dist_idx
+            .and_then(|idx| cols.get(idx))
+            .and_then(|c| c.trim().parse().ok());
 
         brake.push(b);
         throttle.push(t);
         speed.push(s);
+        lap_dist_pct.push(d.map_or(-1.0, |v| v.clamp(0.0, 1.0)));
+    }
+
+    let total_rows = brake.len();
+    for (i, p) in lap_dist_pct.iter_mut().enumerate() {
+        if *p < 0.0 {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "row index converts safely to f32"
+            )]
+            let frac = (i as f32) / (total_rows.max(1) as f32);
+            *p = frac.clamp(0.0, 1.0);
+        }
     }
 
     let metadata = parse_filename_metadata(path);
@@ -265,5 +288,6 @@ pub fn read_csv_file(path: &Path) -> Result<LapTelemetry, CsvError> {
         brake,
         throttle,
         speed,
+        lap_dist_pct,
     })
 }

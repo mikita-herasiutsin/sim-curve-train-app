@@ -26,6 +26,21 @@ pub const THROTTLE_SUSTAINED_FRAMES: usize = 5;
 /// Minimum duration in seconds for a corner exit throttle zone (150 ms).
 pub const THROTTLE_MIN_DURATION_S: f64 = 0.15;
 
+/// Threshold above which throttle is considered high/full before a lift (95%).
+pub const LIFT_ENTRY_THRESHOLD: f32 = 0.95;
+
+/// Threshold below which throttle must drop to qualify as a lift zone (85%).
+pub const LIFT_THRESHOLD: f32 = 0.85;
+
+/// Threshold considered recovery from lift (98%).
+pub const LIFT_RECOVERY_THRESHOLD: f32 = 0.98;
+
+/// Minimum duration in seconds for a valid lift zone (150 ms).
+pub const LIFT_MIN_DURATION_S: f64 = 0.15;
+
+/// Maximum gap between lift pulses in samples (~250 ms at 60 Hz) to merge.
+pub const LIFT_MERGE_GAP_SAMPLES: usize = 15;
+
 /// Detected braking event.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BrakeZone {
@@ -41,7 +56,22 @@ pub struct BrakeZone {
     pub duration_s: f64,
 }
 
-/// Detected throttle exit acceleration event following a braking zone.
+/// Detected throttle lift event entering a corner without braking.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiftZone {
+    /// Frame index where throttle drops below 95%.
+    pub onset_idx: usize,
+    /// Frame index where throttle reaches minimum in this zone.
+    pub min_idx: usize,
+    /// Frame index where throttle recovers to >= 98%.
+    pub recovery_idx: usize,
+    /// Minimum throttle percentage reached in the zone `[0.0, 100.0]`.
+    pub min_pct: f32,
+    /// Zone duration in seconds from onset to recovery.
+    pub duration_s: f64,
+}
+
+/// Detected throttle exit acceleration event following a braking zone or lift zone.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThrottleExitZone {
     /// Frame index of the throttle minimum prior to application.
@@ -143,104 +173,277 @@ pub fn detect_brake_zones(brakes: &[f32]) -> Vec<BrakeZone> {
     zones
 }
 
-/// Detects throttle exit zones associated with each braking zone.
-///
-/// A corner exit throttle zone starts from the throttle minimum after or near
-/// the braking zone, begins rising, and terminates when throttle reaches
-/// and stays at $\ge 98\%$.
+/// Detects valid lift zones where throttle drops from $\ge 95\%$ to below $85\%$
+/// and recovers to $\ge 98\%$, without active braking during the lift.
 #[must_use]
-pub fn detect_throttle_exit_zones(
-    throttles: &[f32],
-    brake_zones: &[BrakeZone],
-) -> Vec<ThrottleExitZone> {
-    if throttles.is_empty() || brake_zones.is_empty() {
+pub fn detect_lift_zones(throttles: &[f32], brakes: &[f32]) -> Vec<LiftZone> {
+    if throttles.is_empty() {
         return Vec::new();
     }
 
-    let mut exit_zones = Vec::new();
+    let mut raw_intervals: Vec<(usize, usize, usize, f32)> = Vec::new();
+    let mut in_lift = false;
+    let mut onset = 0;
+    let mut min_idx = 0;
+    let mut min_val = 1.0f32;
 
-    for (k, brake_zone) in brake_zones.iter().enumerate() {
-        // Search window: from brake peak up to the next brake zone onset or end of data
-        let window_start = brake_zone.peak_idx;
-        let window_end = if k + 1 < brake_zones.len() {
-            brake_zones[k + 1].onset_idx
-        } else {
-            throttles.len()
-        };
-
-        if window_end <= window_start + 10 {
-            continue;
-        }
-
-        // 1. Find throttle minimum in the window before any subsequent full throttle
-        let mut min_idx = window_start;
-        let mut min_val = throttles[window_start];
-
-        // Search through the release phase for the true corner apex minimum
-        let search_limit = (brake_zone.release_idx + 120).min(window_end);
-        for (i, &t) in throttles
-            .iter()
-            .enumerate()
-            .take(search_limit)
-            .skip(window_start)
-        {
-            if t <= min_val {
+    for (i, &t) in throttles.iter().enumerate() {
+        if in_lift {
+            if t < min_val {
                 min_val = t;
                 min_idx = i;
             }
-        }
-
-        // 2. Find onset where throttle begins rising from minimum
-        let onset_threshold = (min_val + 0.02).max(0.05);
-        let mut onset_idx = None;
-        for (i, &t) in throttles.iter().enumerate().take(window_end).skip(min_idx) {
-            if t >= onset_threshold {
-                onset_idx = Some(i);
-                break;
+            if t >= LIFT_RECOVERY_THRESHOLD {
+                in_lift = false;
+                raw_intervals.push((onset, min_idx, i, min_val));
             }
+        } else if t < LIFT_ENTRY_THRESHOLD {
+            in_lift = true;
+            onset = i;
+            min_idx = i;
+            min_val = t;
         }
+    }
 
-        let Some(onset) = onset_idx else {
-            continue;
-        };
+    if in_lift {
+        raw_intervals.push((onset, min_idx, throttles.len().saturating_sub(1), min_val));
+    }
 
-        // 3. Find where throttle reaches >= 98% and stays sustained
-        let mut full_idx = None;
-        for (i, &t) in throttles.iter().enumerate().take(window_end).skip(onset) {
-            if t >= THROTTLE_FULL_THRESHOLD {
-                // Check if it stays sustained or reaches the end of the window
-                let sustained_end = (i + THROTTLE_SUSTAINED_FRAMES).min(window_end);
-                let is_sustained = throttles[i..sustained_end].iter().all(|&val| val >= 0.95);
-                if is_sustained {
-                    full_idx = Some(i);
-                    break;
-                }
+    if raw_intervals.is_empty() {
+        return Vec::new();
+    }
+
+    // Merge adjacent intervals separated by less than LIFT_MERGE_GAP_SAMPLES
+    let mut merged: Vec<(usize, usize, usize, f32)> = Vec::new();
+    let mut current = raw_intervals[0];
+
+    for &next in &raw_intervals[1..] {
+        if next.0.saturating_sub(current.2) < LIFT_MERGE_GAP_SAMPLES {
+            if next.3 < current.3 {
+                current.1 = next.1;
+                current.3 = next.3;
             }
+            current.2 = next.2;
+        } else {
+            merged.push(current);
+            current = next;
         }
+    }
+    merged.push(current);
 
-        let Some(full) = full_idx else {
-            continue;
-        };
-
-        if full <= onset {
+    let mut zones = Vec::new();
+    for (start, min_i, end, min_v) in merged {
+        if min_v >= LIFT_THRESHOLD {
             continue;
         }
-
         #[expect(
             clippy::cast_precision_loss,
             reason = "sample count safely converts to f64"
         )]
-        let duration_s = (full - onset) as f64 / TELEMETRY_HZ;
-        if duration_s < THROTTLE_MIN_DURATION_S {
+        let duration_s = (end.saturating_sub(start)) as f64 / TELEMETRY_HZ;
+        if duration_s < LIFT_MIN_DURATION_S {
             continue;
         }
 
-        exit_zones.push(ThrottleExitZone {
-            min_idx,
-            onset_idx: onset,
-            full_idx: full,
+        // Exclude if driver braked during this interval
+        if !brakes.is_empty() {
+            let b_end = (end + 1).min(brakes.len());
+            let b_start = start.min(b_end);
+            let has_braking = brakes[b_start..b_end]
+                .iter()
+                .any(|&b| b >= BRAKE_ONSET_THRESHOLD);
+            if has_braking {
+                continue;
+            }
+        }
+
+        zones.push(LiftZone {
+            onset_idx: start,
+            min_idx: min_i,
+            recovery_idx: end,
+            min_pct: min_v * 100.0,
             duration_s,
         });
+    }
+
+    zones
+}
+
+enum DecelRef<'a> {
+    Brake(&'a BrakeZone),
+    Lift(&'a LiftZone),
+}
+
+impl DecelRef<'_> {
+    fn onset_idx(&self) -> usize {
+        match self {
+            DecelRef::Brake(b) => b.onset_idx,
+            DecelRef::Lift(l) => l.onset_idx,
+        }
+    }
+}
+
+/// Detects throttle exit zones associated with each braking zone or lift zone.
+///
+/// A corner exit throttle zone starts after either a brake zone or a lift zone.
+/// For a brake zone, it starts from the throttle minimum in or following the braking zone.
+/// For a lift zone, onset is the throttle minimum in the zone.
+/// In both cases, it terminates when throttle reaches and stays sustained at $\ge 98\%$.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "throttle exit zone detection with dual decel triggers"
+)]
+pub fn detect_throttle_exit_zones(
+    throttles: &[f32],
+    brake_zones: &[BrakeZone],
+    lift_zones: &[LiftZone],
+) -> Vec<ThrottleExitZone> {
+    if throttles.is_empty() || (brake_zones.is_empty() && lift_zones.is_empty()) {
+        return Vec::new();
+    }
+
+    let mut events: Vec<DecelRef<'_>> = Vec::with_capacity(brake_zones.len() + lift_zones.len());
+    for b in brake_zones {
+        events.push(DecelRef::Brake(b));
+    }
+    for l in lift_zones {
+        events.push(DecelRef::Lift(l));
+    }
+    events.sort_by_key(DecelRef::onset_idx);
+
+    let mut exit_zones = Vec::new();
+
+    for (k, event) in events.iter().enumerate() {
+        let window_end = if k + 1 < events.len() {
+            events[k + 1].onset_idx()
+        } else {
+            throttles.len()
+        };
+
+        match event {
+            DecelRef::Brake(brake_zone) => {
+                let window_start = brake_zone.peak_idx;
+                if window_end <= window_start + 10 {
+                    continue;
+                }
+
+                // 1. Find throttle minimum in window
+                let mut min_idx = window_start;
+                let mut min_val = throttles[window_start];
+                let search_limit = (brake_zone.release_idx + 120).min(window_end);
+                for (i, &t) in throttles
+                    .iter()
+                    .enumerate()
+                    .take(search_limit)
+                    .skip(window_start)
+                {
+                    if t <= min_val {
+                        min_val = t;
+                        min_idx = i;
+                    }
+                }
+
+                // 2. Find onset where throttle begins rising from minimum
+                let onset_threshold = (min_val + 0.02).max(0.05);
+                let mut onset_idx = None;
+                for (i, &t) in throttles.iter().enumerate().take(window_end).skip(min_idx) {
+                    if t >= onset_threshold {
+                        onset_idx = Some(i);
+                        break;
+                    }
+                }
+
+                let Some(onset) = onset_idx else {
+                    continue;
+                };
+
+                // 3. Find where throttle reaches >= 98% sustained
+                let mut full_idx = None;
+                for (i, &t) in throttles.iter().enumerate().take(window_end).skip(onset) {
+                    if t >= THROTTLE_FULL_THRESHOLD {
+                        let sustained_end = (i + THROTTLE_SUSTAINED_FRAMES).min(window_end);
+                        let is_sustained =
+                            throttles[i..sustained_end].iter().all(|&val| val >= 0.95);
+                        if is_sustained {
+                            full_idx = Some(i);
+                            break;
+                        }
+                    }
+                }
+
+                let Some(full) = full_idx else {
+                    continue;
+                };
+
+                if full <= onset {
+                    continue;
+                }
+
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "sample count safely converts to f64"
+                )]
+                let duration_s = (full - onset) as f64 / TELEMETRY_HZ;
+                if duration_s < THROTTLE_MIN_DURATION_S {
+                    continue;
+                }
+
+                exit_zones.push(ThrottleExitZone {
+                    min_idx,
+                    onset_idx: onset,
+                    full_idx: full,
+                    duration_s,
+                });
+            }
+            DecelRef::Lift(lift_zone) => {
+                // For a lift zone: onset = throttle minimum in the zone
+                let onset = lift_zone.min_idx;
+                let min_idx = lift_zone.min_idx;
+
+                if window_end <= onset + 5 {
+                    continue;
+                }
+
+                // Find where throttle reaches >= 98% sustained
+                let mut full_idx = None;
+                for (i, &t) in throttles.iter().enumerate().take(window_end).skip(onset) {
+                    if t >= THROTTLE_FULL_THRESHOLD {
+                        let sustained_end = (i + THROTTLE_SUSTAINED_FRAMES).min(window_end);
+                        let is_sustained =
+                            throttles[i..sustained_end].iter().all(|&val| val >= 0.95);
+                        if is_sustained {
+                            full_idx = Some(i);
+                            break;
+                        }
+                    }
+                }
+
+                let Some(full) = full_idx else {
+                    continue;
+                };
+
+                if full <= onset {
+                    continue;
+                }
+
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "sample count safely converts to f64"
+                )]
+                let duration_s = (full - onset) as f64 / TELEMETRY_HZ;
+                if duration_s < THROTTLE_MIN_DURATION_S {
+                    continue;
+                }
+
+                exit_zones.push(ThrottleExitZone {
+                    min_idx,
+                    onset_idx: onset,
+                    full_idx: full,
+                    duration_s,
+                });
+            }
+        }
     }
 
     exit_zones

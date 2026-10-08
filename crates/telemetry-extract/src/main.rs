@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use crate::csv::{LapTelemetry, read_csv_file};
 use crate::extract::{ExtractOptions, run_extract};
 use crate::stats::{StatsCollector, format_stats_table};
-use crate::zones::{detect_brake_zones, detect_throttle_exit_zones};
+use crate::zones::{detect_brake_zones, detect_lift_zones, detect_throttle_exit_zones};
 
 fn print_help() {
     println!(
@@ -52,6 +52,8 @@ OPTIONS:
     --preset-id <ID>       Unique preset identifier (lowercase alphanumeric and hyphens: [a-z0-9-]+).
     --name, --preset-name <NAME>
                            Human-readable preset name.
+    --tolerance <PCT>      Permissible error tolerance in percent (e.g. 10.0). If omitted, defaults to app default (10%).
+    --max-drills <N>       Maximum number of drills to output (default: 12).
     -h, --help             Print help information.
 "
     );
@@ -183,6 +185,8 @@ fn handle_extract(args: &[String]) -> ExitCode {
     let mut car_filter = None;
     let mut preset_id = None;
     let mut preset_name = None;
+    let mut tolerance = None;
+    let mut max_drills = 12;
     let mut inputs = Vec::new();
 
     let mut i = 0;
@@ -209,6 +213,28 @@ fn handle_extract(args: &[String]) -> ExitCode {
             "--name" | "--preset-name" => {
                 if i + 1 < args.len() {
                     preset_name = Some(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            "--tolerance" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<f32>() {
+                        Ok(v) => tolerance = Some(v),
+                        Err(e) => {
+                            eprintln!("warning: invalid --tolerance value '{}': {e}", args[i + 1]);
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            "--max-drills" => {
+                if i + 1 < args.len() {
+                    match args[i + 1].parse::<usize>() {
+                        Ok(v) => max_drills = v,
+                        Err(e) => {
+                            eprintln!("warning: invalid --max-drills value '{}': {e}", args[i + 1]);
+                        }
+                    }
                     i += 1;
                 }
             }
@@ -244,6 +270,8 @@ fn handle_extract(args: &[String]) -> ExitCode {
         preset_id,
         preset_name,
         out_path,
+        tolerance,
+        max_drills,
     };
 
     if let Err(e) = run_extract(&laps, &options) {
@@ -303,8 +331,9 @@ fn handle_stats(args: &[String]) -> ExitCode {
 
     for lap in &laps {
         let brake_zones = detect_brake_zones(&lap.brake);
-        let throttle_zones = detect_throttle_exit_zones(&lap.throttle, &brake_zones);
-        collector.add_lap(lap, &brake_zones, &throttle_zones);
+        let lift_zones = detect_lift_zones(&lap.throttle, &lap.brake);
+        let throttle_zones = detect_throttle_exit_zones(&lap.throttle, &brake_zones, &lift_zones);
+        collector.add_lap(lap, &brake_zones, &lift_zones, &throttle_zones);
     }
 
     let report = collector.build_report();

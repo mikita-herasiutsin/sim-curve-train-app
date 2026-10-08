@@ -15,7 +15,7 @@ use crate::csv::{LapTelemetry, parse_filename_metadata, parse_lap_time_str, read
 use crate::extract::{ExtractOptions, extract_preset_from_laps};
 use crate::simplify::{Point2D, rdp, simplify_adaptive};
 use crate::stats::{MetricSummary, StatsCollector, analyze_throttle_exit};
-use crate::zones::{BrakeZone, detect_brake_zones, detect_throttle_exit_zones};
+use crate::zones::{BrakeZone, detect_brake_zones, detect_lift_zones, detect_throttle_exit_zones};
 
 /// Helper to generate synthetic CSV file contents.
 fn create_synthetic_csv(rows: &[(f32, f32)]) -> String {
@@ -134,7 +134,7 @@ fn test_zone_detection_with_filtering_and_merging() {
     assert!((bz.peak_pct - 85.0).abs() < 1.0);
     assert!(bz.duration_s >= 1.0);
 
-    let throttle_zones = detect_throttle_exit_zones(&throttles, &brake_zones);
+    let throttle_zones = detect_throttle_exit_zones(&throttles, &brake_zones, &[]);
     assert_eq!(
         throttle_zones.len(),
         1,
@@ -210,14 +210,157 @@ fn test_stats_on_known_staged_ramp() {
     assert!((metrics.initial_stab_level_pct - 60.0).abs() < 1.0);
     // Time to stab is 6 frames = 0.10 s
     assert!((metrics.time_to_stab_s - 0.10).abs() < 1e-3);
-    // 1 fast step before progressive phase
-    assert_eq!(metrics.fast_steps, 1);
-    // Progressive ramp from 60% to 98% in 36 frames = 0.60 s -> ~63.3 %/s
+    // 1 fast step before progressive phase (plus 1 plateau -> 2 steps total)
+    assert_eq!(metrics.fast_steps, 2);
+    // Progressive ramp from 60% to 98%
     assert!(
         metrics.progressive_ramp_rate_pct_s > 40.0 && metrics.progressive_ramp_rate_pct_s < 100.0
     );
     // Time to full is 42 frames = 0.70 s
     assert!((metrics.time_to_full_s - 0.70).abs() < 1e-3);
+}
+
+#[test]
+fn test_staged_throttle_exit_curve() {
+    // Synthetic curve: 0 -> 80% (0.1 s) -> hold 0.3 s -> 98% (0.15 s)
+    // Expect 2 steps, plateau ~80%
+    let mut throttles = vec![0.0; 60];
+    let onset = 10;
+    // 1. Fast step: 0 -> 80% over 6 frames (0.1 s at 60 Hz -> 800 %/s > 300 %/s)
+    for i in onset..onset + 6 {
+        throttles[i] = ((i - onset) as f32 / 6.0) * 0.80;
+    }
+    // 2. Hold at 80% for 18 frames (0.3 s >= 80 ms, |rate| = 0 < 50 %/s)
+    for i in onset + 6..onset + 24 {
+        throttles[i] = 0.80;
+    }
+    // 3. Second step: 80% -> 98% over 9 frames (0.15 s)
+    let full = onset + 33;
+    for i in onset + 24..=full {
+        throttles[i] = 0.80 + ((i - (onset + 24)) as f32 / 9.0) * 0.18;
+    }
+    for t in &mut throttles[full + 1..] {
+        *t = 1.0;
+    }
+
+    let exit_zone = crate::zones::ThrottleExitZone {
+        min_idx: 0,
+        onset_idx: onset,
+        full_idx: full,
+        duration_s: (full - onset) as f64 / 60.0,
+    };
+
+    let metrics = analyze_throttle_exit(&throttles, &exit_zone);
+    assert_eq!(
+        metrics.fast_steps, 2,
+        "expected 2 steps (stab, plateau, second increase)"
+    );
+    assert_eq!(metrics.plateau_levels_pct.len(), 1);
+    assert!(
+        (metrics.plateau_levels_pct[0] - 80.0).abs() < 1.0,
+        "plateau level should be ~80%, got {:.2}",
+        metrics.plateau_levels_pct[0]
+    );
+}
+
+#[test]
+fn test_synthetic_oval_lap() {
+    // Synthetic oval test: no brake touched, 100 -> 30 -> 100 throttle
+    let n = 300;
+    let brakes = vec![0.0; n];
+    let mut throttles = vec![1.0; n];
+
+    // Lift zone from sample 60 to 180 (2.0 s):
+    // 1. Drop from 1.0 to 0.30 over 30 samples (0.5 s)
+    for i in 60..90 {
+        throttles[i] = 1.0 - ((i - 60) as f32 / 30.0) * 0.70;
+    }
+    // 2. Minimum hold at 0.30 for 30 samples (0.5 s)
+    for i in 90..120 {
+        throttles[i] = 0.30;
+    }
+    // 3. Recovery to 1.0 over 60 samples (1.0 s)
+    for i in 120..180 {
+        throttles[i] = 0.30 + ((i - 120) as f32 / 60.0) * 0.70;
+    }
+
+    let lap_dist_pct: Vec<f32> = (0..n).map(|i| i as f32 / n as f32).collect();
+    let path = std::path::PathBuf::from(
+        "Garage 61 - Test Driver - Oval Truck - Kansas Speedway - 00.30.000 - OVAL1.csv",
+    );
+    let metadata = parse_filename_metadata(&path);
+    let lap = LapTelemetry {
+        path,
+        metadata,
+        lap_dist_pct,
+        brake: brakes,
+        throttle: throttles,
+        speed: vec![70.0; n],
+    };
+
+    let brake_zones = detect_brake_zones(&lap.brake);
+    assert!(brake_zones.is_empty(), "oval laps have no brake zones");
+
+    let lift_zones = detect_lift_zones(&lap.throttle, &lap.brake);
+    assert_eq!(lift_zones.len(), 1, "oval lap must detect lift zone");
+    let lz = &lift_zones[0];
+    assert!(
+        (lz.min_pct - 30.0).abs() < 1.0,
+        "lift depth must match ~30%"
+    );
+    assert!(
+        lz.duration_s >= 1.5,
+        "lift duration should span drop through recovery"
+    );
+
+    let throttle_zones = detect_throttle_exit_zones(&lap.throttle, &brake_zones, &lift_zones);
+    assert_eq!(
+        throttle_zones.len(),
+        1,
+        "throttle exit zone must follow lift"
+    );
+    let tz = &throttle_zones[0];
+    assert_eq!(
+        tz.onset_idx, lz.min_idx,
+        "exit zone onset must be the lift minimum"
+    );
+    assert!(tz.full_idx >= 179);
+
+    // Stats collector verification
+    let mut collector = StatsCollector::default();
+    collector.add_lap(&lap, &brake_zones, &lift_zones, &throttle_zones);
+    let report = collector.build_report();
+
+    let car_stats = &report.cars["Oval Truck"];
+    assert_eq!(car_stats.brake.zone_count, 0);
+    assert_eq!(car_stats.lift.zone_count, 1);
+    assert!(
+        (car_stats.lift.lift_depth_pct.median - 30.0).abs() < 1.0,
+        "stats must report non-zero lift depth (~30%)"
+    );
+    assert!(
+        car_stats.lift.duration_s.median >= 1.5,
+        "stats must report non-zero lift duration"
+    );
+    assert!(
+        car_stats.throttle.progressive_ramp_rate_pct_s.median > 0.0,
+        "stats must report exit ramp rate for oval"
+    );
+
+    // Extraction produces valid drills
+    let options = ExtractOptions {
+        preset_id: Some("oval-test".to_string()),
+        preset_name: Some("Oval Test Preset".to_string()),
+        out_path: None,
+        tolerance: None,
+        max_drills: 12,
+    };
+    let preset = extract_preset_from_laps(&[lap], &options).expect("extraction should succeed");
+    preset
+        .validate()
+        .expect("extracted oval preset must validate");
+    assert!(preset.drills.iter().any(|d| d.id.contains("lift")));
+    assert!(preset.drills.iter().any(|d| d.id.contains("throttle")));
 }
 
 #[test]
@@ -232,6 +375,7 @@ fn test_stats_aggregator_median_iqr() {
     let lap = LapTelemetry {
         path: std::path::PathBuf::from("test.csv"),
         metadata: None,
+        lap_dist_pct: (0..100).map(|i| i as f32 / 100.0).collect(),
         brake: vec![0.0; 100],
         throttle: vec![0.0; 100],
         speed: vec![0.0; 100],
@@ -245,7 +389,7 @@ fn test_stats_aggregator_median_iqr() {
         duration_s: 1.0,
     };
 
-    collector.add_lap(&lap, &[b_zone], &[]);
+    collector.add_lap(&lap, &[b_zone], &[], &[]);
     let report = collector.build_report();
 
     assert!(report.cars.contains_key("Unknown Car"));
@@ -285,6 +429,7 @@ fn test_preset_output_validates_against_sct_core() {
     let lap = LapTelemetry {
         path: std::path::PathBuf::from("test.csv"),
         metadata: None,
+        lap_dist_pct: (0..250).map(|i| i as f32 / 250.0).collect(),
         brake: brakes,
         throttle: throttles,
         speed: vec![50.0; 250],
@@ -294,6 +439,8 @@ fn test_preset_output_validates_against_sct_core() {
         preset_id: Some("test-synthetic-preset".to_string()),
         preset_name: Some("Synthetic Test Preset".to_string()),
         out_path: None,
+        tolerance: None,
+        max_drills: 12,
     };
 
     let preset =
@@ -314,7 +461,9 @@ fn test_preset_output_validates_against_sct_core() {
 
     for drill in &loaded.drills {
         assert_eq!(drill.reps, 5);
-        assert!(drill.tolerance > 0.0);
+        // Omitted tolerance defaults to None, resolving to 10%
+        assert_eq!(drill.tolerance, None);
+        assert!((drill.tolerance_fraction() - 0.10).abs() < 1e-4);
         match &drill.kind {
             DrillKind::Trace { points } => {
                 assert!(points.len() >= 2);
@@ -329,4 +478,101 @@ fn test_preset_output_validates_against_sct_core() {
             }
         }
     }
+}
+
+#[test]
+fn test_corner_grouping_and_options() {
+    let n = 200;
+    // Build 3 laps with consistent corner at dist ~0.25, wrap corner at ~0.99/0.01, and noise corner at ~0.60
+    let mut laps = Vec::new();
+    let brake_peaks = [70.0, 85.0, 80.0];
+
+    for (lap_idx, &peak) in brake_peaks.iter().enumerate() {
+        let mut b = vec![0.0; n];
+        let mut t = vec![1.0; n];
+        let dist: Vec<f32> = (0..n).map(|i| i as f32 / n as f32).collect();
+
+        // Corner 1 at dist 0.25 (index 50)
+        for i in 45..65 {
+            t[i] = 0.0;
+            b[i] = peak / 100.0;
+        }
+        // Corner 1 throttle exit (index 65..85)
+        for i in 65..85 {
+            t[i] = ((i - 65) as f32 / 20.0) * 0.98;
+        }
+
+        // Noise corner at dist 0.60 (index 120) - only on lap 0
+        if lap_idx == 0 {
+            for i in 115..130 {
+                t[i] = 0.0;
+                b[i] = 0.60;
+            }
+        }
+
+        // Wrap corner near lap boundary:
+        // Laps 0 & 1 have corner at dist 0.99 / 0.01 (index 195..200 and index 0..10)
+        if lap_idx < 2 {
+            for i in 195..200 {
+                t[i] = 0.0;
+                b[i] = 0.75;
+            }
+        }
+
+        let path = std::path::PathBuf::from(format!(
+            "Garage 61 - Driver - Group Car - Track Name - 01.20.{lap_idx:03} - ID{lap_idx}.csv"
+        ));
+        let metadata = parse_filename_metadata(&path);
+        let lap = LapTelemetry {
+            path,
+            metadata,
+            lap_dist_pct: dist,
+            brake: b,
+            throttle: t,
+            speed: vec![50.0; n],
+        };
+        laps.push(lap);
+    }
+
+    // 1. Default tolerance should be None in output drills
+    let options_default = ExtractOptions {
+        preset_id: Some("group-test".to_string()),
+        preset_name: Some("Grouping Test".to_string()),
+        out_path: None,
+        tolerance: None,
+        max_drills: 12,
+    };
+    let preset = extract_preset_from_laps(&laps, &options_default).expect("extract succeeds");
+    preset.validate().expect("extracted preset validates");
+
+    // All drills should omit tolerance (None)
+    for drill in &preset.drills {
+        assert_eq!(drill.tolerance, None);
+        assert!((drill.tolerance_fraction() - 0.10).abs() < 1e-4);
+        assert!(drill.id.starts_with("ttrack-name-c"));
+    }
+
+    // The noise corner (seen in 1 of 3 laps) must NOT be present
+    // Only corner 1 (seen in 3 laps) should be present
+    assert_ne!(preset.drills.len(), 0);
+    assert!(preset.drills.iter().any(|d| d.id.contains("c01-brake")));
+
+    // 2. Explicit tolerance should be preserved
+    let options_tol = ExtractOptions {
+        tolerance: Some(15.0),
+        ..options_default.clone()
+    };
+    let preset_tol = extract_preset_from_laps(&laps, &options_tol).expect("extract succeeds");
+    for drill in &preset_tol.drills {
+        assert_eq!(drill.tolerance, Some(15.0));
+        assert!((drill.tolerance_fraction() - 0.15).abs() < 1e-4);
+    }
+
+    // 3. Max drills capping
+    let options_cap = ExtractOptions {
+        max_drills: 1,
+        ..options_default
+    };
+    let preset_cap = extract_preset_from_laps(&laps, &options_cap).expect("extract succeeds");
+    assert_eq!(preset_cap.drills.len(), 1);
 }

@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::csv::LapTelemetry;
 use crate::simplify::{detect_plateau, process_trace_segment};
-use crate::zones::{detect_brake_zones, detect_throttle_exit_zones};
+use crate::zones::{detect_brake_zones, detect_lift_zones, detect_throttle_exit_zones};
 
 /// Sanitizes an arbitrary string into a valid preset/drill ID matching `[a-z0-9-]+`.
 #[must_use]
@@ -31,6 +31,32 @@ pub fn sanitize_id(s: &str) -> String {
     }
 }
 
+/// Extracts a clean track slug for drill IDs, e.g. "Road Atlanta (Full Course)" -> "road-atlanta".
+#[must_use]
+pub fn track_slug(track: &str) -> String {
+    let ascii_track = track
+        .replace(['ä', 'Ä'], "ae")
+        .replace(['ö', 'Ö'], "oe")
+        .replace(['ü', 'Ü'], "ue")
+        .replace('ß', "ss");
+    let base = if let Some(idx) = ascii_track.find('(') {
+        let prefix = ascii_track[..idx].trim();
+        if prefix.is_empty() {
+            &ascii_track
+        } else {
+            prefix
+        }
+    } else {
+        &ascii_track
+    };
+    let slug = sanitize_id(base);
+    if slug.is_empty() {
+        "track".to_string()
+    } else {
+        slug
+    }
+}
+
 /// Options configuring preset extraction.
 #[derive(Clone, Debug)]
 pub struct ExtractOptions {
@@ -40,144 +66,86 @@ pub struct ExtractOptions {
     pub preset_name: Option<String>,
     /// Target file path to write output JSON to.
     pub out_path: Option<String>,
+    /// Permissible tolerance override in percent (omitted if None, applying D-17 default).
+    pub tolerance: Option<f32>,
+    /// Maximum number of drills to output (defaults to 12).
+    pub max_drills: usize,
 }
 
-fn collect_brake_drills(
-    lap: &LapTelemetry,
-    brake_zones: &[crate::zones::BrakeZone],
-    lap_idx: usize,
-    multi_lap: bool,
-    drills: &mut Vec<Drill>,
-) {
-    for (b_num, b_zone) in brake_zones.iter().enumerate() {
-        let b_idx = b_num + 1;
-        let trace_pts = process_trace_segment(&lap.brake, b_zone.onset_idx, b_zone.release_idx);
-        if trace_pts.len() >= 2 {
-            let drill_id = if multi_lap {
-                sanitize_id(&format!("lap-{lap_idx}-brake-zone-{b_idx}"))
-            } else {
-                sanitize_id(&format!("brake-zone-{b_idx}"))
-            };
-
-            let drill_name = if multi_lap {
-                format!("Lap {lap_idx} Brake Zone {b_idx} ({:.0}%)", b_zone.peak_pct)
-            } else {
-                format!("Brake Zone {b_idx} ({:.0}%)", b_zone.peak_pct)
-            };
-
-            drills.push(Drill {
-                id: drill_id,
-                name: drill_name,
-                pedal: Pedal::Brake,
-                reps: 5,
-                lead_in_ms: 2000,
-                tolerance: 6.0,
-                kind: DrillKind::Trace { points: trace_pts },
-            });
-
-            if let Some(plateau) = detect_plateau(&lap.brake, b_zone.onset_idx, b_zone.release_idx)
-            {
-                let hold_id = if multi_lap {
-                    sanitize_id(&format!("lap-{lap_idx}-brake-hold-{b_idx}"))
-                } else {
-                    sanitize_id(&format!("brake-hold-{b_idx}"))
-                };
-
-                let hold_name = if multi_lap {
-                    format!("Lap {lap_idx} Brake Hold {b_idx} ({:.0}%)", plateau.target)
-                } else {
-                    format!("Brake Hold {b_idx} ({:.0}%)", plateau.target)
-                };
-
-                drills.push(Drill {
-                    id: hold_id,
-                    name: hold_name,
-                    pedal: Pedal::Brake,
-                    reps: 5,
-                    lead_in_ms: 2000,
-                    tolerance: 5.0,
-                    kind: DrillKind::Hold {
-                        target: plateau.target,
-                        hold_ms: plateau.hold_ms,
-                    },
-                });
-            }
+impl Default for ExtractOptions {
+    fn default() -> Self {
+        Self {
+            preset_id: None,
+            preset_name: None,
+            out_path: None,
+            tolerance: None,
+            max_drills: 12,
         }
     }
 }
 
-fn collect_throttle_drills(
-    lap: &LapTelemetry,
-    throttle_zones: &[crate::zones::ThrottleExitZone],
-    lap_idx: usize,
-    multi_lap: bool,
-    drills: &mut Vec<Drill>,
-) {
-    for (t_num, t_zone) in throttle_zones.iter().enumerate() {
-        let t_idx = t_num + 1;
-        let trace_pts = process_trace_segment(&lap.throttle, t_zone.onset_idx, t_zone.full_idx);
-        if trace_pts.len() >= 2 {
-            let drill_id = if multi_lap {
-                sanitize_id(&format!("lap-{lap_idx}-throttle-exit-{t_idx}"))
-            } else {
-                sanitize_id(&format!("throttle-exit-{t_idx}"))
-            };
+#[derive(Clone, Debug)]
+enum DecelZone {
+    Brake(crate::zones::BrakeZone),
+    Lift(crate::zones::LiftZone),
+}
 
-            let drill_name = if multi_lap {
-                format!("Lap {lap_idx} Throttle Exit {t_idx}")
-            } else {
-                format!("Throttle Exit {t_idx}")
-            };
+impl DecelZone {
+    fn onset_idx(&self) -> usize {
+        match self {
+            Self::Brake(b) => b.onset_idx,
+            Self::Lift(l) => l.onset_idx,
+        }
+    }
 
-            drills.push(Drill {
-                id: drill_id,
-                name: drill_name,
-                pedal: Pedal::Throttle,
-                reps: 5,
-                lead_in_ms: 2000,
-                tolerance: 6.0,
-                kind: DrillKind::Trace { points: trace_pts },
-            });
+    fn metric(&self) -> f64 {
+        match self {
+            Self::Brake(b) => f64::from(b.peak_pct),
+            Self::Lift(l) => f64::from(l.min_pct),
+        }
+    }
 
-            if let Some(plateau) = detect_plateau(&lap.throttle, t_zone.onset_idx, t_zone.full_idx)
-            {
-                let hold_id = if multi_lap {
-                    sanitize_id(&format!("lap-{lap_idx}-throttle-hold-{t_idx}"))
-                } else {
-                    sanitize_id(&format!("throttle-hold-{t_idx}"))
-                };
-
-                let hold_name = if multi_lap {
-                    format!(
-                        "Lap {lap_idx} Throttle Hold {t_idx} ({:.0}%)",
-                        plateau.target
-                    )
-                } else {
-                    format!("Throttle Hold {t_idx} ({:.0}%)", plateau.target)
-                };
-
-                drills.push(Drill {
-                    id: hold_id,
-                    name: hold_name,
-                    pedal: Pedal::Throttle,
-                    reps: 5,
-                    lead_in_ms: 2000,
-                    tolerance: 5.0,
-                    kind: DrillKind::Hold {
-                        target: plateau.target,
-                        hold_ms: plateau.hold_ms,
-                    },
-                });
-            }
+    fn priority_score(&self) -> (f64, f64) {
+        match self {
+            Self::Brake(b) => (f64::from(b.peak_pct), b.duration_s),
+            Self::Lift(l) => (100.0 - f64::from(l.min_pct), l.duration_s),
         }
     }
 }
 
-/// Extracts drills from multiple laps and compiles them into a validated [`Preset`].
+#[derive(Clone, Debug)]
+struct CornerCandidate {
+    lap_idx: usize,
+    onset_pct: f32,
+    decel: DecelZone,
+    throttle: Option<crate::zones::ThrottleExitZone>,
+}
+
+fn circular_dist(a: f32, b: f32) -> f32 {
+    let diff = (a - b).abs();
+    diff.min(1.0 - diff)
+}
+
+struct ChosenCorner {
+    representative_lap: usize,
+    mean_onset_pct: f32,
+    decel: DecelZone,
+    throttle: Option<crate::zones::ThrottleExitZone>,
+    priority_score: (f64, f64),
+}
+
+/// Maximum distance in normalized lap distance (0.025 = ~2.5% of lap) to cluster zones into the same corner.
+pub const CORNER_CLUSTER_EPSILON: f32 = 0.025;
+
+/// Extracts grouped corner drills from multiple laps and compiles them into a validated [`Preset`].
 ///
 /// # Errors
 ///
 /// Returns an error string if preset validation fails or no valid drills could be extracted.
+#[expect(
+    clippy::too_many_lines,
+    reason = "multi-lap corner clustering, representative selection, and drill generation"
+)]
 pub fn extract_preset_from_laps(
     laps: &[LapTelemetry],
     options: &ExtractOptions,
@@ -186,16 +154,321 @@ pub fn extract_preset_from_laps(
         return Err("no telemetry laps provided for extraction".to_string());
     }
 
-    let mut drills = Vec::new();
-    let multi_lap = laps.len() > 1;
+    // 1. Ingest candidates across all laps
+    let mut all_candidates: Vec<CornerCandidate> = Vec::new();
 
     for (lap_num, lap) in laps.iter().enumerate() {
-        let lap_idx = lap_num + 1;
-        let brake_zones = detect_brake_zones(&lap.brake);
-        let throttle_zones = detect_throttle_exit_zones(&lap.throttle, &brake_zones);
+        let b_zones = detect_brake_zones(&lap.brake);
+        let l_zones = detect_lift_zones(&lap.throttle, &lap.brake);
+        let t_zones = detect_throttle_exit_zones(&lap.throttle, &b_zones, &l_zones);
 
-        collect_brake_drills(lap, &brake_zones, lap_idx, multi_lap, &mut drills);
-        collect_throttle_drills(lap, &throttle_zones, lap_idx, multi_lap, &mut drills);
+        let mut decel_list: Vec<DecelZone> = Vec::with_capacity(b_zones.len() + l_zones.len());
+        for b in b_zones {
+            decel_list.push(DecelZone::Brake(b));
+        }
+        for l in l_zones {
+            decel_list.push(DecelZone::Lift(l));
+        }
+        decel_list.sort_by_key(DecelZone::onset_idx);
+
+        for (k, decel) in decel_list.iter().enumerate() {
+            let onset_idx = decel.onset_idx();
+            let onset_pct = lap.lap_dist_pct.get(onset_idx).copied().unwrap_or(0.0);
+
+            let next_onset = if k + 1 < decel_list.len() {
+                decel_list[k + 1].onset_idx()
+            } else {
+                lap.throttle.len()
+            };
+
+            let matching_tz = t_zones
+                .iter()
+                .find(|tz| tz.onset_idx >= onset_idx && tz.onset_idx < next_onset)
+                .cloned();
+
+            all_candidates.push(CornerCandidate {
+                lap_idx: lap_num,
+                onset_pct,
+                decel: decel.clone(),
+                throttle: matching_tz,
+            });
+        }
+    }
+
+    if all_candidates.is_empty() {
+        return Err("no drills could be extracted from telemetry data".to_string());
+    }
+
+    // 2. Group zones by corner across laps using LapDistPct
+    all_candidates.sort_by(|a, b| {
+        a.onset_pct
+            .partial_cmp(&b.onset_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut clusters: Vec<Vec<CornerCandidate>> = Vec::new();
+
+    for cand in all_candidates {
+        let mut matched_idx = None;
+        for (c_idx, cluster) in clusters.iter().enumerate() {
+            let close = cluster
+                .iter()
+                .any(|c| circular_dist(c.onset_pct, cand.onset_pct) <= CORNER_CLUSTER_EPSILON);
+            if close {
+                matched_idx = Some(c_idx);
+                break;
+            }
+        }
+
+        if let Some(c_idx) = matched_idx {
+            clusters[c_idx].push(cand);
+        } else {
+            clusters.push(vec![cand]);
+        }
+    }
+
+    // Merge wrap-around across 0/1 boundary
+    if clusters.len() > 1 {
+        let first_onset = clusters[0][0].onset_pct;
+        let last_close = clusters[clusters.len() - 1]
+            .iter()
+            .any(|c| circular_dist(c.onset_pct, first_onset) <= CORNER_CLUSTER_EPSILON);
+        if last_close {
+            let last_cluster = clusters.pop().unwrap();
+            clusters[0].extend(last_cluster);
+        }
+    }
+
+    // 3. Keep only corners seen in at least half the laps
+    let total_laps = laps.len();
+    let min_laps_required = total_laps.div_ceil(2);
+
+    let mut kept_clusters: Vec<Vec<CornerCandidate>> = Vec::new();
+    for cluster in clusters {
+        let mut seen_laps = std::collections::HashSet::new();
+        for c in &cluster {
+            seen_laps.insert(c.lap_idx);
+        }
+        if seen_laps.len() >= min_laps_required {
+            kept_clusters.push(cluster);
+        }
+    }
+
+    if kept_clusters.is_empty() {
+        return Err("no corners seen in at least half the laps".to_string());
+    }
+
+    // 4. For each corner pick the zone from the lap with the median zone metric
+    let mut chosen_corners: Vec<ChosenCorner> = Vec::new();
+
+    for mut cluster in kept_clusters {
+        // Keep at most 1 representative per lap
+        cluster.sort_by(|a, b| {
+            a.lap_idx
+                .cmp(&b.lap_idx)
+                .then_with(|| b.decel.metric().partial_cmp(&a.decel.metric()).unwrap())
+        });
+        cluster.dedup_by_key(|c| c.lap_idx);
+
+        // Sort by metric to select median
+        cluster.sort_by(|a, b| {
+            a.decel
+                .metric()
+                .partial_cmp(&b.decel.metric())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let median_idx = cluster.len() / 2;
+        let median_cand = &cluster[median_idx];
+
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "cluster member count safely converts to f32"
+        )]
+        let count_f32 = cluster.len() as f32;
+        let avg_onset = cluster.iter().map(|c| c.onset_pct).sum::<f32>() / count_f32;
+
+        chosen_corners.push(ChosenCorner {
+            representative_lap: median_cand.lap_idx,
+            mean_onset_pct: avg_onset,
+            decel: median_cand.decel.clone(),
+            throttle: median_cand.throttle.clone(),
+            priority_score: median_cand.decel.priority_score(),
+        });
+    }
+
+    // 5. Prioritize corners with the highest brake peak / longest zones to fit within max_drills
+    chosen_corners.sort_by(|a, b| {
+        b.priority_score
+            .0
+            .partial_cmp(&a.priority_score.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.priority_score
+                    .1
+                    .partial_cmp(&a.priority_score.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    let max_drills = options.max_drills.max(1);
+
+    // Filter corners so drill budget is respected
+    let mut selected_corners = Vec::new();
+    let mut drill_budget = 0;
+
+    for corner in chosen_corners {
+        let rep_lap = &laps[corner.representative_lap];
+        let mut count_for_corner = 1; // decel trace
+        match &corner.decel {
+            DecelZone::Brake(b) => {
+                if detect_plateau(&rep_lap.brake, b.onset_idx, b.release_idx).is_some() {
+                    count_for_corner += 1;
+                }
+            }
+            DecelZone::Lift(l) => {
+                if detect_plateau(&rep_lap.throttle, l.onset_idx, l.recovery_idx).is_some() {
+                    count_for_corner += 1;
+                }
+            }
+        }
+        if let Some(ref tz) = corner.throttle {
+            count_for_corner += 1; // throttle trace
+            if detect_plateau(&rep_lap.throttle, tz.onset_idx, tz.full_idx).is_some() {
+                count_for_corner += 1;
+            }
+        }
+
+        if drill_budget + count_for_corner <= max_drills || selected_corners.is_empty() {
+            drill_budget += count_for_corner;
+            selected_corners.push(corner);
+        } else if drill_budget < max_drills {
+            // Include corner if trace drills fit
+            let trace_only = if corner.throttle.is_some() { 2 } else { 1 };
+            if drill_budget + trace_only <= max_drills {
+                drill_budget += trace_only;
+                selected_corners.push(corner);
+            }
+        }
+    }
+
+    // 6. Stable, deterministic ordering by LapDistPct
+    selected_corners.sort_by(|a, b| {
+        a.mean_onset_pct
+            .partial_cmp(&b.mean_onset_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let track_name = laps[0]
+        .metadata
+        .as_ref()
+        .map_or("track", |m| m.track.as_str());
+    let t_slug = track_slug(track_name);
+
+    let mut drills = Vec::new();
+
+    for (c_idx, corner) in selected_corners.iter().enumerate() {
+        let corner_num = c_idx + 1;
+        let rep_lap = &laps[corner.representative_lap];
+
+        match &corner.decel {
+            DecelZone::Brake(bz) => {
+                let trace_pts = process_trace_segment(&rep_lap.brake, bz.onset_idx, bz.release_idx);
+                if trace_pts.len() >= 2 && drills.len() < max_drills {
+                    drills.push(Drill {
+                        id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-brake")),
+                        name: format!("Turn {corner_num} brake ({:.0}%)", bz.peak_pct),
+                        pedal: Pedal::Brake,
+                        reps: 5,
+                        lead_in_ms: 2000,
+                        tolerance: options.tolerance,
+                        kind: DrillKind::Trace { points: trace_pts },
+                    });
+                }
+
+                if let Some(plateau) = detect_plateau(&rep_lap.brake, bz.onset_idx, bz.release_idx)
+                    && drills.len() < max_drills
+                {
+                    drills.push(Drill {
+                        id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-brake-hold")),
+                        name: format!("Turn {corner_num} brake hold ({:.0}%)", plateau.target),
+                        pedal: Pedal::Brake,
+                        reps: 5,
+                        lead_in_ms: 2000,
+                        tolerance: options.tolerance,
+                        kind: DrillKind::Hold {
+                            target: plateau.target,
+                            hold_ms: plateau.hold_ms,
+                        },
+                    });
+                }
+            }
+            DecelZone::Lift(lz) => {
+                let trace_pts =
+                    process_trace_segment(&rep_lap.throttle, lz.onset_idx, lz.recovery_idx);
+                if trace_pts.len() >= 2 && drills.len() < max_drills {
+                    drills.push(Drill {
+                        id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-lift")),
+                        name: format!("Turn {corner_num} lift ({:.0}%)", lz.min_pct),
+                        pedal: Pedal::Throttle,
+                        reps: 5,
+                        lead_in_ms: 2000,
+                        tolerance: options.tolerance,
+                        kind: DrillKind::Trace { points: trace_pts },
+                    });
+                }
+
+                if let Some(plateau) =
+                    detect_plateau(&rep_lap.throttle, lz.onset_idx, lz.recovery_idx)
+                    && drills.len() < max_drills
+                {
+                    drills.push(Drill {
+                        id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-lift-hold")),
+                        name: format!("Turn {corner_num} lift hold ({:.0}%)", plateau.target),
+                        pedal: Pedal::Throttle,
+                        reps: 5,
+                        lead_in_ms: 2000,
+                        tolerance: options.tolerance,
+                        kind: DrillKind::Hold {
+                            target: plateau.target,
+                            hold_ms: plateau.hold_ms,
+                        },
+                    });
+                }
+            }
+        }
+
+        if let Some(ref tz) = corner.throttle {
+            let trace_pts = process_trace_segment(&rep_lap.throttle, tz.onset_idx, tz.full_idx);
+            if trace_pts.len() >= 2 && drills.len() < max_drills {
+                drills.push(Drill {
+                    id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-throttle")),
+                    name: format!("Turn {corner_num} throttle"),
+                    pedal: Pedal::Throttle,
+                    reps: 5,
+                    lead_in_ms: 2000,
+                    tolerance: options.tolerance,
+                    kind: DrillKind::Trace { points: trace_pts },
+                });
+            }
+
+            if let Some(plateau) = detect_plateau(&rep_lap.throttle, tz.onset_idx, tz.full_idx)
+                && drills.len() < max_drills
+            {
+                drills.push(Drill {
+                    id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-throttle-hold")),
+                    name: format!("Turn {corner_num} throttle hold ({:.0}%)", plateau.target),
+                    pedal: Pedal::Throttle,
+                    reps: 5,
+                    lead_in_ms: 2000,
+                    tolerance: options.tolerance,
+                    kind: DrillKind::Hold {
+                        target: plateau.target,
+                        hold_ms: plateau.hold_ms,
+                    },
+                });
+            }
+        }
     }
 
     if drills.is_empty() {

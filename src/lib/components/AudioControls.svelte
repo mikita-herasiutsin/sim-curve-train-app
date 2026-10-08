@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import {
     loadAudioEnabled,
@@ -8,13 +7,10 @@
     saveAudioVolume,
   } from "$lib/settings";
 
-  let audioEnabled = $state(true);
-  let audioVolume = $state(0.2);
-
-  onMount(() => {
-    audioEnabled = loadAudioEnabled();
-    audioVolume = loadAudioVolume();
-  });
+  // The loaders are safe without `localStorage`, so the first render already shows the saved
+  // settings.
+  let audioEnabled = $state(loadAudioEnabled());
+  let audioVolume = $state(loadAudioVolume());
 
   function toggleAudio(): void {
     audioEnabled = !audioEnabled;
@@ -22,11 +18,16 @@
     invoke("audio_set_enabled", { enabled: audioEnabled }).catch(console.error);
   }
 
+  /** Live while dragging: the backend follows every step. */
   function handleVolume(e: Event): void {
     const val = Number.parseFloat((e.target as HTMLInputElement).value);
     audioVolume = val;
-    saveAudioVolume(val);
     invoke("audio_set_volume", { volume: val }).catch(console.error);
+  }
+
+  /** Saved once the drag ends, not on every step. */
+  function commitVolume(): void {
+    saveAudioVolume(audioVolume);
   }
 
   function testTone(): void {
@@ -71,6 +72,7 @@
     step="0.01"
     value={audioVolume}
     oninput={handleVolume}
+    onchange={commitVolume}
     disabled={!audioEnabled}
     aria-label="Audio volume"
     data-testid="audio-volume"

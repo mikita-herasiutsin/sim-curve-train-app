@@ -10,6 +10,7 @@ const CHIME_GAIN: f32 = 0.3;
 const CHIME_DECAY_TIME_S: f32 = 0.08;
 const CHIME_ATTACK_TIME_S: f32 = 0.002;
 const DENORMAL_THRESHOLD: f32 = 1e-6;
+const SLEW_TIME_S: f32 = 0.0025;
 pub const DEFAULT_AUDIO_VOLUME: f32 = 0.2;
 
 #[inline]
@@ -108,7 +109,9 @@ impl Synth {
             44100.0
         };
         let dt = 1.0 / sr;
-        let smooth_factor = (dt * 150.0).clamp(0.0, 1.0);
+        // One-pole slew with a 2.5 ms time constant: fast enough for the ~20 ms response
+        // budget, slow enough to keep gain and pitch changes click-free.
+        let smooth_factor = (dt / SLEW_TIME_S).clamp(0.0, 1.0);
         let chime_decay = (-dt / CHIME_DECAY_TIME_S).exp();
         let chime_attack_step = (dt / CHIME_ATTACK_TIME_S).clamp(0.0, 1.0);
 
@@ -282,15 +285,13 @@ impl Backoff {
     }
 }
 
-/// Whether a stream error means the stream is dead and must be rebuilt (device unplugged,
-/// default device changed, stream invalidated). Other errors, such as under-runs, are
-/// transient and the stream keeps running.
+/// Whether a stream error means the stream must be rebuilt. Only under-runs, a denied realtime
+/// priority and an automatic reroute leave the stream running; on WASAPI any other error ends
+/// the render thread (device gone, audio service restarted, device taken exclusively, ...).
 fn needs_rebuild(kind: cpal::ErrorKind) -> bool {
-    matches!(
+    !matches!(
         kind,
-        cpal::ErrorKind::DeviceNotAvailable
-            | cpal::ErrorKind::StreamInvalidated
-            | cpal::ErrorKind::DeviceChanged
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceChanged
     )
 }
 
@@ -325,6 +326,29 @@ impl AudioFeedback {
             state,
             test_tone_generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// An output with no audio device behind it, for tests of the code that drives it.
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        Self {
+            state: Arc::new(SharedState::new()),
+            test_tone_generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// The tone last set with [`update`](Self::update).
+    #[cfg(test)]
+    pub(crate) fn tone(&self) -> ToneTarget {
+        let (frequency_hz, gain) =
+            unpack_freq_gain(self.state.target_freq_gain.load(Ordering::Relaxed));
+        ToneTarget { frequency_hz, gain }
+    }
+
+    /// Whether a chime was requested since the last call.
+    #[cfg(test)]
+    pub(crate) fn take_chime(&self) -> bool {
+        self.state.chime_trigger.swap(false, Ordering::Relaxed)
     }
 
     pub fn set_enabled(&self, enabled: bool) {
@@ -376,6 +400,9 @@ fn supervise(state: &Arc<SharedState>) {
     let mut backoff = Backoff::default();
     loop {
         let started = Instant::now();
+        // A failed open can leave its stream's error message queued; it must not end the
+        // next, healthy stream.
+        while rx.try_recv().is_ok() {}
         match open_stream(state, &tx) {
             Ok(stream) => {
                 // The error callback sends one message per fatal error; `tx` stays alive here,
@@ -852,12 +879,24 @@ mod tests {
     }
 
     #[test]
-    fn only_fatal_errors_trigger_a_rebuild() {
+    fn every_error_but_transient_ones_triggers_a_rebuild() {
         use cpal::ErrorKind;
-        assert!(needs_rebuild(ErrorKind::DeviceNotAvailable));
-        assert!(needs_rebuild(ErrorKind::StreamInvalidated));
-        assert!(needs_rebuild(ErrorKind::DeviceChanged));
-        assert!(!needs_rebuild(ErrorKind::Xrun));
-        assert!(!needs_rebuild(ErrorKind::Other));
+        for kind in [
+            ErrorKind::DeviceNotAvailable,
+            ErrorKind::StreamInvalidated,
+            ErrorKind::HostUnavailable,
+            ErrorKind::DeviceBusy,
+            ErrorKind::BackendError,
+            ErrorKind::Other,
+        ] {
+            assert!(needs_rebuild(kind), "{kind:?}");
+        }
+        for kind in [
+            ErrorKind::Xrun,
+            ErrorKind::RealtimeDenied,
+            ErrorKind::DeviceChanged,
+        ] {
+            assert!(!needs_rebuild(kind), "{kind:?}");
+        }
     }
 }

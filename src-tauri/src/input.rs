@@ -419,9 +419,13 @@ impl Stream {
                 .then(|| drill.run.target_at(sample.t_us))
                 .flatten();
             let spec = drill.run.drill();
-            let step = drill
-                .tone
-                .step(target, value, spec.tolerance_fraction(), &spec.kind);
+            let step = drill.tone.step(
+                sample.t_us,
+                target,
+                value,
+                spec.tolerance_fraction(),
+                &spec.kind,
+            );
             audio.update(step.tone);
             if step.chime {
                 audio.chime();
@@ -714,9 +718,6 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
             _ => Vec::new(),
         }
     };
-    if let Some(drill) = &stream.active_drill {
-        send_audio_feedback(drill, &frames);
-    }
     let batch = SampleBatch {
         samples: std::mem::take(&mut stream.pending),
         frames,
@@ -726,35 +727,6 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
         },
     };
     stream.channel.send(batch).is_ok()
-}
-
-/// Flipped on by SCT-038 once the audio hook does something.
-const AUDIO_FEEDBACK_ENABLED: bool = false;
-
-/// Passes the signed error and in-band flag of each frame to the audio hook.
-fn send_audio_feedback(drill: &ActiveDrill, frames: &[PedalFrame]) {
-    // TODO(SCT-038): the hook is a stub, so compute nothing until audio is wired.
-    if !AUDIO_FEEDBACK_ENABLED {
-        return;
-    }
-    let tolerance = drill.run.drill().tolerance_fraction();
-    let pedal = drill.run.drill().pedal;
-    let audio_data: Vec<(f32, bool)> = frames
-        .iter()
-        .filter_map(|frame| {
-            let err = pedal_value(frame, pedal) - drill.run.target_at(frame.t_us)?;
-            Some((err, err.abs() <= tolerance))
-        })
-        .collect();
-    if !audio_data.is_empty() {
-        audio_feedback_hook(&audio_data);
-    }
-}
-
-/// TODO(SCT-038): Audio feedback hook.
-/// Called with the signed error and in-band flag for each sample batch during a drill.
-fn audio_feedback_hook(_samples: &[(f32, bool)]) {
-    // Intentionally blank for SCT-038
 }
 
 /// Opens a joystick unless it's already open. Returns whether the list changed.
@@ -972,5 +944,96 @@ mod tests {
         );
         assert!(stream.active_drill.is_none());
         assert!(log.lock().unwrap().is_empty());
+    }
+
+    /// A brake sample at `fraction` of full travel on axis 0.
+    fn sample_at(t_us: u64, fraction: f32) -> RawSample {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the value is within the i16 range"
+        )]
+        let raw = (f32::from(i16::MIN) + fraction * 65535.0).round() as i16;
+        let mut axes = [0; MAX_AXES];
+        axes[0] = raw;
+        RawSample {
+            t_us,
+            axis_count: 1,
+            axes,
+        }
+    }
+
+    /// Starts a brake drill (1 s countdown, then a 1 s hold at 70 % ±5 %) with a detached audio
+    /// output.
+    fn start_with_audio(stream: &mut Stream) -> AudioFeedback {
+        let audio = AudioFeedback::detached();
+        let (channel, _) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        start_drill(
+            Some(stream),
+            Some(brake_profile()),
+            0,
+            drill(Pedal::Brake),
+            channel,
+            Some(audio.clone()),
+            &reply,
+        );
+        assert_eq!(answer.recv().unwrap(), Ok(()));
+        audio
+    }
+
+    /// Steps the drill into its active rep with the pedal off target, so the tone sounds.
+    fn sound_tone(stream: &mut Stream, audio: &AudioFeedback) {
+        stream.step_drill(&sample_at(1_001_000, 0.2));
+        assert!(audio.tone().gain > 0.0);
+    }
+
+    #[test]
+    fn drill_drives_tone_and_chime() {
+        let mut stream = stream();
+        let audio = start_with_audio(&mut stream);
+
+        // Countdown: silent, even far off target.
+        stream.step_drill(&sample_at(500_000, 0.2));
+        assert_eq!(audio.tone(), SILENT);
+
+        // Active rep, pedal too light: a tone below the base pitch, no chime.
+        sound_tone(&mut stream, &audio);
+        assert!(audio.tone().frequency_hz < sct_core::audio_map::BASE_FREQ_HZ);
+        assert!(!audio.take_chime());
+
+        // Held in the band: silent, and one chime after the dwell.
+        let mut chimes = Vec::new();
+        for ms in 1_010..1_300 {
+            stream.step_drill(&sample_at(ms * 1000, 0.70));
+            if audio.take_chime() {
+                chimes.push(ms);
+            }
+        }
+        assert_eq!(audio.tone().gain, 0.0);
+        assert_eq!(chimes, [1_110]);
+    }
+
+    #[test]
+    fn every_drill_end_silences_the_tone() {
+        // Abort.
+        let mut stream = stream();
+        let audio = start_with_audio(&mut stream);
+        sound_tone(&mut stream, &audio);
+        stream.finish_drill();
+        assert_eq!(audio.tone(), SILENT);
+
+        // Replaced by a new drill.
+        let mut stream = self::stream();
+        let audio = start_with_audio(&mut stream);
+        sound_tone(&mut stream, &audio);
+        let _ = start(&mut stream, Pedal::Brake);
+        assert_eq!(audio.tone(), SILENT);
+
+        // Stream ended (stop, unplug, dropped channel).
+        let mut slot = Some(self::stream());
+        let audio = start_with_audio(slot.as_mut().unwrap());
+        sound_tone(slot.as_mut().unwrap(), &audio);
+        end_stream(&mut slot);
+        assert_eq!(audio.tone(), SILENT);
     }
 }

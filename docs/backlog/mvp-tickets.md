@@ -140,7 +140,7 @@ Audio comes from the Rust side (`cpal`/`rodio`):
 
 Settings: on/off and volume. Defaults follow [D-20](../decisions/README.md): on, silent inside the band, quiet volume.
 - **AC:** the tone responds within about 20 ms with no audible glitches; mute is persisted.
-- **Status:** done in code: the drill drives the tone per sample and chimes on band entry; tests cover the ~20 ms response and chime-on-entry. Check by ear before marking ✅.
+- **Status:** done in code. The drill drives the tone per sample; Hold drills play the lock chime once per rep after 100 ms in the band, with a small hysteresis at the band edge. Tests cover the synth reaching the new tone in under 20 ms; device buffering adds roughly one audio period on top, not yet measured on hardware. Trace audio ignores the reaction-lag compensation used in trace scoring; revisit with SCT-034. Check by ear before marking ✅.
 - **Deps:** SCT-031
 
 ---

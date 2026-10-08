@@ -57,11 +57,27 @@ describe("AudioControls", () => {
     const volumeSlider = screen.getByLabelText("Audio volume") as HTMLInputElement;
     await fireEvent.input(volumeSlider, { target: { value: "0.65" } });
 
-    expect(localStorage.getItem("sct:audio_volume")).toBe("0.65");
     const volCall = invoked.find(
       (c) => c.cmd === "audio_set_volume" && (c.args as { volume?: number }).volume === 0.65,
     );
     expect(volCall).toBeDefined();
+    // Saved when the drag ends, not on every input step.
+    expect(localStorage.getItem("sct:audio_volume")).toBeNull();
+    await fireEvent.change(volumeSlider);
+    expect(localStorage.getItem("sct:audio_volume")).toBe("0.65");
+  });
+
+  it("renders the saved mute and volume on the first render", () => {
+    localStorage.setItem("sct:audio_enabled", "false");
+    localStorage.setItem("sct:audio_volume", "0.4");
+    mockIPC(() => null);
+
+    render(AudioControls);
+
+    expect(screen.getByTestId("audio-toggle")).toHaveAttribute("aria-pressed", "true");
+    const volumeSlider = screen.getByLabelText("Audio volume") as HTMLInputElement;
+    expect(volumeSlider.value).toBe("0.4");
+    expect(volumeSlider).toBeDisabled();
   });
 
   it("invokes audio_test_tone when clicking test tone button in dev mode", async () => {

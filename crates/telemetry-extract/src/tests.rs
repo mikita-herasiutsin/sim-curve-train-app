@@ -549,7 +549,7 @@ fn test_corner_grouping_and_options() {
     for drill in &preset.drills {
         assert_eq!(drill.tolerance, None);
         assert!((drill.tolerance_fraction() - 0.10).abs() < 1e-4);
-        assert!(drill.id.starts_with("ttrack-name-c"));
+        assert!(drill.id.starts_with("track-name-c"));
     }
 
     // The noise corner (seen in 1 of 3 laps) must NOT be present
@@ -793,5 +793,101 @@ fn probe_median_choice() {
     assert_eq!(b_drills.len(), 1);
     if let sct_core::preset::DrillKind::Hold { target, .. } = b_drills[0].kind {
         assert!((target - 80.0).abs() < 1e-4, "Target should be median 80.0");
+    }
+}
+
+#[test]
+fn test_parse_lap_time_fraction_by_digit_count() {
+    assert_eq!(parse_lap_time_str("01:03.799"), Some(63.799));
+    assert_eq!(parse_lap_time_str("01.03.799"), Some(63.799));
+    assert_eq!(parse_lap_time_str("63.799"), Some(63.799));
+    assert_eq!(parse_lap_time_str("30.5"), Some(30.5));
+    assert_eq!(parse_lap_time_str("01:15.50"), Some(75.50));
+}
+
+#[test]
+fn test_one_frame_throttle_touch_before_braking_is_not_sustained() {
+    // 200 frames of synthetic throttle telemetry.
+    // BrakeZone 1: onset 10, release 30, peak 20.
+    // BrakeZone 2: onset 100, release 120, peak 110.
+    // For BrakeZone 1, window_end is 100 (< throttles.len() = 200).
+    // Throttle onset starts around frame 60 (0.70).
+    // Frame 99 (1 frame before braking onset at 100): 1-frame touch of 0.98.
+    let mut throttles = vec![0.0; 200];
+    for t in &mut throttles[60..99] {
+        *t = 0.70;
+    }
+    throttles[99] = 0.98; // 1-frame touch right before braking at frame 100
+
+    let bz1 = BrakeZone {
+        onset_idx: 10,
+        release_idx: 30,
+        peak_idx: 20,
+        peak_pct: 80.0,
+        duration_s: 20.0 / 60.0,
+    };
+    let bz2 = BrakeZone {
+        onset_idx: 100,
+        release_idx: 120,
+        peak_idx: 110,
+        peak_pct: 80.0,
+        duration_s: 20.0 / 60.0,
+    };
+
+    let exit_zones = detect_throttle_exit_zones(&throttles, &[bz1.clone(), bz2.clone()], &[]);
+    assert!(
+        exit_zones.is_empty(),
+        "a 1-frame 98% touch right before braking should NOT be detected as sustained full throttle"
+    );
+
+    // Conversely, if full throttle is sustained for THROTTLE_SUSTAINED_FRAMES (5 frames, 95..100):
+    for t in &mut throttles[95..100] {
+        *t = 0.98;
+    }
+    let exit_zones_sustained = detect_throttle_exit_zones(&throttles, &[bz1, bz2], &[]);
+    assert_eq!(
+        exit_zones_sustained.len(),
+        1,
+        "5 sustained frames of full throttle before braking should qualify"
+    );
+    assert_eq!(exit_zones_sustained[0].full_idx, 95);
+}
+
+#[test]
+fn test_drill_id_format_slug() {
+    let n = 200;
+    let mut b = vec![0.0; n];
+    let mut t = vec![1.0; n];
+    for i in 20..50 {
+        b[i] = 0.80;
+        t[i] = 0.0;
+    }
+    let path = std::path::PathBuf::from(
+        "Garage 61 - Driver - Car - Road Atlanta (Full Course) - 01.20.000 - ID1.csv",
+    );
+    let lap = LapTelemetry {
+        metadata: parse_filename_metadata(&path),
+        path,
+        brake: b,
+        throttle: t,
+        speed: vec![50.0; n],
+        lap_dist_pct: (0..n).map(|i| i as f32 / n as f32).collect(),
+    };
+    let opts = ExtractOptions {
+        preset_id: Some("test".into()),
+        preset_name: Some("test".into()),
+        out_path: None,
+        tolerance: None,
+        max_drills: 12,
+    };
+    let preset = extract_preset_from_laps(&[lap], &opts).expect("extract succeeds");
+    assert_ne!(preset.drills.len(), 0);
+    for drill in &preset.drills {
+        assert!(
+            drill.id.starts_with("road-atlanta-c"),
+            "drill ID '{}' should start with 'road-atlanta-c' and not 'troad-atlanta-c'",
+            drill.id
+        );
+        assert!(!drill.id.starts_with("troad-atlanta"));
     }
 }

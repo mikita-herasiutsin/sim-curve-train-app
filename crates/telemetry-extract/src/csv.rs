@@ -78,6 +78,20 @@ impl From<std::io::Error> for CsvError {
     }
 }
 
+fn parse_fraction(s: &str) -> Option<f64> {
+    if s.is_empty() || !s.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let val: f64 = s.parse().ok()?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        reason = "digit count of fraction string is small"
+    )]
+    let divisor = 10_f64.powi(s.len() as i32);
+    Some(val / divisor)
+}
+
 /// Parses a lap time string formatted as `mm.ss.mmm` (or `m.ss.mmm` / `mm:ss.mmm`) into seconds.
 #[must_use]
 pub fn parse_lap_time_str(s: &str) -> Option<f64> {
@@ -88,12 +102,12 @@ pub fn parse_lap_time_str(s: &str) -> Option<f64> {
     if parts.len() == 3 {
         let mins: f64 = parts[0].parse().ok()?;
         let secs: f64 = parts[1].parse().ok()?;
-        let millis: f64 = parts[2].parse().ok()?;
-        Some(mins * 60.0 + secs + millis / 1000.0)
+        let frac = parse_fraction(parts[2])?;
+        Some(mins * 60.0 + secs + frac)
     } else if parts.len() == 2 {
         let secs: f64 = parts[0].parse().ok()?;
-        let millis: f64 = parts[1].parse().ok()?;
-        Some(secs + millis / 1000.0)
+        let frac = parse_fraction(parts[1])?;
+        Some(secs + frac)
     } else {
         None
     }

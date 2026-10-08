@@ -380,6 +380,11 @@ pub fn detect_throttle_exit_zones(
                 let mut full_idx = None;
                 for (i, &t) in throttles.iter().enumerate().take(window_end).skip(onset) {
                     if t >= THROTTLE_FULL_THRESHOLD {
+                        if window_end < throttles.len()
+                            && i + THROTTLE_SUSTAINED_FRAMES > window_end
+                        {
+                            continue;
+                        }
                         let sustained_end = (i + THROTTLE_SUSTAINED_FRAMES).min(window_end);
                         let is_sustained =
                             throttles[i..sustained_end].iter().all(|&val| val >= 0.95);
@@ -427,6 +432,11 @@ pub fn detect_throttle_exit_zones(
                 let mut full_idx = None;
                 for (i, &t) in throttles.iter().enumerate().take(window_end).skip(onset) {
                     if t >= THROTTLE_FULL_THRESHOLD {
+                        if window_end < throttles.len()
+                            && i + THROTTLE_SUSTAINED_FRAMES > window_end
+                        {
+                            continue;
+                        }
                         let sustained_end = (i + THROTTLE_SUSTAINED_FRAMES).min(window_end);
                         let is_sustained =
                             throttles[i..sustained_end].iter().all(|&val| val >= 0.95);

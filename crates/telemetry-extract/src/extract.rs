@@ -431,7 +431,7 @@ pub fn extract_preset_from_laps(
                 let trace_pts = process_trace_segment(&rep_lap.brake, bz.onset_idx, bz.release_idx);
                 if trace_pts.len() >= 2 && drills.len() < max_drills {
                     drills.push(Drill {
-                        id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-brake")),
+                        id: sanitize_id(&format!("{t_slug}-c{corner_num:02}-brake")),
                         name: format!("Turn {corner_num} brake ({:.0}%)", bz.peak_pct),
                         pedal: Pedal::Brake,
                         reps: 5,
@@ -447,7 +447,7 @@ pub fn extract_preset_from_laps(
                     && drills.len() < max_drills
                 {
                     drills.push(Drill {
-                        id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-brake-hold")),
+                        id: sanitize_id(&format!("{t_slug}-c{corner_num:02}-brake-hold")),
                         name: format!("Turn {corner_num} brake hold ({:.0}%)", plateau.target),
                         pedal: Pedal::Brake,
                         reps: 5,
@@ -465,7 +465,7 @@ pub fn extract_preset_from_laps(
                     process_trace_segment(&rep_lap.throttle, lz.onset_idx, lz.recovery_idx);
                 if trace_pts.len() >= 2 && drills.len() < max_drills {
                     drills.push(Drill {
-                        id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-lift")),
+                        id: sanitize_id(&format!("{t_slug}-c{corner_num:02}-lift")),
                         name: format!("Turn {corner_num} lift ({:.0}%)", lz.min_pct),
                         pedal: Pedal::Throttle,
                         reps: 5,
@@ -481,7 +481,7 @@ pub fn extract_preset_from_laps(
                     && drills.len() < max_drills
                 {
                     drills.push(Drill {
-                        id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-lift-hold")),
+                        id: sanitize_id(&format!("{t_slug}-c{corner_num:02}-lift-hold")),
                         name: format!("Turn {corner_num} lift hold ({:.0}%)", plateau.target),
                         pedal: Pedal::Throttle,
                         reps: 5,
@@ -500,7 +500,7 @@ pub fn extract_preset_from_laps(
             let trace_pts = process_trace_segment(&rep_lap.throttle, tz.onset_idx, tz.full_idx);
             if trace_pts.len() >= 2 && drills.len() < max_drills {
                 drills.push(Drill {
-                    id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-throttle")),
+                    id: sanitize_id(&format!("{t_slug}-c{corner_num:02}-throttle")),
                     name: format!("Turn {corner_num} throttle"),
                     pedal: Pedal::Throttle,
                     reps: 5,
@@ -515,7 +515,7 @@ pub fn extract_preset_from_laps(
                 && drills.len() < max_drills
             {
                 drills.push(Drill {
-                    id: sanitize_id(&format!("t{t_slug}-c{corner_num:02}-throttle-hold")),
+                    id: sanitize_id(&format!("{t_slug}-c{corner_num:02}-throttle-hold")),
                     name: format!("Turn {corner_num} throttle hold ({:.0}%)", plateau.target),
                     pedal: Pedal::Throttle,
                     reps: 5,

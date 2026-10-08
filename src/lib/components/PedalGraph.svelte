@@ -2,15 +2,17 @@
   import { onMount, onDestroy } from "svelte";
   import { pedalStream, type PedalStream } from "$lib/pedals/stream";
   import { readThemeColors, type AppThemeColors } from "$lib/pedals/theme";
-  import { ColumnDecimator, drawGraph } from "$lib/pedals/graphDraw";
+  import { ColumnDecimator, drawGraph, type TargetBand } from "$lib/pedals/graphDraw";
   import { getGraphX } from "$lib/pedals/geometry";
 
   interface Props {
     stream?: PedalStream;
     windowSeconds?: number;
+    /** Optional target band drawn behind the lines (drill screen). */
+    band?: TargetBand | null;
   }
 
-  let { stream = pedalStream, windowSeconds = 5 }: Props = $props();
+  let { stream = pedalStream, windowSeconds = 5, band = null }: Props = $props();
 
   let containerEl = $state<HTMLDivElement | null>(null);
   let canvasEl = $state<HTMLCanvasElement | null>(null);
@@ -58,7 +60,7 @@
       decimator?.accumulate(xDevice, frame.brake, frame.throttle);
     });
 
-    drawGraph(ctx, width, height, decimator, nowUs, windowUs, theme, 18, 26, dpr);
+    drawGraph(ctx, width, height, decimator, nowUs, windowUs, theme, 18, 26, dpr, band);
     ctx.restore();
   }
 

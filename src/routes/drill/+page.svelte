@@ -16,6 +16,8 @@
   import { pedalStream } from "$lib/pedals/stream";
   import { startRealSource, type SourceStatus } from "$lib/pedals/realSource";
   import PedalBars from "$lib/components/PedalBars.svelte";
+  import PedalGraph from "$lib/components/PedalGraph.svelte";
+  import type { TargetBand } from "$lib/pedals/graphDraw";
 
   let presets = $state<Preset[]>([]);
   let selectedPreset = $state<Preset | null>(null);
@@ -26,6 +28,21 @@
 
   let view = $state<RunView>({ ...IDLE_VIEW });
   let countdownMs = $state(0);
+  let errorMessage = $state<string | null>(null);
+  // Set once the user aborts; the engine still ends the set with a final `setFinished`.
+  let aborting = $state(false);
+
+  // The target band on the graph, while a hold rep is active.
+  // TODO(SCT-034): trace drills draw their target curve instead.
+  const graphBand = $derived<TargetBand | null>(
+    view.runState === "active" && selectedDrill?.type === "hold"
+      ? {
+          pedal: selectedDrill.pedal,
+          target: selectedDrill.target / 100,
+          tolerance: selectedDrill.tolerance / 100,
+        }
+      : null,
+  );
   // Bumped on every start and abort, so events of a run the user left are ignored.
   let runId = 0;
 
@@ -49,7 +66,7 @@
     }
 
     const loop = () => {
-      if (view.runState === "countdown") {
+      if (view.runState === "countdown" && view.countdownEndsUs > 0) {
         const remainingUs = view.countdownEndsUs - pedalStream.dataNowUs();
         countdownMs = Math.max(0, Math.ceil(remainingUs / 1000));
       }
@@ -69,10 +86,12 @@
   function start() {
     if (!selectedPreset || !selectedDrill) return;
     if (sourceStatus.kind !== "live") {
-      alert("Please connect pedals before starting.");
+      errorMessage = "Connect your pedals before starting.";
       return;
     }
 
+    errorMessage = null;
+    aborting = false;
     const id = ++runId;
     const onEvent = (e: DrillEvent) => {
       if (id === runId) view = applyDrillEvent(view, e);
@@ -81,7 +100,7 @@
       if (id !== runId) return;
       console.error(e);
       view = { ...IDLE_VIEW };
-      alert("Failed to start drill: " + e);
+      errorMessage = `Failed to start drill: ${e}`;
     });
     view = { ...IDLE_VIEW, runState: "countdown" };
     countdownMs = selectedDrill.leadInMs;
@@ -89,11 +108,17 @@
   }
 
   function abort() {
-    runId++;
-    if (sourceStatus.kind === "live") {
-      abortDrillRun(sourceStatus.token).catch(console.error);
+    if (sourceStatus.kind !== "live") {
+      view = { ...IDLE_VIEW };
+      return;
     }
-    view = { ...IDLE_VIEW };
+    // The run stays current: its final `setFinished` shows the summary of what was scored.
+    aborting = true;
+    abortDrillRun(sourceStatus.token).catch((e) => {
+      console.error(e);
+      aborting = false;
+      errorMessage = `Failed to abort drill: ${e}`;
+    });
   }
 
   function restart() {
@@ -119,6 +144,10 @@
     {#if view.runState === "idle"}
       <div class="picker-panel panel">
         <h2>Select a Drill</h2>
+
+        {#if errorMessage}
+          <p class="error-message" role="alert">{errorMessage}</p>
+        {/if}
 
         <div class="picker-controls">
           <label>
@@ -164,46 +193,63 @@
       </div>
     {:else}
       <div class="active-workspace">
-        <div class="bars-container panel">
-          {#if view.runState === "countdown"}
-            <div class="overlay">
-              <h2 class="countdown-text">Get Ready!</h2>
-              <p class="countdown-timer">{(countdownMs / 1000).toFixed(1)}s</p>
-            </div>
-          {:else if view.runState === "finished"}
-            <div class="overlay">
-              <h2 class="finished-text">Set Finished!</h2>
-              <button class="btn-primary mt" onclick={restart}>Play Again</button>
-              <button class="btn-secondary mt" onclick={() => (view.runState = "idle")}
-                >Pick Another Drill</button
-              >
-            </div>
-          {/if}
+        <div class="left-col">
+          <div class="bars-container panel">
+            {#if view.runState === "countdown"}
+              <div class="overlay">
+                <h2 class="countdown-text">Get Ready!</h2>
+                <p class="countdown-timer">{(countdownMs / 1000).toFixed(1)}s</p>
+              </div>
+            {:else if view.runState === "finished"}
+              <div class="overlay">
+                <h2 class="finished-text">Set Finished!</h2>
+                <button class="btn-primary mt" onclick={restart}>Play Again</button>
+                <button class="btn-secondary mt" onclick={() => (view.runState = "idle")}
+                  >Pick Another Drill</button
+                >
+              </div>
+            {/if}
 
-          {#if selectedDrill?.type === "hold"}
-            <PedalBars
-              stream={pedalStream}
-              targetPedal={selectedDrill.pedal}
-              targetVal={selectedDrill.target / 100}
-              targetTolerance={selectedDrill.tolerance / 100}
-            />
-          {:else if selectedDrill?.type === "trace"}
-            <!-- Trace not fully supported in PedalBars target yet -->
-            <PedalBars stream={pedalStream} />
-          {/if}
+            {#if selectedDrill?.type === "hold"}
+              <PedalBars
+                stream={pedalStream}
+                targetPedal={selectedDrill.pedal}
+                targetVal={selectedDrill.target / 100}
+                targetTolerance={selectedDrill.tolerance / 100}
+              />
+            {:else if selectedDrill?.type === "trace"}
+              <!-- Trace not fully supported in PedalBars target yet -->
+              <PedalBars stream={pedalStream} />
+            {/if}
+          </div>
+
+          <div class="graph-container">
+            <PedalGraph stream={pedalStream} band={graphBand} />
+          </div>
         </div>
 
         <div class="side-panel">
           <div class="rep-info panel">
             <h3>Rep {view.currentRep + 1} / {selectedDrill?.reps}</h3>
             <p class="status-badge {view.runState}">{view.runState.toUpperCase()}</p>
+            {#if errorMessage}
+              <p class="error-message" role="alert">{errorMessage}</p>
+            {/if}
 
-            {#if view.runState !== "finished"}
+            {#if view.runState !== "finished" && !aborting}
               <button class="btn-abort" onclick={abort}>Abort Set</button>
             {/if}
           </div>
 
-          {#if view.lastScore && view.lastScore.kind === "hold"}
+          {#if view.lastScore?.kind === "trace"}
+            <div class="score-card panel">
+              <h3>Rep Result</h3>
+              <div class="score-grade">
+                <span class="total">{Math.round(view.lastScore.total)}</span>
+                <span class="grade grade-{view.lastScore.grade}">{view.lastScore.grade}</span>
+              </div>
+            </div>
+          {:else if view.lastScore}
             <div class="score-card panel">
               <h3>Rep Result</h3>
               <div class="score-grade">
@@ -523,6 +569,23 @@
     border: 1px solid var(--brake);
     color: var(--brake);
     margin-top: 1rem;
+  }
+
+  .left-col {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    min-width: 0;
+  }
+
+  .graph-container {
+    height: 18rem;
+  }
+
+  .error-message {
+    margin: 0 0 1rem 0;
+    color: var(--brake);
+    font-size: 0.875rem;
   }
 
   .mt {

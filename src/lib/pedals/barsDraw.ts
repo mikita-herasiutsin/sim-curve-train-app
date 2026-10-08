@@ -179,7 +179,7 @@ export function drawPedalBars(
       roundRect(ctx, col.x, col.barY, col.width, col.barHeight, 8);
       ctx.clip();
 
-      ctx.fillStyle = inBandFill ? color + "40" : theme.border + "80"; // semi transparent band
+      ctx.fillStyle = bandColor(inBandFill, theme);
       ctx.fillRect(col.x, bandY, col.width, bandH);
 
       ctx.restore();
@@ -212,4 +212,9 @@ export function drawPedalBars(
       ctx.stroke();
     }
   }
+}
+
+/** Translucent green while the value is inside the target band, red outside it. */
+export function bandColor(inBand: boolean, theme: AppThemeColors): string {
+  return (inBand ? theme.throttle : theme.brake) + "50";
 }

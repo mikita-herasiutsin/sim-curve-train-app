@@ -647,8 +647,15 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
     stream.channel.send(batch).is_ok()
 }
 
+/// Flipped on by SCT-038 once the audio hook does something.
+const AUDIO_FEEDBACK_ENABLED: bool = false;
+
 /// Passes the signed error and in-band flag of each frame to the audio hook.
 fn send_audio_feedback(drill: &ActiveDrill, frames: &[PedalFrame]) {
+    // TODO(SCT-038): the hook is a stub, so compute nothing until audio is wired.
+    if !AUDIO_FEEDBACK_ENABLED {
+        return;
+    }
     let tolerance = drill.run.drill().tolerance_fraction();
     let pedal = drill.run.drill().pedal;
     let audio_data: Vec<(f32, bool)> = frames

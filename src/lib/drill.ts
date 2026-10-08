@@ -107,6 +107,11 @@ export const IDLE_VIEW: RunView = {
   summary: null,
 };
 
+/**
+ * Advances the view by one engine event. A rep's score stays visible through the rest
+ * countdown that follows it (both events arrive together) and is cleared when the next rep
+ * starts. After an abort the engine still sends `setFinished`, which ends the set the same way.
+ */
 export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
   switch (e.event) {
     case "countdownStarted":
@@ -115,10 +120,9 @@ export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
         runState: "countdown",
         currentRep: e.rep,
         countdownEndsUs: e.endsUs,
-        lastScore: null,
       };
     case "repStarted":
-      return { ...view, runState: "active", currentRep: e.rep };
+      return { ...view, runState: "active", currentRep: e.rep, lastScore: null };
     case "repScored":
       return { ...view, runState: "scored", currentRep: e.rep, lastScore: e.score };
     case "repFailed":

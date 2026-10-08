@@ -181,6 +181,39 @@ export function buildSignalSegments(
   return segments;
 }
 
+/** A target band (target +- tolerance, as 0..1 fractions) for one pedal. */
+export interface TargetBand {
+  pedal: "brake" | "throttle" | "clutch";
+  target: number;
+  tolerance: number;
+}
+
+/** Shades the target band across the whole graph, in the pedal's colour. */
+export function drawTargetBand(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  band: TargetBand,
+  theme: AppThemeColors,
+  paddingTop: number,
+  paddingBottom: number,
+): void {
+  const top = getGraphY(
+    Math.min(1, band.target + band.tolerance),
+    height,
+    paddingTop,
+    paddingBottom,
+  );
+  const bottom = getGraphY(
+    Math.max(0, band.target - band.tolerance),
+    height,
+    paddingTop,
+    paddingBottom,
+  );
+  ctx.fillStyle = (band.pedal === "brake" ? theme.brake : theme.throttle) + "30";
+  ctx.fillRect(0, top, width, bottom - top);
+}
+
 /**
  * Draws the complete pedal graph onto a CanvasRenderingContext2D.
  */
@@ -195,6 +228,7 @@ export function drawGraph(
   paddingTop = 18,
   paddingBottom = 26,
   dpr = 1,
+  band: TargetBand | null = null,
 ): void {
   // Clear canvas
   ctx.clearRect(0, 0, width, height);
@@ -244,6 +278,8 @@ export function drawGraph(
     if (line.x >= 16 && line.x <= width - 16) ctx.fillText(line.label, line.x, height - 6);
   }
   ctx.setLineDash([]);
+
+  if (band) drawTargetBand(ctx, width, height, band, theme, paddingTop, paddingBottom);
 
   // Draw Brake line
   const brakeSegments = buildSignalSegments(

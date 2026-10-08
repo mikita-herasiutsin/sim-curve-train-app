@@ -10,13 +10,35 @@ const summary: SetSummary = {
 };
 
 describe("applyDrillEvent", () => {
-  it("tracks the countdown and clears the previous score", () => {
-    const view = applyDrillEvent(
-      { ...IDLE_VIEW, lastScore: { kind: "trace", total: 1, grade: "A", rmse: 0 } },
-      { event: "countdownStarted", rep: 2, startUs: 10, endsUs: 3010 },
-    );
+  it("tracks the countdown", () => {
+    const view = applyDrillEvent(IDLE_VIEW, {
+      event: "countdownStarted",
+      rep: 2,
+      startUs: 10,
+      endsUs: 3010,
+    });
     expect(view).toMatchObject({ runState: "countdown", currentRep: 2, countdownEndsUs: 3010 });
+  });
+
+  it("keeps the rep score through the rest countdown and clears it when the next rep starts", () => {
+    const score = { kind: "trace", total: 90, grade: "A", rmse: 0 } as const;
+    let view = applyDrillEvent(IDLE_VIEW, { event: "repStarted", rep: 0, startUs: 0 });
+    view = applyDrillEvent(view, { event: "repScored", rep: 0, score });
+    view = applyDrillEvent(view, {
+      event: "countdownStarted",
+      rep: 1,
+      startUs: 5,
+      endsUs: 3005,
+    });
+    expect(view).toMatchObject({ runState: "countdown", currentRep: 1, lastScore: score });
+    view = applyDrillEvent(view, { event: "repStarted", rep: 1, startUs: 3005 });
     expect(view.lastScore).toBeNull();
+  });
+
+  it("moves from an aborted set to finished with its summary", () => {
+    let view = applyDrillEvent(IDLE_VIEW, { event: "repStarted", rep: 1, startUs: 0 });
+    view = applyDrillEvent(view, { event: "setFinished", summary });
+    expect(view).toMatchObject({ runState: "finished", summary });
   });
 
   it("marks a failed rep as scored without a score", () => {

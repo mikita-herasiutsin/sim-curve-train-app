@@ -1,39 +1,35 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{BufferSize, Stream, StreamConfig};
-use sct_core::audio_map::{BASE_FREQ_HZ, ToneTarget};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
+/// Lock chime: a short, bright 1 kHz ping.
 const CHIME_FREQ_HZ: f32 = 1000.0;
 const CHIME_GAIN: f32 = 0.3;
 const CHIME_DECAY_TIME_S: f32 = 0.08;
 const CHIME_ATTACK_TIME_S: f32 = 0.002;
+
+/// Miss cue: soft and low, a sine gliding down from ~G4 to ~C4, clearly apart from the chime.
+const MISS_START_FREQ_HZ: f32 = 392.0;
+const MISS_END_FREQ_HZ: f32 = 262.0;
+const MISS_GLIDE_TIME_S: f32 = 0.06;
+const MISS_GAIN: f32 = 0.2;
+const MISS_DECAY_TIME_S: f32 = 0.12;
+const MISS_ATTACK_TIME_S: f32 = 0.005;
+
 const DENORMAL_THRESHOLD: f32 = 1e-6;
 const SLEW_TIME_S: f32 = 0.0025;
+/// Gap between the chime and the miss cue of the debug test sounds.
+const TEST_SOUNDS_GAP: Duration = Duration::from_millis(400);
 pub const DEFAULT_AUDIO_VOLUME: f32 = 0.2;
-
-#[inline]
-fn pack_freq_gain(freq: f32, gain: f32) -> u64 {
-    let freq_bits = u64::from(freq.to_bits());
-    let gain_bits = u64::from(gain.to_bits());
-    (freq_bits << 32) | gain_bits
-}
-
-#[inline]
-fn unpack_freq_gain(packed: u64) -> (f32, f32) {
-    let freq_bits = (packed >> 32) as u32;
-    #[expect(clippy::cast_possible_truncation, reason = "lower 32 bits fit in u32")]
-    let gain_bits = packed as u32;
-    (f32::from_bits(freq_bits), f32::from_bits(gain_bits))
-}
 
 /// Contains the lock-free shared state read by the audio callback.
 pub struct SharedState {
     pub enabled: AtomicBool,
-    pub master_volume: AtomicU32,    // f32 bits
-    pub target_freq_gain: AtomicU64, // high 32: freq, low 32: gain
+    pub master_volume: AtomicU32, // f32 bits
     pub chime_trigger: AtomicBool,
+    pub miss_trigger: AtomicBool,
 }
 
 impl Default for SharedState {
@@ -48,8 +44,8 @@ impl SharedState {
         Self {
             enabled: AtomicBool::new(true),
             master_volume: AtomicU32::new(DEFAULT_AUDIO_VOLUME.to_bits()),
-            target_freq_gain: AtomicU64::new(pack_freq_gain(BASE_FREQ_HZ, 0.0)),
             chime_trigger: AtomicBool::new(false),
+            miss_trigger: AtomicBool::new(false),
         }
     }
 
@@ -66,38 +62,111 @@ impl SharedState {
         self.master_volume.store(vol.to_bits(), Ordering::Relaxed);
     }
 
-    pub fn update(&self, target: ToneTarget) {
-        let freq = if target.frequency_hz.is_finite() {
-            target.frequency_hz
-        } else {
-            BASE_FREQ_HZ
-        };
-        let gain = if target.gain.is_finite() {
-            target.gain.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        self.target_freq_gain
-            .store(pack_freq_gain(freq, gain), Ordering::Relaxed);
-    }
-
     pub fn chime(&self) {
         self.chime_trigger.store(true, Ordering::Relaxed);
+    }
+
+    pub fn miss(&self) {
+        self.miss_trigger.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Takes a pending trigger (lock-free, as the callback may not block).
+#[inline]
+fn take_trigger(flag: &AtomicBool) -> bool {
+    flag.load(Ordering::Relaxed) && flag.swap(false, Ordering::Relaxed)
+}
+
+/// A one-shot sine cue: a short linear attack, then an exponential decay, with the pitch
+/// optionally gliding exponentially from `start_freq` to `end_freq`. A retrigger restarts the
+/// attack from the current envelope and never resets the phase, so it cannot click.
+struct Voice {
+    gain: f32,
+    start_freq: f32,
+    end_freq: f32,
+    decay: f32,
+    attack_step: f32,
+    glide_decay: f32,
+    freq: f32,
+    phase: f32,
+    env: f32,
+    attacking: bool,
+}
+
+impl Voice {
+    fn new(
+        dt: f32,
+        gain: f32,
+        start_freq: f32,
+        end_freq: f32,
+        glide_time_s: f32,
+        attack_time_s: f32,
+        decay_time_s: f32,
+    ) -> Self {
+        Self {
+            gain,
+            start_freq,
+            end_freq,
+            decay: (-dt / decay_time_s).exp(),
+            attack_step: (dt / attack_time_s).clamp(0.0, 1.0),
+            glide_decay: (-dt / glide_time_s).exp(),
+            freq: start_freq,
+            phase: 0.0,
+            env: 0.0,
+            attacking: false,
+        }
+    }
+
+    /// The next sample. A disabled synth ignores (but consumes) the trigger and fades the cue
+    /// out at the slew rate instead of cutting it.
+    fn next(&mut self, dt: f32, triggered: bool, enabled: bool, smooth_factor: f32) -> f32 {
+        if !self.phase.is_finite() {
+            self.phase = 0.0;
+        }
+        if !self.env.is_finite() {
+            self.env = 0.0;
+        }
+        if !self.freq.is_finite() {
+            self.freq = self.start_freq;
+        }
+
+        if !enabled {
+            self.attacking = false;
+        } else if triggered {
+            self.attacking = true;
+            self.freq = self.start_freq;
+        }
+
+        if self.attacking {
+            self.env += self.attack_step;
+            if self.env >= 1.0 {
+                self.env = 1.0;
+                self.attacking = false;
+            }
+        } else if enabled {
+            self.env *= self.decay;
+        } else {
+            self.env -= self.env * smooth_factor;
+        }
+        if !self.attacking && self.env.abs() < DENORMAL_THRESHOLD {
+            self.env = 0.0;
+        }
+
+        if self.env <= 0.0 {
+            return 0.0;
+        }
+        self.freq = self.end_freq + (self.freq - self.end_freq) * self.glide_decay;
+        self.phase = (self.phase + self.freq * dt) % 1.0;
+        (self.phase * std::f32::consts::TAU).sin() * self.env * self.gain
     }
 }
 
 pub struct Synth {
     dt: f32,
     smooth_factor: f32,
-    chime_decay: f32,
-    chime_attack_step: f32,
-    current_freq: f32,
-    current_gain: f32,
     current_vol: f32,
-    phase: f32,
-    chime_phase: f32,
-    chime_env: f32,
-    chime_attacking: bool,
+    chime: Voice,
+    miss: Voice,
 }
 
 impl Synth {
@@ -110,130 +179,62 @@ impl Synth {
         };
         let dt = 1.0 / sr;
         // One-pole slew with a 2.5 ms time constant: fast enough for the ~20 ms response
-        // budget, slow enough to keep gain and pitch changes click-free.
+        // budget, slow enough to keep volume and mute changes click-free.
         let smooth_factor = (dt / SLEW_TIME_S).clamp(0.0, 1.0);
-        let chime_decay = (-dt / CHIME_DECAY_TIME_S).exp();
-        let chime_attack_step = (dt / CHIME_ATTACK_TIME_S).clamp(0.0, 1.0);
 
         Self {
             dt,
             smooth_factor,
-            chime_decay,
-            chime_attack_step,
-            current_freq: BASE_FREQ_HZ,
-            current_gain: 0.0,
             current_vol: 0.0,
-            phase: 0.0,
-            chime_phase: 0.0,
-            chime_env: 0.0,
-            chime_attacking: false,
+            chime: Voice::new(
+                dt,
+                CHIME_GAIN,
+                CHIME_FREQ_HZ,
+                CHIME_FREQ_HZ,
+                1.0,
+                CHIME_ATTACK_TIME_S,
+                CHIME_DECAY_TIME_S,
+            ),
+            miss: Voice::new(
+                dt,
+                MISS_GAIN,
+                MISS_START_FREQ_HZ,
+                MISS_END_FREQ_HZ,
+                MISS_GLIDE_TIME_S,
+                MISS_ATTACK_TIME_S,
+                MISS_DECAY_TIME_S,
+            ),
         }
     }
 
     pub fn next_sample(&mut self, shared: &SharedState) -> f32 {
-        if !self.phase.is_finite() {
-            self.phase = 0.0;
-        }
-        if !self.current_freq.is_finite() {
-            self.current_freq = BASE_FREQ_HZ;
-        }
-        if !self.current_gain.is_finite() {
-            self.current_gain = 0.0;
-        }
-        if !self.chime_phase.is_finite() {
-            self.chime_phase = 0.0;
-        }
         if !self.current_vol.is_finite() {
             self.current_vol = 0.0;
-        }
-        if !self.chime_env.is_finite() {
-            self.chime_env = 0.0;
         }
 
         let enabled = shared.enabled.load(Ordering::Relaxed);
         let raw_master_vol = f32::from_bits(shared.master_volume.load(Ordering::Relaxed));
-        let packed = shared.target_freq_gain.load(Ordering::Relaxed);
-        let (raw_target_freq, raw_target_gain) = unpack_freq_gain(packed);
-
         let master_vol = if raw_master_vol.is_finite() {
             raw_master_vol.clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let target_freq = if raw_target_freq.is_finite() {
-            raw_target_freq.clamp(20.0, 20_000.0)
-        } else {
-            BASE_FREQ_HZ
-        };
-        let target_gain = if raw_target_gain.is_finite() {
-            raw_target_gain.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
 
-        // Chime triggering: a disabled synth ignores (but consumes) the trigger. The envelope
-        // ramps up quickly instead of jumping, and never resets the chime phase, so a retrigger
-        // cannot click.
-        let chime_triggered = shared.chime_trigger.load(Ordering::Relaxed)
-            && shared.chime_trigger.swap(false, Ordering::Relaxed);
-        if !enabled {
-            self.chime_attacking = false;
-        } else if chime_triggered {
-            self.chime_attacking = true;
-        }
-
-        // Toggling enabled fades gain smoothly (treat disabled as target gain 0)
-        let effective_target_gain = if enabled { target_gain } else { 0.0 };
-
-        // A new tone starts at its own pitch: snap the frequency while silent, otherwise slew it
-        // (and hold the last frequency while fading out).
-        if self.current_gain == 0.0 {
-            self.current_freq = target_freq;
-        } else if effective_target_gain > 0.0 {
-            self.current_freq += (target_freq - self.current_freq) * self.smooth_factor;
-        }
-        self.current_gain += (effective_target_gain - self.current_gain) * self.smooth_factor;
         self.current_vol += (master_vol - self.current_vol) * self.smooth_factor;
-
-        // Flush denormals
         if master_vol == 0.0 && self.current_vol.abs() < DENORMAL_THRESHOLD {
             self.current_vol = 0.0;
         }
-        if effective_target_gain == 0.0 && self.current_gain.abs() < DENORMAL_THRESHOLD {
-            self.current_gain = 0.0;
-        }
 
-        self.phase = (self.phase + self.current_freq * self.dt) % 1.0;
-        let tone_sample = if self.current_gain > 0.0 {
-            (self.phase * std::f32::consts::TAU).sin() * self.current_gain
-        } else {
-            0.0
-        };
+        let chime_triggered = take_trigger(&shared.chime_trigger);
+        let miss_triggered = take_trigger(&shared.miss_trigger);
+        let chime = self
+            .chime
+            .next(self.dt, chime_triggered, enabled, self.smooth_factor);
+        let miss = self
+            .miss
+            .next(self.dt, miss_triggered, enabled, self.smooth_factor);
 
-        if self.chime_attacking {
-            self.chime_env += self.chime_attack_step;
-            if self.chime_env >= 1.0 {
-                self.chime_env = 1.0;
-                self.chime_attacking = false;
-            }
-        } else if enabled {
-            self.chime_env *= self.chime_decay;
-        } else {
-            // Muted: fade the chime out at the gain slew rate instead of cutting it.
-            self.chime_env -= self.chime_env * self.smooth_factor;
-        }
-        if !self.chime_attacking && self.chime_env.abs() < DENORMAL_THRESHOLD {
-            self.chime_env = 0.0;
-        }
-
-        let mut chime_sample = 0.0;
-        if self.chime_env > 0.0 {
-            self.chime_phase = (self.chime_phase + CHIME_FREQ_HZ * self.dt) % 1.0;
-            chime_sample =
-                (self.chime_phase * std::f32::consts::TAU).sin() * self.chime_env * CHIME_GAIN;
-        }
-
-        let out_sample = (tone_sample + chime_sample) * self.current_vol;
+        let out_sample = (chime + miss) * self.current_vol;
         if out_sample.is_finite() {
             out_sample.clamp(-1.0, 1.0)
         } else {
@@ -245,18 +246,18 @@ impl Synth {
 #[cfg(test)]
 impl Synth {
     #[must_use]
-    pub fn current_freq(&self) -> f32 {
-        self.current_freq
-    }
-
-    #[must_use]
-    pub fn current_gain(&self) -> f32 {
-        self.current_gain
-    }
-
-    #[must_use]
     pub fn chime_env(&self) -> f32 {
-        self.chime_env
+        self.chime.env
+    }
+
+    #[must_use]
+    pub fn miss_env(&self) -> f32 {
+        self.miss.env
+    }
+
+    #[must_use]
+    pub fn miss_freq(&self) -> f32 {
+        self.miss.freq
     }
 }
 
@@ -337,18 +338,16 @@ impl AudioFeedback {
         }
     }
 
-    /// The tone last set with [`update`](Self::update).
-    #[cfg(test)]
-    pub(crate) fn tone(&self) -> ToneTarget {
-        let (frequency_hz, gain) =
-            unpack_freq_gain(self.state.target_freq_gain.load(Ordering::Relaxed));
-        ToneTarget { frequency_hz, gain }
-    }
-
     /// Whether a chime was requested since the last call.
     #[cfg(test)]
     pub(crate) fn take_chime(&self) -> bool {
         self.state.chime_trigger.swap(false, Ordering::Relaxed)
+    }
+
+    /// Whether a miss cue was requested since the last call.
+    #[cfg(test)]
+    pub(crate) fn take_miss(&self) -> bool {
+        self.state.miss_trigger.swap(false, Ordering::Relaxed)
     }
 
     pub fn set_enabled(&self, enabled: bool) {
@@ -359,36 +358,33 @@ impl AudioFeedback {
         self.state.set_volume(volume);
     }
 
-    pub fn update(&self, target: ToneTarget) {
-        self.state.update(target);
-    }
-
     pub fn chime(&self) {
         self.state.chime();
     }
 
+    pub fn miss(&self) {
+        self.state.miss();
+    }
+
+    /// Plays the chime now and the miss cue shortly after. A newer call cancels the pending
+    /// miss cue of an older one, so rapid clicks do not stack.
     #[cfg_attr(
         not(debug_assertions),
-        expect(dead_code, reason = "test tone is debug-only")
+        expect(dead_code, reason = "test sounds are debug-only")
     )]
     pub fn test_tone(&self) {
         self.chime();
-        let generation = self.test_tone_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.update(ToneTarget {
-            frequency_hz: 600.0,
-            gain: 0.3,
-        });
-        let state = self.state.clone();
-        let latest = self.test_tone_generation.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(500));
-            if latest.load(Ordering::Relaxed) == generation {
-                state.update(ToneTarget {
-                    frequency_hz: BASE_FREQ_HZ,
-                    gain: 0.0,
-                });
-            }
-        });
+        {
+            let generation = self.test_tone_generation.fetch_add(1, Ordering::Relaxed) + 1;
+            let state = self.state.clone();
+            let latest = self.test_tone_generation.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(TEST_SOUNDS_GAP);
+                if latest.load(Ordering::Relaxed) == generation {
+                    state.miss();
+                }
+            });
+        }
     }
 }
 
@@ -468,15 +464,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pack_and_unpack_freq_gain_roundtrip() {
-        let (freq, gain) = (440.0_f32, 0.25_f32);
-        let packed = pack_freq_gain(freq, gain);
-        let (u_freq, u_gain) = unpack_freq_gain(packed);
-        assert_eq!(freq, u_freq);
-        assert_eq!(gain, u_gain);
-    }
-
-    #[test]
     fn set_volume_clamps_and_maps_non_finite() {
         let shared = SharedState::new();
         shared.set_volume(1.5);
@@ -505,51 +492,31 @@ mod tests {
     }
 
     #[test]
+    fn silent_without_a_cue() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        for _ in 0..2000 {
+            assert_eq!(synth.next_sample(&shared), 0.0);
+        }
+    }
+
+    #[test]
     fn silent_when_disabled() {
         let mut synth = Synth::new(48000.0);
         let shared = SharedState::new();
         shared.set_enabled(false);
         shared.set_volume(1.0);
-        shared.update(ToneTarget {
-            frequency_hz: 600.0,
-            gain: 0.5,
-        });
         shared.chime();
+        shared.miss();
 
         for _ in 0..1000 {
             let sample = synth.next_sample(&shared);
             assert_eq!(sample, 0.0);
         }
-    }
-
-    #[test]
-    fn disable_fades_gain_smoothly() {
-        let mut synth = Synth::new(48000.0);
-        let shared = SharedState::new();
-        shared.set_volume(1.0);
-        shared.update(ToneTarget {
-            frequency_hz: 440.0,
-            gain: 0.5,
-        });
-
-        // Run until gain stabilizes near 0.5
-        for _ in 0..2000 {
-            synth.next_sample(&shared);
-        }
-        assert!(synth.current_gain() > 0.45);
-
-        // Mute
-        shared.set_enabled(false);
-
-        // Next sample should NOT instantly drop to 0 (smooth fade)
-        synth.next_sample(&shared);
-        assert!(synth.current_gain() > 0.3);
-
-        // Run until flush denormals takes it to 0
-        for _ in 0..6000 {
-            synth.next_sample(&shared);
-        }
-        assert_eq!(synth.current_gain(), 0.0);
+        // The triggers were consumed, so enabling does not play them late.
+        assert!(!shared.chime_trigger.load(Ordering::Relaxed));
+        assert!(!shared.miss_trigger.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -557,32 +524,23 @@ mod tests {
         let mut synth = Synth::new(48000.0);
         let shared = SharedState::new();
 
-        // Feed NaN inputs
         shared
             .master_volume
             .store(f32::NAN.to_bits(), Ordering::Relaxed);
-        shared
-            .target_freq_gain
-            .store(pack_freq_gain(f32::NAN, f32::NAN), Ordering::Relaxed);
-
+        shared.chime();
+        shared.miss();
         for _ in 0..100 {
             let sample = synth.next_sample(&shared);
-            assert!(!sample.is_nan());
             assert!(sample.is_finite());
             assert_eq!(sample, 0.0);
         }
 
         // Now resume normal inputs and verify synth recovers
         shared.set_volume(0.5);
-        shared.update(ToneTarget {
-            frequency_hz: 500.0,
-            gain: 0.3,
-        });
-
+        shared.miss();
         let mut non_zero_seen = false;
         for _ in 0..1000 {
             let sample = synth.next_sample(&shared);
-            assert!(!sample.is_nan());
             assert!(sample.is_finite());
             if sample.abs() > 0.01 {
                 non_zero_seen = true;
@@ -592,44 +550,22 @@ mod tests {
     }
 
     #[test]
-    fn frequency_held_while_fading() {
-        let mut synth = Synth::new(48000.0);
+    fn corrupted_voice_state_recovers() {
+        let mut synth = Synth::new(48_000.0);
         let shared = SharedState::new();
         shared.set_volume(1.0);
-        shared.update(ToneTarget {
-            frequency_hz: 700.0,
-            gain: 0.5,
-        });
-
-        // Run until frequency slews close to 700.0
-        for _ in 0..2000 {
-            synth.next_sample(&shared);
+        synth.miss.phase = f32::NAN;
+        synth.miss.env = f32::NAN;
+        synth.miss.freq = f32::NAN;
+        synth.current_vol = f32::NAN;
+        for _ in 0..100 {
+            assert!(synth.next_sample(&shared).is_finite());
         }
-        assert!((synth.current_freq() - 700.0).abs() < 1.0);
-        let held_freq = synth.current_freq();
-
-        // Now set target gain to 0.0 with target frequency set to BASE_FREQ_HZ (440.0)
-        shared.update(ToneTarget {
-            frequency_hz: BASE_FREQ_HZ,
-            gain: 0.0,
-        });
-
-        // While fading out, frequency must stay exactly held
-        for _ in 0..500 {
-            synth.next_sample(&shared);
-            assert_eq!(synth.current_freq(), held_freq);
+        shared.miss();
+        for _ in 0..1000 {
+            assert!(synth.next_sample(&shared).is_finite());
         }
-        assert!(synth.current_gain() < 0.5);
-
-        // Run until completely faded; the frequency stays held while any gain is left
-        for _ in 0..5000 {
-            synth.next_sample(&shared);
-            assert_eq!(synth.current_freq(), held_freq);
-            if synth.current_gain() == 0.0 {
-                break;
-            }
-        }
-        assert_eq!(synth.current_gain(), 0.0);
+        assert!(synth.miss_env() > 0.0);
     }
 
     #[test]
@@ -675,38 +611,62 @@ mod tests {
         }
         assert_eq!(synth96.chime_env(), 0.0);
     }
+
     #[test]
-    fn new_tone_starts_at_its_own_pitch() {
+    fn miss_decays_to_zero_at_48khz_and_96khz() {
+        for rate in [48_000.0_f32, 96_000.0] {
+            let mut synth = Synth::new(rate);
+            let shared = SharedState::new();
+            shared.set_volume(1.0);
+            shared.miss();
+            // 5 ms attack, then 0.12 s of decay: about 1/e of the peak.
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "small positive sample counts"
+            )]
+            let (attack, decay_tau, total) = (
+                (rate * MISS_ATTACK_TIME_S) as usize,
+                (rate * MISS_DECAY_TIME_S) as usize,
+                (rate * 2.0) as usize,
+            );
+            for _ in 0..attack + decay_tau {
+                synth.next_sample(&shared);
+            }
+            assert!(
+                (synth.miss_env() - (-1.0_f32).exp()).abs() < 0.01,
+                "env at {rate} Hz: {}",
+                synth.miss_env()
+            );
+            for _ in 0..total {
+                synth.next_sample(&shared);
+            }
+            assert_eq!(synth.miss_env(), 0.0, "at {rate} Hz");
+        }
+    }
+
+    #[test]
+    fn miss_pitch_glides_down() {
         let mut synth = Synth::new(48_000.0);
         let shared = SharedState::new();
         shared.set_volume(1.0);
-        shared.update(ToneTarget {
-            frequency_hz: 800.0,
-            gain: 0.3,
-        });
+        shared.miss();
         synth.next_sample(&shared);
-        assert_eq!(synth.current_freq(), 800.0);
-
-        // Fade out completely, then start a different tone: no glide from the old pitch.
-        shared.update(ToneTarget {
-            frequency_hz: 800.0,
-            gain: 0.0,
-        });
-        for _ in 0..20_000 {
+        assert!(synth.miss_freq() <= MISS_START_FREQ_HZ);
+        assert!(synth.miss_freq() > 380.0);
+        for _ in 0..48_000 / 2 {
             synth.next_sample(&shared);
         }
-        assert_eq!(synth.current_gain(), 0.0);
-        shared.update(ToneTarget {
-            frequency_hz: 300.0,
-            gain: 0.3,
-        });
+        assert!((synth.miss_freq() - MISS_END_FREQ_HZ).abs() < 1.0);
+        // A retrigger restarts the glide from the top.
+        shared.miss();
         synth.next_sample(&shared);
-        assert_eq!(synth.current_freq(), 300.0);
+        assert!(synth.miss_freq() > 380.0);
     }
 
-    /// The tone follows a new target within ~20 ms (SCT-038), at 48 kHz and 96 kHz.
+    /// Both cues respond within ~20 ms of the trigger (SCT-038), at 48 kHz and 96 kHz.
     #[test]
-    fn responds_within_20ms() {
+    fn cues_respond_within_20ms() {
         for rate in [48_000.0_f32, 96_000.0] {
             #[expect(
                 clippy::cast_possible_truncation,
@@ -714,45 +674,54 @@ mod tests {
                 reason = "20 ms of samples is a small positive count"
             )]
             let samples = (rate * 0.020) as usize;
-            let mut synth = Synth::new(rate);
-            let shared = SharedState::new();
-            shared.set_volume(1.0);
-
-            // Silence to tone: gain is near its target.
-            shared.update(ToneTarget {
-                frequency_hz: 440.0,
-                gain: 0.2,
-            });
-            for _ in 0..samples {
-                synth.next_sample(&shared);
+            for miss in [false, true] {
+                let mut synth = Synth::new(rate);
+                let shared = SharedState::new();
+                shared.set_volume(1.0);
+                if miss {
+                    shared.miss();
+                } else {
+                    shared.chime();
+                }
+                let mut peak = 0.0_f32;
+                for _ in 0..samples {
+                    peak = peak.max(synth.next_sample(&shared).abs());
+                }
+                let env = if miss {
+                    synth.miss_env()
+                } else {
+                    synth.chime_env()
+                };
+                assert!(env > 0.5, "env (miss: {miss}) at {rate} Hz: {env}");
+                assert!(peak > 0.05, "peak (miss: {miss}) at {rate} Hz: {peak}");
             }
-            assert!(synth.current_gain() >= 0.9 * 0.2, "gain at {rate} Hz");
-
-            // Pitch change while sounding: frequency is near the new pitch.
-            shared.update(ToneTarget {
-                frequency_hz: 660.0,
-                gain: 0.2,
-            });
-            for _ in 0..samples {
-                synth.next_sample(&shared);
-            }
-            assert!(
-                (synth.current_freq() - 660.0).abs() <= 0.1 * 220.0,
-                "freq at {rate} Hz: {}",
-                synth.current_freq()
-            );
-
-            // Chime: the envelope has risen and started its decay.
-            shared.chime();
-            for _ in 0..samples / 4 {
-                synth.next_sample(&shared);
-            }
-            assert!(synth.chime_env() > 0.5, "chime at {rate} Hz");
         }
     }
 
+    /// The miss cue peaks below the chime and below the headroom of the master volume.
+    #[test]
+    fn miss_is_softer_than_the_chime() {
+        const { assert!(MISS_GAIN < CHIME_GAIN) };
+        const { assert!(MISS_START_FREQ_HZ < CHIME_FREQ_HZ) };
+        let peak = |miss: bool| {
+            let mut synth = Synth::new(48_000.0);
+            let shared = SharedState::new();
+            shared.set_volume(1.0);
+            if miss {
+                shared.miss();
+            } else {
+                shared.chime();
+            }
+            (0..4800)
+                .map(|_| synth.next_sample(&shared).abs())
+                .fold(0.0, f32::max)
+        };
+        assert!(peak(true) < peak(false));
+    }
+
     /// Largest per-sample jump allowed at 48 kHz. A 0.3-amplitude 1 kHz chime has a natural
-    /// slope of about 0.039 per sample, and a 0.3-amplitude 600 Hz tone about 0.024.
+    /// slope of about 0.039 per sample; the 0.2-amplitude miss cue about 0.01, so the two
+    /// overlapping stay below 0.05.
     const MAX_STEP: f32 = 0.05;
 
     struct StepMeter {
@@ -785,80 +754,116 @@ mod tests {
         }
     }
 
-    fn tone_600(gain: f32) -> ToneTarget {
-        ToneTarget {
-            frequency_hz: 600.0,
-            gain,
+    fn cue(shared: &SharedState, miss: bool) {
+        if miss {
+            shared.miss();
+        } else {
+            shared.chime();
+        }
+    }
+
+    fn env(synth: &Synth, miss: bool) -> f32 {
+        if miss {
+            synth.miss_env()
+        } else {
+            synth.chime_env()
         }
     }
 
     #[test]
     fn enable_disable_has_no_clicks() {
-        let mut synth = Synth::new(48_000.0);
-        let shared = SharedState::new();
-        shared.set_volume(1.0);
-        shared.update(tone_600(0.3));
-        let mut meter = StepMeter::new();
-        meter.run(&mut synth, &shared, 6000);
-        shared.set_enabled(false);
-        meter.run(&mut synth, &shared, 6000);
-        shared.set_enabled(true);
-        meter.run(&mut synth, &shared, 6000);
-        meter.assert_smooth("enable/disable");
+        for miss in [false, true] {
+            let mut synth = Synth::new(48_000.0);
+            let shared = SharedState::new();
+            shared.set_volume(1.0);
+            let mut meter = StepMeter::new();
+            cue(&shared, miss);
+            meter.run(&mut synth, &shared, 1000);
+            shared.set_enabled(false);
+            meter.run(&mut synth, &shared, 6000);
+            shared.set_enabled(true);
+            cue(&shared, miss);
+            meter.run(&mut synth, &shared, 6000);
+            meter.assert_smooth("enable/disable");
+        }
     }
 
     #[test]
     fn volume_steps_have_no_clicks() {
-        let mut synth = Synth::new(48_000.0);
-        let shared = SharedState::new();
-        shared.set_volume(0.0);
-        shared.update(tone_600(0.3));
-        let mut meter = StepMeter::new();
-        meter.run(&mut synth, &shared, 3000);
-        shared.set_volume(1.0);
-        meter.run(&mut synth, &shared, 6000);
-        shared.set_volume(0.0);
-        meter.run(&mut synth, &shared, 6000);
-        meter.assert_smooth("volume step");
+        for miss in [false, true] {
+            let mut synth = Synth::new(48_000.0);
+            let shared = SharedState::new();
+            shared.set_volume(0.0);
+            let mut meter = StepMeter::new();
+            cue(&shared, miss);
+            meter.run(&mut synth, &shared, 500);
+            shared.set_volume(1.0);
+            meter.run(&mut synth, &shared, 2000);
+            shared.set_volume(0.0);
+            meter.run(&mut synth, &shared, 6000);
+            shared.set_volume(1.0);
+            cue(&shared, miss);
+            meter.run(&mut synth, &shared, 6000);
+            meter.assert_smooth("volume step");
+        }
     }
 
     #[test]
-    fn mute_during_chime_fades_out() {
+    fn mute_during_a_cue_fades_out() {
+        for miss in [false, true] {
+            let mut synth = Synth::new(48_000.0);
+            let shared = SharedState::new();
+            shared.set_volume(1.0);
+            let mut meter = StepMeter::new();
+            meter.run(&mut synth, &shared, 3000);
+            cue(&shared, miss);
+            meter.run(&mut synth, &shared, 300);
+            assert!(env(&synth, miss) > 0.5);
+            shared.set_enabled(false);
+            meter.run(&mut synth, &shared, 1);
+            assert!(env(&synth, miss) > 0.0, "cue must fade, not cut");
+            meter.run(&mut synth, &shared, 8000);
+            meter.assert_smooth("mute during cue");
+            assert_eq!(env(&synth, miss), 0.0);
+        }
+    }
+
+    #[test]
+    fn cue_retrigger_has_no_clicks() {
+        for miss in [false, true] {
+            let mut synth = Synth::new(48_000.0);
+            let shared = SharedState::new();
+            shared.set_volume(1.0);
+            let mut meter = StepMeter::new();
+            meter.run(&mut synth, &shared, 3000);
+            cue(&shared, miss);
+            meter.run(&mut synth, &shared, 1500);
+            let before = env(&synth, miss);
+            assert!(before < 0.9 && before > 0.1, "env {before}");
+            cue(&shared, miss);
+            meter.run(&mut synth, &shared, 300);
+            assert!(
+                env(&synth, miss) > before,
+                "retrigger must raise the envelope"
+            );
+            meter.run(&mut synth, &shared, 6000);
+            meter.assert_smooth("cue retrigger");
+        }
+    }
+
+    #[test]
+    fn miss_overlapping_chime_has_no_clicks() {
         let mut synth = Synth::new(48_000.0);
         let shared = SharedState::new();
         shared.set_volume(1.0);
         let mut meter = StepMeter::new();
-        meter.run(&mut synth, &shared, 3000);
+        meter.run(&mut synth, &shared, 1000);
         shared.chime();
         meter.run(&mut synth, &shared, 200);
-        assert!(synth.chime_env() > 0.5);
-        shared.set_enabled(false);
-        meter.run(&mut synth, &shared, 1);
-        assert!(synth.chime_env() > 0.0, "chime must fade, not cut");
+        shared.miss();
         meter.run(&mut synth, &shared, 8000);
-        meter.assert_smooth("mute during chime");
-        assert_eq!(synth.chime_env(), 0.0);
-    }
-
-    #[test]
-    fn chime_retrigger_has_no_clicks() {
-        let mut synth = Synth::new(48_000.0);
-        let shared = SharedState::new();
-        shared.set_volume(1.0);
-        let mut meter = StepMeter::new();
-        meter.run(&mut synth, &shared, 3000);
-        shared.chime();
-        meter.run(&mut synth, &shared, 1500);
-        let before = synth.chime_env();
-        assert!(before < 0.9 && before > 0.1);
-        shared.chime();
-        meter.run(&mut synth, &shared, 300);
-        assert!(
-            synth.chime_env() > before,
-            "retrigger must raise the envelope"
-        );
-        meter.run(&mut synth, &shared, 6000);
-        meter.assert_smooth("chime retrigger");
+        assert!(synth.chime_env() < 0.5 && synth.miss_env() > 0.0);
+        meter.assert_smooth("miss over chime");
     }
 
     #[test]

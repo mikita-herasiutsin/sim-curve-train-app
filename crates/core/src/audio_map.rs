@@ -1,77 +1,34 @@
 use crate::preset::DrillKind;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ToneTarget {
-    pub frequency_hz: f32,
-    pub gain: f32,
-}
-
-pub const DEFAULT_GAIN: f32 = 0.2;
-pub const BASE_FREQ_HZ: f32 = 440.0;
-
-/// Maps pedal error to an audio tone target (frequency and gain).
-///
-/// * `error_pct` - Signed error in percent (actual - target). Positive means the pedal is pressed too far.
-/// * `in_band` - True if the pedal is currently within the acceptable tolerance band.
-/// * `drill_kind` - The type of drill currently active.
-#[must_use]
-pub fn map_tone(error_pct: f32, in_band: bool, drill_kind: &DrillKind) -> ToneTarget {
-    if !error_pct.is_finite() || in_band {
-        return ToneTarget {
-            frequency_hz: BASE_FREQ_HZ,
-            gain: 0.0,
-        };
-    }
-
-    match drill_kind {
-        DrillKind::Hold { .. } => {
-            // Symmetric log-pitch mapping: one octave per 100 % of error, so the tone spans
-            // 220 Hz (pressed 100 % too little) to 880 Hz (100 % too far), 440 Hz on target.
-            let clamped_err = error_pct.clamp(-100.0, 100.0);
-            let frequency_hz = BASE_FREQ_HZ * (clamped_err / 100.0).exp2();
-
-            ToneTarget {
-                frequency_hz,
-                gain: DEFAULT_GAIN,
-            }
-        }
-        DrillKind::Trace { .. } => {
-            // Trace drills just play a soft constant tone when out of band
-            ToneTarget {
-                frequency_hz: BASE_FREQ_HZ,
-                gain: DEFAULT_GAIN * 0.5,
-            }
-        }
-    }
-}
-
-/// Silence: the tone the synth fades to between reps and after a drill.
-pub const SILENT: ToneTarget = ToneTarget {
-    frequency_hz: BASE_FREQ_HZ,
-    gain: 0.0,
-};
-
 /// Share of the tolerance an in-band pedal may drift past the band before it counts as out
-/// again. The hysteresis keeps the tone from fluttering when the pedal rests on the band edge.
+/// again. The hysteresis keeps the cues from fluttering when the pedal rests on the band edge.
 pub const BAND_HYSTERESIS: f32 = 0.1;
 
-/// How long the pedal must stay in the band before the lock chime plays (100 ms).
+/// How long the pedal must stay in the band before the lock chime plays, and before leaving the
+/// band counts as a miss (100 ms).
 pub const CHIME_DWELL_US: u64 = 100_000;
 
-/// One tone update from [`ToneTracker::step`].
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// At most one miss cue per this long, measured from the previous miss cue (1 s).
+pub const MISS_COOLDOWN_US: u64 = 1_000_000;
+
+/// The sound cues for one sample, from [`ToneTracker::step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ToneStep {
-    pub tone: ToneTarget,
     /// The pedal has just been held in the band long enough: play the lock chime.
     pub chime: bool,
+    /// The pedal has just left the band after settling in it: play the soft miss cue.
+    pub miss: bool,
 }
 
-/// Turns a running drill's pedal samples into tone updates, one call per sample.
+/// Turns a running drill's pedal samples into sound cues, one call per sample. Nothing sounds
+/// while the pedal is out of the band.
 ///
 /// The pedal enters the band at `|error| <= tolerance`, as in scoring, and leaves it only past
 /// `tolerance * (1 + BAND_HYSTERESIS)`. Hold drills play the lock chime once per rep, after the
-/// pedal has stayed in the band for [`CHIME_DWELL_US`]. Trace drills never chime. The state
-/// resets whenever no rep is active.
+/// pedal has stayed in the band for [`CHIME_DWELL_US`]. Both drill kinds play the miss cue on
+/// the sample where a pedal that had settled in the band (for at least [`CHIME_DWELL_US`])
+/// leaves it, at most once per [`MISS_COOLDOWN_US`]. Approaching the target from outside, or
+/// brushing through the band briefly, never plays it. The state resets whenever no rep is active.
 #[derive(Debug, Default)]
 pub struct ToneTracker {
     in_band: bool,
@@ -79,10 +36,12 @@ pub struct ToneTracker {
     entered_us: u64,
     /// The chime already played in this rep.
     chimed: bool,
+    /// When the last miss cue played in this rep.
+    last_miss_us: Option<u64>,
 }
 
 impl ToneTracker {
-    /// The tone for the sample at `t_us`.
+    /// The cues for the sample at `t_us`.
     ///
     /// * `target` - Target pedal fraction (`0.0..=1.0`) while a rep is active, else `None`.
     /// * `value` - Calibrated pedal fraction (`0.0..=1.0`).
@@ -98,30 +57,36 @@ impl ToneTracker {
         let Some(target) = target else {
             *self = Self::default();
             return ToneStep {
-                tone: SILENT,
                 chime: false,
+                miss: false,
             };
         };
         let error = value - target;
-        let limit = if self.in_band {
+        let was_in_band = self.in_band;
+        let limit = if was_in_band {
             tolerance * (1.0 + BAND_HYSTERESIS)
         } else {
             tolerance
         };
         let in_band = error.abs() <= limit;
-        if in_band && !self.in_band {
+        if in_band && !was_in_band {
             self.entered_us = t_us;
         }
         self.in_band = in_band;
-        let chime = in_band
-            && !self.chimed
-            && matches!(drill_kind, DrillKind::Hold { .. })
-            && t_us.saturating_sub(self.entered_us) >= CHIME_DWELL_US;
+        let settled = t_us.saturating_sub(self.entered_us) >= CHIME_DWELL_US;
+        let chime =
+            in_band && !self.chimed && matches!(drill_kind, DrillKind::Hold { .. }) && settled;
         self.chimed |= chime;
-        ToneStep {
-            tone: map_tone(error * 100.0, in_band, drill_kind),
-            chime,
+        let miss = was_in_band
+            && !in_band
+            && settled
+            && self
+                .last_miss_us
+                .is_none_or(|last| t_us.saturating_sub(last) >= MISS_COOLDOWN_US);
+        if miss {
+            self.last_miss_us = Some(t_us);
         }
+        ToneStep { chime, miss }
     }
 }
 
@@ -129,37 +94,64 @@ impl ToneTracker {
 mod tests {
     use super::*;
 
-    /// Feeds `values` one per millisecond from `t0_us` and returns the samples that chimed.
+    /// Feeds `values` one per millisecond from `t0_us` and returns the times of the samples that
+    /// chimed and of those that played the miss cue.
+    fn cues(
+        tracker: &mut ToneTracker,
+        t0_us: u64,
+        values: &[f32],
+        kind: &DrillKind,
+    ) -> (Vec<u64>, Vec<u64>) {
+        let (mut chimes, mut misses) = (Vec::new(), Vec::new());
+        for (i, &value) in (0u64..).zip(values) {
+            let now_us = t0_us + i * 1000;
+            let step = tracker.step(now_us, Some(0.5), value, 0.05, kind);
+            if step.chime {
+                chimes.push(now_us);
+            }
+            if step.miss {
+                misses.push(now_us);
+            }
+        }
+        (chimes, misses)
+    }
+
     fn chimes_at(
         tracker: &mut ToneTracker,
         t0_us: u64,
         values: &[f32],
         kind: &DrillKind,
     ) -> Vec<u64> {
-        let mut chimes = Vec::new();
-        for (i, &value) in (0u64..).zip(values) {
-            let now_us = t0_us + i * 1000;
-            if tracker.step(now_us, Some(0.5), value, 0.05, kind).chime {
-                chimes.push(now_us);
-            }
-        }
-        chimes
+        cues(tracker, t0_us, values, kind).0
+    }
+
+    fn misses_at(
+        tracker: &mut ToneTracker,
+        t0_us: u64,
+        values: &[f32],
+        kind: &DrillKind,
+    ) -> Vec<u64> {
+        cues(tracker, t0_us, values, kind).1
+    }
+
+    /// `n` samples at `value`.
+    fn run(value: f32, n: usize) -> Vec<f32> {
+        vec![value; n]
     }
 
     #[test]
     fn tracker_silent_without_active_rep() {
         let mut tracker = ToneTracker::default();
         let step = tracker.step(0, None, 0.5, 0.05, &dummy_hold());
-        assert_eq!(step.tone, SILENT);
-        assert!(!step.chime);
+        assert!(!step.chime && !step.miss);
     }
 
     #[test]
     fn tracker_chimes_once_after_dwell() {
         let mut tracker = ToneTracker::default();
         // 50 ms out, then 300 ms in the band: one chime, 100 ms after entry.
-        let mut values = vec![0.2; 50];
-        values.extend([0.5; 300]);
+        let mut values = run(0.2, 50);
+        values.extend(run(0.5, 300));
         assert_eq!(
             chimes_at(&mut tracker, 0, &values, &dummy_hold()),
             [50_000 + CHIME_DWELL_US]
@@ -170,9 +162,9 @@ mod tests {
     fn tracker_no_chime_for_brief_touch() {
         let mut tracker = ToneTracker::default();
         // In for 50 ms, out, in for 50 ms: never held long enough.
-        let mut values = vec![0.5; 50];
-        values.extend([0.3; 20]);
-        values.extend([0.5; 50]);
+        let mut values = run(0.5, 50);
+        values.extend(run(0.3, 20));
+        values.extend(run(0.5, 50));
         assert_eq!(
             chimes_at(&mut tracker, 0, &values, &dummy_hold()),
             Vec::<u64>::new()
@@ -180,30 +172,95 @@ mod tests {
     }
 
     #[test]
-    fn tracker_edge_dither_neither_chatters_nor_rechimes() {
+    fn tracker_edge_dither_neither_misses_nor_rechimes() {
         let mut tracker = ToneTracker::default();
         let kind = dummy_hold();
         // Settle in the band and chime.
         assert_eq!(chimes_at(&mut tracker, 0, &[0.5; 150], &kind).len(), 1);
-        // Dither just past the edge, inside the hysteresis: stays in band, silent, no chime.
+        // Dither just past the edge, inside the hysteresis: stays in band, no cue at all.
         for i in 0..200u64 {
             let value = if i % 2 == 0 { 0.549 } else { 0.552 };
             let step = tracker.step(150_000 + i * 1000, Some(0.5), value, 0.05, &kind);
-            assert_eq!(step.tone.gain, 0.0, "sample {i}");
-            assert!(!step.chime);
+            assert!(!step.chime && !step.miss, "sample {i}");
         }
     }
 
     #[test]
-    fn tracker_leaves_band_past_hysteresis() {
+    fn tracker_miss_fires_once_on_leaving_after_settling() {
+        let mut tracker = ToneTracker::default();
+        // 200 ms in the band, then out for 300 ms: one miss, on the first sample past the limit.
+        let mut values = run(0.5, 200);
+        values.extend(run(0.6, 300));
+        assert_eq!(
+            misses_at(&mut tracker, 0, &values, &dummy_hold()),
+            [200_000]
+        );
+    }
+
+    #[test]
+    fn tracker_miss_needs_the_hysteresis_limit() {
         let mut tracker = ToneTracker::default();
         let kind = dummy_hold();
-        assert_eq!(tracker.step(0, Some(0.5), 0.5, 0.05, &kind).tone.gain, 0.0);
-        let out = tracker.step(1000, Some(0.5), 0.56, 0.05, &kind).tone;
-        assert!(out.gain > 0.0);
-        // Coming back needs the plain band again, not the widened one.
-        let edge = tracker.step(2000, Some(0.5), 0.552, 0.05, &kind).tone;
-        assert!(edge.gain > 0.0);
+        let mut values = run(0.5, 200);
+        // 0.552 is past the band but inside the hysteresis limit (0.055).
+        values.extend(run(0.552, 50));
+        assert_eq!(
+            misses_at(&mut tracker, 0, &values, &kind),
+            Vec::<u64>::new()
+        );
+        let step = tracker.step(250_000, Some(0.5), 0.56, 0.05, &kind);
+        assert!(step.miss);
+    }
+
+    #[test]
+    fn tracker_no_miss_when_approaching_from_outside() {
+        let mut tracker = ToneTracker::default();
+        let mut values = run(0.2, 300);
+        values.extend(run(0.5, 50));
+        assert_eq!(
+            misses_at(&mut tracker, 0, &values, &dummy_hold()),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn tracker_no_miss_after_brief_brush() {
+        let mut tracker = ToneTracker::default();
+        // Out, 50 ms through the band, out again: not settled, so silent.
+        let mut values = run(0.2, 50);
+        values.extend(run(0.5, 50));
+        values.extend(run(0.8, 200));
+        assert_eq!(
+            misses_at(&mut tracker, 0, &values, &dummy_hold()),
+            Vec::<u64>::new()
+        );
+    }
+
+    #[test]
+    fn tracker_miss_cooldown() {
+        let mut tracker = ToneTracker::default();
+        let kind = dummy_hold();
+        // Settle (0..200 ms), leave at 200 ms: miss.
+        let mut values = run(0.5, 200);
+        values.extend(run(0.7, 100));
+        // Re-settle (300..500 ms) and leave at 500 ms, 300 ms after the last miss: suppressed.
+        values.extend(run(0.5, 200));
+        values.extend(run(0.7, 100));
+        assert_eq!(misses_at(&mut tracker, 0, &values, &kind), [200_000]);
+        // Re-settle and leave again at 1.2 s, 1 s after the first miss: allowed.
+        let mut later = run(0.5, 600);
+        later.extend(run(0.7, 100));
+        assert_eq!(misses_at(&mut tracker, 600_000, &later, &kind), [1_200_000]);
+    }
+
+    #[test]
+    fn tracker_miss_works_on_trace_drills() {
+        let mut tracker = ToneTracker::default();
+        let mut values = run(0.5, 200);
+        values.extend(run(0.7, 50));
+        let (chimes, misses) = cues(&mut tracker, 0, &values, &dummy_trace());
+        assert_eq!(chimes, Vec::<u64>::new());
+        assert_eq!(misses, [200_000]);
     }
 
     #[test]
@@ -211,7 +268,10 @@ mod tests {
         // Exactly representable: |0.625 - 0.5| == 0.125.
         let mut tracker = ToneTracker::default();
         let step = tracker.step(0, Some(0.5), 0.625, 0.125, &dummy_hold());
-        assert_eq!(step.tone.gain, 0.0);
+        assert!(!step.miss);
+        // Entered the band at 0 (inclusive edge), settled by 100 ms: leaving now misses.
+        let step = tracker.step(CHIME_DWELL_US, Some(0.5), 0.9, 0.125, &dummy_hold());
+        assert!(step.miss);
     }
 
     #[test]
@@ -228,24 +288,30 @@ mod tests {
     }
 
     #[test]
+    fn tracker_state_resets_between_reps() {
+        let mut tracker = ToneTracker::default();
+        let kind = dummy_hold();
+        // Rep 1: settle and miss.
+        let mut values = run(0.5, 200);
+        values.extend(run(0.7, 50));
+        assert_eq!(misses_at(&mut tracker, 0, &values, &kind).len(), 1);
+        // Between reps the cooldown and band state are forgotten.
+        tracker.step(300_000, None, 0.5, 0.05, &kind);
+        // Rep 2: out of band, settle from 450 ms, leave at 650 ms: only 400 ms after rep 1's
+        // miss at 200 ms, yet it plays because the cooldown was reset.
+        let mut values = run(0.7, 50);
+        values.extend(run(0.5, 200));
+        values.extend(run(0.7, 50));
+        assert_eq!(misses_at(&mut tracker, 400_000, &values, &kind), [650_000]);
+    }
+
+    #[test]
     fn tracker_trace_never_chimes() {
         let mut tracker = ToneTracker::default();
         assert_eq!(
             chimes_at(&mut tracker, 0, &[0.5; 500], &dummy_trace()),
             Vec::<u64>::new()
         );
-    }
-
-    #[test]
-    fn tracker_tone_follows_error_out_of_band() {
-        let mut tracker = ToneTracker::default();
-        let kind = dummy_hold();
-        let low = tracker.step(0, Some(0.5), 0.3, 0.05, &kind).tone;
-        let high = tracker.step(1000, Some(0.5), 0.7, 0.05, &kind).tone;
-        assert!(low.frequency_hz < BASE_FREQ_HZ && low.gain > 0.0);
-        assert!(high.frequency_hz > BASE_FREQ_HZ && high.gain > 0.0);
-        // 20 % too far is a fifth of an octave up.
-        assert!((high.frequency_hz - 440.0 * 0.2f32.exp2()).abs() < 0.01);
     }
 
     fn dummy_hold() -> DrillKind {
@@ -259,77 +325,5 @@ mod tests {
         DrillKind::Trace {
             points: vec![(0, 0.0), (1000, 100.0)],
         }
-    }
-
-    #[test]
-    fn silent_in_band() {
-        let t = map_tone(5.0, true, &dummy_hold());
-        assert_eq!(t.frequency_hz, BASE_FREQ_HZ);
-        assert_eq!(t.gain, 0.0);
-        let t = map_tone(-5.0, true, &dummy_trace());
-        assert_eq!(t.frequency_hz, BASE_FREQ_HZ);
-        assert_eq!(t.gain, 0.0);
-    }
-
-    #[test]
-    fn non_finite_error_returns_silence() {
-        let t_nan = map_tone(f32::NAN, false, &dummy_hold());
-        assert_eq!(t_nan.frequency_hz, BASE_FREQ_HZ);
-        assert_eq!(t_nan.gain, 0.0);
-
-        let t_inf = map_tone(f32::INFINITY, false, &dummy_hold());
-        assert_eq!(t_inf.frequency_hz, BASE_FREQ_HZ);
-        assert_eq!(t_inf.gain, 0.0);
-
-        let t_neg_inf = map_tone(f32::NEG_INFINITY, false, &dummy_trace());
-        assert_eq!(t_neg_inf.frequency_hz, BASE_FREQ_HZ);
-        assert_eq!(t_neg_inf.gain, 0.0);
-    }
-
-    #[test]
-    fn trace_out_of_band_constant_soft_tone() {
-        let t1 = map_tone(10.0, false, &dummy_trace());
-        let t2 = map_tone(-10.0, false, &dummy_trace());
-        assert_eq!(t1.frequency_hz, BASE_FREQ_HZ);
-        assert_eq!(t2.frequency_hz, BASE_FREQ_HZ);
-        assert!(t1.gain > 0.0 && t1.gain < DEFAULT_GAIN); // Softer than default
-    }
-
-    #[test]
-    fn hold_monotonic_pitch_vs_error() {
-        let t_low = map_tone(-20.0, false, &dummy_hold());
-        let t_high = map_tone(20.0, false, &dummy_hold());
-
-        assert!(t_low.frequency_hz < BASE_FREQ_HZ);
-        assert!(t_high.frequency_hz > BASE_FREQ_HZ);
-        assert_eq!(t_low.gain, DEFAULT_GAIN);
-        assert_eq!(t_high.gain, DEFAULT_GAIN);
-
-        let t_very_high = map_tone(50.0, false, &dummy_hold());
-        assert!(t_very_high.frequency_hz > t_high.frequency_hz);
-    }
-
-    #[test]
-    fn log_pitch_is_symmetric_octaves() {
-        let on = map_tone(0.0001, false, &dummy_hold()).frequency_hz;
-        assert!((on - 440.0).abs() < 0.5);
-        let hi = map_tone(100.0, false, &dummy_hold()).frequency_hz;
-        let lo = map_tone(-100.0, false, &dummy_hold()).frequency_hz;
-        assert!((hi - 880.0).abs() < 0.01);
-        assert!((lo - 220.0).abs() < 0.01);
-        let hi50 = map_tone(50.0, false, &dummy_hold()).frequency_hz;
-        let lo50 = map_tone(-50.0, false, &dummy_hold()).frequency_hz;
-        assert!((hi50 / 440.0 - 440.0 / lo50).abs() < 1e-4);
-    }
-
-    #[test]
-    fn clamped_ranges() {
-        let t1 = map_tone(150.0, false, &dummy_hold());
-        let t2 = map_tone(100.0, false, &dummy_hold());
-        assert_eq!(t1.frequency_hz, t2.frequency_hz);
-
-        let t3 = map_tone(-150.0, false, &dummy_hold());
-        let t4 = map_tone(-100.0, false, &dummy_hold());
-        assert_eq!(t3.frequency_hz, t4.frequency_hz);
     }
 }

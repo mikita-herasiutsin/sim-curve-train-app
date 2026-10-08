@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioFeedback;
-use sct_core::audio_map::{SILENT, ToneTracker};
+use sct_core::audio_map::ToneTracker;
 use sct_core::axis_detect::{AxisDetector, Detection};
 use sct_core::calibration::RangeCapture;
 use sct_core::device::{DeviceInfo, DevicesSnapshot, usb_ids_from_guid};
@@ -97,9 +97,6 @@ struct ActiveDrill {
 
 impl Drop for ActiveDrill {
     fn drop(&mut self) {
-        if let Some(audio) = &self.audio {
-            audio.update(SILENT);
-        }
         if !self.finished {
             let summary = self.run.abort();
             let _ = self.channel.send(DrillEvent::SetFinished { summary });
@@ -414,7 +411,7 @@ impl Stream {
             let _ = drill.channel.send(event);
         }
         if let Some(audio) = &drill.audio {
-            // Tone only while a rep is active: silent in the countdown and the rest pause.
+            // Cues only while a rep is active: silent in the countdown and the rest pause.
             let target = matches!(drill.run.phase(), Phase::Active { .. })
                 .then(|| drill.run.target_at(sample.t_us))
                 .flatten();
@@ -426,9 +423,11 @@ impl Stream {
                 spec.tolerance_fraction(),
                 &spec.kind,
             );
-            audio.update(step.tone);
             if step.chime {
                 audio.chime();
+            }
+            if step.miss {
+                audio.miss();
             }
         }
         if matches!(drill.run.phase(), Phase::Finished) {
@@ -981,59 +980,75 @@ mod tests {
         audio
     }
 
-    /// Steps the drill into its active rep with the pedal off target, so the tone sounds.
-    fn sound_tone(stream: &mut Stream, audio: &AudioFeedback) {
-        stream.step_drill(&sample_at(1_001_000, 0.2));
-        assert!(audio.tone().gain > 0.0);
-    }
-
-    #[test]
-    fn drill_drives_tone_and_chime() {
-        let mut stream = stream();
-        let audio = start_with_audio(&mut stream);
-
-        // Countdown: silent, even far off target.
-        stream.step_drill(&sample_at(500_000, 0.2));
-        assert_eq!(audio.tone(), SILENT);
-
-        // Active rep, pedal too light: a tone below the base pitch, no chime.
-        sound_tone(&mut stream, &audio);
-        assert!(audio.tone().frequency_hz < sct_core::audio_map::BASE_FREQ_HZ);
-        assert!(!audio.take_chime());
-
-        // Held in the band: silent, and one chime after the dwell.
-        let mut chimes = Vec::new();
-        for ms in 1_010..1_300 {
-            stream.step_drill(&sample_at(ms * 1000, 0.70));
+    /// Feeds one sample per millisecond over `[from_ms, to_ms)` at `fraction` and returns the
+    /// milliseconds that requested a chime and those that requested a miss cue.
+    fn feed(
+        stream: &mut Stream,
+        audio: &AudioFeedback,
+        from_ms: u64,
+        to_ms: u64,
+        fraction: f32,
+    ) -> (Vec<u64>, Vec<u64>) {
+        let (mut chimes, mut misses) = (Vec::new(), Vec::new());
+        for ms in from_ms..to_ms {
+            stream.step_drill(&sample_at(ms * 1000, fraction));
             if audio.take_chime() {
                 chimes.push(ms);
             }
+            if audio.take_miss() {
+                misses.push(ms);
+            }
         }
-        assert_eq!(audio.tone().gain, 0.0);
-        assert_eq!(chimes, [1_110]);
+        (chimes, misses)
     }
 
     #[test]
-    fn every_drill_end_silences_the_tone() {
-        // Abort.
+    fn drill_drives_chime_and_miss_cue() {
         let mut stream = stream();
         let audio = start_with_audio(&mut stream);
-        sound_tone(&mut stream, &audio);
-        stream.finish_drill();
-        assert_eq!(audio.tone(), SILENT);
 
-        // Replaced by a new drill.
-        let mut stream = self::stream();
+        // Active rep, approaching from too light: no cue.
+        let (chimes, misses) = feed(&mut stream, &audio, 1_001, 1_010, 0.2);
+        assert!(chimes.is_empty() && misses.is_empty());
+
+        // Held in the band: one chime after the dwell, no miss.
+        let (chimes, misses) = feed(&mut stream, &audio, 1_010, 1_300, 0.70);
+        assert_eq!(chimes, [1_110]);
+        assert_eq!(misses, Vec::<u64>::new());
+
+        // Leaving the band after settling: one miss cue, on the first sample out.
+        let (chimes, misses) = feed(&mut stream, &audio, 1_300, 1_400, 0.2);
+        assert_eq!(chimes, Vec::<u64>::new());
+        assert_eq!(misses, [1_300]);
+    }
+
+    #[test]
+    fn no_miss_cue_while_approaching() {
+        let mut stream = stream();
         let audio = start_with_audio(&mut stream);
-        sound_tone(&mut stream, &audio);
-        let _ = start(&mut stream, Pedal::Brake);
-        assert_eq!(audio.tone(), SILENT);
+        // Far off target for a long while, then brushing through the band for 50 ms.
+        let (chimes, misses) = feed(&mut stream, &audio, 1_001, 1_500, 0.2);
+        assert!(chimes.is_empty() && misses.is_empty());
+        let (chimes, misses) = feed(&mut stream, &audio, 1_500, 1_550, 0.70);
+        assert!(chimes.is_empty() && misses.is_empty());
+        let (chimes, misses) = feed(&mut stream, &audio, 1_550, 1_700, 0.2);
+        assert!(chimes.is_empty() && misses.is_empty());
+    }
 
-        // Stream ended (stop, unplug, dropped channel).
-        let mut slot = Some(self::stream());
-        let audio = start_with_audio(slot.as_mut().unwrap());
-        sound_tone(slot.as_mut().unwrap(), &audio);
-        end_stream(&mut slot);
-        assert_eq!(audio.tone(), SILENT);
+    #[test]
+    fn no_cues_outside_the_active_phase() {
+        let mut stream = stream();
+        let audio = start_with_audio(&mut stream);
+        // Countdown: in the band and out of it, still silent.
+        let (chimes, misses) = feed(&mut stream, &audio, 100, 400, 0.70);
+        assert!(chimes.is_empty() && misses.is_empty());
+        let (chimes, misses) = feed(&mut stream, &audio, 400, 900, 0.2);
+        assert!(chimes.is_empty() && misses.is_empty());
+
+        // After the drill ends (abort), nothing is driven any more.
+        let _ = feed(&mut stream, &audio, 1_001, 1_300, 0.70);
+        stream.finish_drill();
+        let (chimes, misses) = feed(&mut stream, &audio, 1_300, 1_500, 0.2);
+        assert!(chimes.is_empty() && misses.is_empty());
     }
 }

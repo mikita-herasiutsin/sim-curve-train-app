@@ -83,8 +83,8 @@
       class="audio-btn"
       data-testid="audio-test-tone"
       onclick={testTone}
-      aria-label="Play test tone"
-      title="Play test tone"
+      aria-label="Play test sounds"
+      title="Play test sounds"
     >
       ♪
     </button>

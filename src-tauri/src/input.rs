@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::audio::AudioFeedback;
+use sct_core::audio_map::{SILENT, ToneTracker};
 use sct_core::axis_detect::{AxisDetector, Detection};
 use sct_core::calibration::RangeCapture;
 use sct_core::device::{DeviceInfo, DevicesSnapshot, usb_ids_from_guid};
@@ -88,10 +90,16 @@ struct ActiveDrill {
     profile: DeviceProfile,
     /// The UI already got the terminal `SetFinished`.
     finished: bool,
+    /// Audio feedback output; `None` when the app runs without it (and in tests).
+    audio: Option<AudioFeedback>,
+    tone: ToneTracker,
 }
 
 impl Drop for ActiveDrill {
     fn drop(&mut self) {
+        if let Some(audio) = &self.audio {
+            audio.update(SILENT);
+        }
         if !self.finished {
             let summary = self.run.abort();
             let _ = self.channel.send(DrillEvent::SetFinished { summary });
@@ -117,11 +125,17 @@ pub struct InputService {
     /// Saved device profiles; `None` if the database couldn't be opened.
     store: Arc<Mutex<Option<ProfileStore>>>,
     active: Arc<Mutex<ActiveStream>>,
+    /// Audio feedback handed to each drill.
+    audio: Option<AudioFeedback>,
 }
 
 impl InputService {
     /// Spawns the input thread. Failures are reported through the snapshot's `error`.
-    pub fn spawn(app: AppHandle, store: Option<ProfileStore>) -> Self {
+    pub fn spawn(
+        app: AppHandle,
+        store: Option<ProfileStore>,
+        audio: Option<AudioFeedback>,
+    ) -> Self {
         let (commands, receiver) = mpsc::channel();
         let service = Self {
             snapshot: Arc::default(),
@@ -129,6 +143,7 @@ impl InputService {
             commands,
             store: Arc::new(Mutex::new(store)),
             active: Arc::default(),
+            audio,
         };
         let shared = service.clone();
         let spawned = thread::Builder::new()
@@ -398,6 +413,20 @@ impl Stream {
         for event in drill.run.push(ValueSample::new(sample.t_us, value)) {
             let _ = drill.channel.send(event);
         }
+        if let Some(audio) = &drill.audio {
+            // Tone only while a rep is active: silent in the countdown and the rest pause.
+            let target = matches!(drill.run.phase(), Phase::Active { .. })
+                .then(|| drill.run.target_at(sample.t_us))
+                .flatten();
+            let spec = drill.run.drill();
+            let step = drill
+                .tone
+                .step(target, value, spec.tolerance_fraction(), &spec.kind);
+            audio.update(step.tone);
+            if step.chime {
+                audio.chime();
+            }
+        }
         if matches!(drill.run.phase(), Phase::Finished) {
             // The engine sent `SetFinished` itself.
             drill.finished = true;
@@ -449,6 +478,7 @@ fn start_drill(
     t_us: u64,
     drill: Drill,
     channel: Channel<DrillEvent>,
+    audio: Option<AudioFeedback>,
     reply: &Sender<Result<(), String>>,
 ) {
     let (stream, profile) = match check_start(stream, profile, drill.pedal) {
@@ -471,6 +501,8 @@ fn start_drill(
         channel,
         profile,
         finished: false,
+        audio,
+        tone: ToneTracker::default(),
     });
 }
 
@@ -524,6 +556,7 @@ fn drain_commands(
                     t_us,
                     drill,
                     channel,
+                    service.audio.clone(),
                     &reply,
                 );
             }
@@ -846,6 +879,7 @@ mod tests {
             0,
             drill(pedal),
             channel,
+            None,
             &reply,
         );
         (log, answer.recv().unwrap())
@@ -902,7 +936,7 @@ mod tests {
     fn missing_stream_or_profile_is_an_error() {
         let (channel, log) = event_channel();
         let (reply, answer) = mpsc::channel();
-        start_drill(None, None, 0, drill(Pedal::Brake), channel, &reply);
+        start_drill(None, None, 0, drill(Pedal::Brake), channel, None, &reply);
         assert!(answer.recv().unwrap().is_err());
 
         let mut stream = stream();
@@ -913,6 +947,7 @@ mod tests {
             0,
             drill(Pedal::Brake),
             channel,
+            None,
             &reply,
         );
         assert!(answer.recv().unwrap().is_err());
@@ -932,6 +967,7 @@ mod tests {
             0,
             drill(Pedal::Brake),
             channel,
+            None,
             &reply,
         );
         assert!(stream.active_drill.is_none());

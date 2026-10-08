@@ -296,6 +296,8 @@ fn needs_rebuild(kind: cpal::ErrorKind) -> bool {
 
 /// Audio output. The cpal stream lives on a supervisor thread that rebuilds it when the device
 /// goes away or the default device changes; the synth state in [`SharedState`] survives rebuilds.
+/// Clones are cheap and drive the same output.
+#[derive(Clone)]
 pub struct AudioFeedback {
     state: Arc<SharedState>,
     test_tone_generation: Arc<AtomicU64>,
@@ -333,24 +335,10 @@ impl AudioFeedback {
         self.state.set_volume(volume);
     }
 
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(
-            dead_code,
-            reason = "drill wiring comes with SCT-031; test tone is debug-only"
-        )
-    )]
     pub fn update(&self, target: ToneTarget) {
         self.state.update(target);
     }
 
-    #[cfg_attr(
-        not(debug_assertions),
-        expect(
-            dead_code,
-            reason = "drill wiring comes with SCT-031; test tone is debug-only"
-        )
-    )]
     pub fn chime(&self) {
         self.state.chime();
     }
@@ -687,6 +675,53 @@ mod tests {
         });
         synth.next_sample(&shared);
         assert_eq!(synth.current_freq(), 300.0);
+    }
+
+    /// The tone follows a new target within ~20 ms (SCT-038), at 48 kHz and 96 kHz.
+    #[test]
+    fn responds_within_20ms() {
+        for rate in [48_000.0_f32, 96_000.0] {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "20 ms of samples is a small positive count"
+            )]
+            let samples = (rate * 0.020) as usize;
+            let mut synth = Synth::new(rate);
+            let shared = SharedState::new();
+            shared.set_volume(1.0);
+
+            // Silence to tone: gain is near its target.
+            shared.update(ToneTarget {
+                frequency_hz: 440.0,
+                gain: 0.2,
+            });
+            for _ in 0..samples {
+                synth.next_sample(&shared);
+            }
+            assert!(synth.current_gain() >= 0.9 * 0.2, "gain at {rate} Hz");
+
+            // Pitch change while sounding: frequency is near the new pitch.
+            shared.update(ToneTarget {
+                frequency_hz: 660.0,
+                gain: 0.2,
+            });
+            for _ in 0..samples {
+                synth.next_sample(&shared);
+            }
+            assert!(
+                (synth.current_freq() - 660.0).abs() <= 0.1 * 220.0,
+                "freq at {rate} Hz: {}",
+                synth.current_freq()
+            );
+
+            // Chime: the envelope has risen and started its decay.
+            shared.chime();
+            for _ in 0..samples / 4 {
+                synth.next_sample(&shared);
+            }
+            assert!(synth.chime_env() > 0.5, "chime at {rate} Hz");
+        }
     }
 
     /// Largest per-sample jump allowed at 48 kHz. A 0.3-amplitude 1 kHz chime has a natural

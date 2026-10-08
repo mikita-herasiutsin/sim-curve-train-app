@@ -45,9 +45,119 @@ pub fn map_tone(error_pct: f32, in_band: bool, drill_kind: &DrillKind) -> ToneTa
     }
 }
 
+/// Silence: the tone the synth fades to between reps and after a drill.
+pub const SILENT: ToneTarget = ToneTarget {
+    frequency_hz: BASE_FREQ_HZ,
+    gain: 0.0,
+};
+
+/// One tone update from [`ToneTracker::step`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToneStep {
+    pub tone: ToneTarget,
+    /// The pedal just entered the band: play the chime.
+    pub chime: bool,
+}
+
+/// Turns a running drill's pedal samples into tone updates, one call per sample.
+///
+/// Tracks whether the pedal was in the band, so the chime plays only on the edge into it.
+/// The state resets whenever no rep is active, so each rep's first entry chimes.
+#[derive(Debug, Default)]
+pub struct ToneTracker {
+    in_band: bool,
+}
+
+impl ToneTracker {
+    /// The tone for one sample.
+    ///
+    /// * `target` - Target pedal fraction (`0.0..=1.0`) while a rep is active, else `None`.
+    /// * `value` - Calibrated pedal fraction (`0.0..=1.0`).
+    /// * `tolerance` - Band half-width as a fraction, as in scoring (`|value - target| <= tolerance`).
+    pub fn step(
+        &mut self,
+        target: Option<f32>,
+        value: f32,
+        tolerance: f32,
+        drill_kind: &DrillKind,
+    ) -> ToneStep {
+        let Some(target) = target else {
+            self.in_band = false;
+            return ToneStep {
+                tone: SILENT,
+                chime: false,
+            };
+        };
+        let error = value - target;
+        let in_band = error.abs() <= tolerance;
+        let chime = in_band && !self.in_band;
+        self.in_band = in_band;
+        ToneStep {
+            tone: map_tone(error * 100.0, in_band, drill_kind),
+            chime,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracker_silent_without_active_rep() {
+        let mut tracker = ToneTracker::default();
+        let step = tracker.step(None, 0.5, 0.05, &dummy_hold());
+        assert_eq!(step.tone, SILENT);
+        assert!(!step.chime);
+    }
+
+    #[test]
+    fn tracker_chimes_only_on_band_entry() {
+        let mut tracker = ToneTracker::default();
+        let kind = dummy_hold();
+        let target = Some(0.5);
+        // Approach from below, enter, stay, leave, re-enter.
+        let values = [0.2, 0.4, 0.46, 0.5, 0.54, 0.6, 0.53, 0.5];
+        let chimes: Vec<bool> = values
+            .iter()
+            .map(|&v| tracker.step(target, v, 0.05, &kind).chime)
+            .collect();
+        assert_eq!(
+            chimes,
+            [false, false, true, false, false, false, true, false]
+        );
+    }
+
+    #[test]
+    fn tracker_band_edge_is_inclusive_like_scoring() {
+        let mut tracker = ToneTracker::default();
+        let step = tracker.step(Some(0.5), 0.55, 0.05 + f32::EPSILON, &dummy_hold());
+        assert!(step.chime);
+        assert_eq!(step.tone.gain, 0.0);
+    }
+
+    #[test]
+    fn tracker_rechimes_after_rep_gap() {
+        let mut tracker = ToneTracker::default();
+        let kind = dummy_hold();
+        assert!(tracker.step(Some(0.5), 0.5, 0.05, &kind).chime);
+        assert!(!tracker.step(Some(0.5), 0.5, 0.05, &kind).chime);
+        // Rest between reps: no target.
+        tracker.step(None, 0.5, 0.05, &kind);
+        assert!(tracker.step(Some(0.5), 0.5, 0.05, &kind).chime);
+    }
+
+    #[test]
+    fn tracker_tone_follows_error_out_of_band() {
+        let mut tracker = ToneTracker::default();
+        let kind = dummy_hold();
+        let low = tracker.step(Some(0.5), 0.3, 0.05, &kind).tone;
+        let high = tracker.step(Some(0.5), 0.7, 0.05, &kind).tone;
+        assert!(low.frequency_hz < BASE_FREQ_HZ && low.gain > 0.0);
+        assert!(high.frequency_hz > BASE_FREQ_HZ && high.gain > 0.0);
+        // 20 % too far is a fifth of an octave up.
+        assert!((high.frequency_hz - 440.0 * 0.2f32.exp2()).abs() < 0.01);
+    }
 
     fn dummy_hold() -> DrillKind {
         DrillKind::Hold {

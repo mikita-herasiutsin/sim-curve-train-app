@@ -347,11 +347,16 @@ pub fn run() {
         .setup(|app| {
             window::fit_main_window(app);
             let store = open_profile_store(app);
-            app.manage(InputService::spawn(app.handle().clone(), store));
+            let audio = AudioFeedback::new();
+            app.manage(InputService::spawn(
+                app.handle().clone(),
+                store,
+                Some(audio.clone()),
+            ));
 
             let attempt_store = open_attempt_store(app);
             app.manage(AttemptsService::new(attempt_store));
-            app.manage(AudioFeedback::new());
+            app.manage(audio);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

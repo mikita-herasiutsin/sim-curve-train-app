@@ -140,7 +140,7 @@ Audio comes from the Rust side (`cpal`/`rodio`):
 
 Settings: on/off and volume. Defaults follow [D-20](../decisions/README.md): on, silent inside the band, quiet volume.
 - **AC:** the tone responds within about 20 ms with no audible glitches; mute is persisted.
-- **Status:** synth, settings and device recovery done; drill wiring after SCT-031 (#29).
+- **Status:** done in code: the drill drives the tone per sample and chimes on band entry; tests cover the ~20 ms response and chime-on-entry. Check by ear before marking ✅.
 - **Deps:** SCT-031
 
 ---

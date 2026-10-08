@@ -54,6 +54,7 @@ OPTIONS:
                            Human-readable preset name.
     --tolerance <PCT>      Permissible error tolerance in percent (e.g. 10.0). If omitted, defaults to app default (10%).
     --max-drills <N>       Maximum number of drills to output (default: 12).
+    --allow-mixed          Accept laps from different cars or tracks in one run.
     -h, --help             Print help information.
 "
     );
@@ -72,6 +73,7 @@ ARGUMENTS:
 OPTIONS:
     --car-filter <CAR>     Case-insensitive filter matching car name parsed from filename.
     --json                 Output aggregated statistics as JSON instead of a formatted table.
+    --allow-mixed          Accept laps from different cars or tracks in one run.
     -h, --help             Print help information.
 "
     );

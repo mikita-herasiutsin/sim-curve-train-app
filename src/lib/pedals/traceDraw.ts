@@ -9,6 +9,7 @@ export const TRACE_RAMP_WINDOW_MS = 150;
 export class TraceCurve {
   readonly points: [number, number][];
   readonly durationMs: number;
+  readonly sampleTimes: number[];
   private readonly m: number[];
   private readonly minArr: Float64Array;
   private readonly maxArr: Float64Array;
@@ -22,6 +23,7 @@ export class TraceCurve {
       this.m = [];
       this.minArr = new Float64Array(0);
       this.maxArr = new Float64Array(0);
+      this.sampleTimes = [];
       return;
     }
 
@@ -68,16 +70,55 @@ export class TraceCurve {
     }
     this.minArr = new Float64Array(len);
     this.maxArr = new Float64Array(len);
+
+    const minDeque = new Int32Array(len);
+    let minHead = 0;
+    let minTail = 0;
+
+    const maxDeque = new Int32Array(len);
+    let maxHead = 0;
+    let maxTail = 0;
+
+    let right = -1;
     for (let i = 0; i < len; i++) {
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (let j = Math.max(0, i - window); j <= Math.min(len - 1, i + window); j++) {
-        lo = Math.min(lo, grid[j]);
-        hi = Math.max(hi, grid[j]);
+      const targetR = Math.min(len - 1, i + window);
+      while (right < targetR) {
+        right++;
+        const val = grid[right];
+        while (minTail > minHead && grid[minDeque[minTail - 1]] >= val) {
+          minTail--;
+        }
+        minDeque[minTail++] = right;
+
+        while (maxTail > maxHead && grid[maxDeque[maxTail - 1]] <= val) {
+          maxTail--;
+        }
+        maxDeque[maxTail++] = right;
       }
-      this.minArr[i] = lo;
-      this.maxArr[i] = hi;
+
+      const targetL = Math.max(0, i - window);
+      while (minHead < minTail && minDeque[minHead] < targetL) {
+        minHead++;
+      }
+      while (maxHead < maxTail && maxDeque[maxHead] < targetL) {
+        maxHead++;
+      }
+
+      this.minArr[i] = grid[minDeque[minHead]];
+      this.maxArr[i] = grid[maxDeque[maxHead]];
     }
+
+    const timeSet = new Set<number>();
+    for (const p of this.points) {
+      timeSet.add(p[0]);
+    }
+    for (let t = -GO_LEAD_MS; t <= this.durationMs; t += 10) {
+      timeSet.add(t);
+    }
+    timeSet.add(-GO_LEAD_MS);
+    timeSet.add(0);
+    timeSet.add(this.durationMs);
+    this.sampleTimes = Array.from(timeSet).sort((a, b) => a - b);
   }
 
   /** Target fraction 0..1 at tMs (monotone cubic, see below). */
@@ -178,11 +219,51 @@ export interface TraceViewState {
   inBand: boolean;
 }
 
-/** Draws background, horizontal grid (reuse computeHorizontalGridLines and the label style of drawGraph),
- *  vertical grid lines every 500 ms labelled in seconds ("0.5 s"), the tolerance band as a filled polygon
- *  (curve + tol on top, curve - tol on the bottom, both clamped to 0..1, colour bandColor(inBand, theme)),
- *  the target curve as a 2 px dashed line in theme.text, the user's trace as a 2.5 px solid line in the
- *  pedal colour (theme.brake / theme.throttle), and the playhead as a 2 px vertical line in theme.accent. */
+export interface TracePhaseInput {
+  nowUs: number;
+  countingDown: boolean;
+  countdownEndsUs: number;
+  active: boolean;
+  repStartUs: number;
+  lastShownStartUs: number;
+  durationMs: number;
+}
+
+export interface TracePhase {
+  shownStartUs: number;
+  playheadMs: number | null;
+}
+
+export function traceViewPhase(i: TracePhaseInput): TracePhase {
+  if (i.countingDown) {
+    if (i.countdownEndsUs > 0 && i.countdownEndsUs - i.nowUs <= GO_LEAD_MS * 1000) {
+      return {
+        shownStartUs: i.countdownEndsUs,
+        playheadMs: (i.nowUs - i.countdownEndsUs) / 1000,
+      };
+    }
+    return { shownStartUs: 0, playheadMs: null };
+  }
+
+  if (i.active) {
+    const repMs = (i.nowUs - i.repStartUs) / 1000;
+    return {
+      shownStartUs: i.repStartUs,
+      playheadMs: Math.max(-GO_LEAD_MS, Math.min(i.durationMs, repMs)),
+    };
+  }
+
+  return {
+    shownStartUs: i.lastShownStartUs > 0 ? i.lastShownStartUs : i.repStartUs,
+    playheadMs: null,
+  };
+}
+
+/**
+ * Draws the trace drill view: time axis from -GO_LEAD_MS to the duration with grid lines,
+ * the t=0 line marking rep start, the envelope tolerance band, the target curve,
+ * the user line, and the playhead.
+ */
 export function drawTrace(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -261,17 +342,7 @@ export function drawTrace(
   // Band polygon: upper min(1, hi + tolerance), lower max(0, lo - tolerance) from envelopeAt,
   // sampled every 10 ms across the domain plus at each point time.
   if (state.curve.points.length >= 2 && durationMs > 0) {
-    const timeSet = new Set<number>();
-    for (const p of state.curve.points) {
-      timeSet.add(p[0]);
-    }
-    for (let t = -GO_LEAD_MS; t <= durationMs; t += 10) {
-      timeSet.add(t);
-    }
-    timeSet.add(-GO_LEAD_MS);
-    timeSet.add(0);
-    timeSet.add(durationMs);
-    const sampleTimes = Array.from(timeSet).sort((a, b) => a - b);
+    const sampleTimes = state.curve.sampleTimes;
 
     ctx.fillStyle = bandColor(state.inBand, theme);
     ctx.beginPath();

@@ -12,15 +12,16 @@
 //! The target is the rounded curve of [`TraceCurve::value_at`] (monotone cubic through the
 //! preset points), the same curve the screen draws.
 //!
-//! - **Accuracy (50% weight):** Measures pedal position fidelity after compensating for
-//!   reaction lag. The user signal is aligned by `round(lag_ms)` so pure timing offsets
-//!   do not penalize position tracking. At each grid point the target band is the range of
-//!   target values within ±[`RAMP_WINDOW_MS`] (150 ms), widened by the tolerance: a timing
-//!   window that widens the band on ramps and leaves flat parts at ±tolerance. Accuracy
+//! - **Accuracy (50% weight):** Measures pedal position against the band the screen and the
+//!   audio cue show, at the same instant and with no lag shift, so the result matches what
+//!   the driver saw and heard. At each grid point the target band is the range of target
+//!   values within ±[`RAMP_WINDOW_MS`] (150 ms), widened by the tolerance: a timing window
+//!   that widens the band on ramps and leaves flat parts at ±tolerance. A reaction up to
+//!   150 ms late or early therefore stays in the band; a later one leaves it. Accuracy
 //!   combines the fraction of resampled duration spent within that band
 //!   ([`ACCURACY_BAND_WEIGHT`], 50%) and an exponential decay on the root-mean-square
 //!   distance from the windowed target range ([`ACCURACY_RMSE_WEIGHT`], 50%, scaled by
-//!   [`ACCURACY_RMSE_SCALE`]).
+//!   [`ACCURACY_RMSE_SCALE`]). The estimated lag feeds only the timing score.
 //! - **Timing (25% weight):** Evaluates reaction latency via zero-mean normalized (Pearson)
 //!   cross-correlation over [`LAG_SEARCH_WINDOW_MS`] (±300 ms) with parabolic sub-sample
 //!   peak interpolation. An asymmetric timing curve provides a dead zone
@@ -139,7 +140,7 @@ pub struct TraceScore {
     pub total: f32,
     /// Letter grade awarded based on total score.
     pub grade: Grade,
-    /// Lag-compensated accuracy sub-score in `0.0..=100.0`.
+    /// Accuracy sub-score in `0.0..=100.0`, measured against the band without a lag shift.
     pub accuracy: f32,
     /// Latency / timing sub-score in `0.0..=100.0`.
     pub timing: f32,
@@ -149,7 +150,7 @@ pub struct TraceScore {
     pub lag_ms: f32,
     /// Fraction of drill duration spent inside the tolerance band (`0.0..=1.0`).
     pub time_in_band: f32,
-    /// Lag-compensated root-mean-square error from target.
+    /// Root-mean-square distance from the windowed target range, without a lag shift.
     pub rmse: f32,
     /// Maximum overshoot beyond target maximum.
     pub overshoot: f32,
@@ -203,8 +204,8 @@ pub fn score_trace(
     // 3. Timing score
     let timing = score_timing(lag_ms);
 
-    // 4. Lag-compensated accuracy
-    let (accuracy, time_in_band, rmse) = score_accuracy(&y, &u, lag_ms, params.tolerance);
+    // 4. Accuracy against the band as shown live (no lag shift)
+    let (accuracy, time_in_band, rmse) = score_accuracy(&y, &u, params.tolerance);
 
     // 5. Smoothness (relative jerk and overshoot)
     let (smoothness, overshoot, ldlj_user, ldlj_target) = score_smoothness(&y, &u, d_ms);
@@ -447,27 +448,19 @@ fn target_envelope(y: &[f32]) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// Evaluates lag-compensated accuracy against the timing-window envelope of the target.
-fn score_accuracy(y: &[f32], u: &[f32], lag_ms: f32, tolerance: f32) -> (f32, f32, f32) {
-    #[expect(clippy::cast_possible_truncation, reason = "rounded lag fits in i32")]
-    let k_shift = lag_ms.round() as i32;
-
+/// Evaluates accuracy against the timing-window envelope of the target, comparing `u` and
+/// `y` at the same instant: the band the screen and the audio cue show.
+fn score_accuracy(y: &[f32], u: &[f32], tolerance: f32) -> (f32, f32, f32) {
     let d = y.len() - 1;
     let mut in_band_count = 0_usize;
     let mut sum_sq_err = 0.0_f64;
 
-    let max_u_idx = i32::try_from(u.len().saturating_sub(1)).expect("u.len() fits in i32");
-    let d_i32 = i32::try_from(d).expect("d fits in i32");
+    // u[LAG_SEARCH_WINDOW_MS] is t = 0.
+    let u_zero_idx =
+        usize::try_from(LAG_SEARCH_WINDOW_MS).expect("LAG_SEARCH_WINDOW_MS is positive");
     let envelope = target_envelope(y);
 
-    for n in 0..=d_i32 {
-        let u_target_n = n + k_shift;
-        let u_array_idx = (u_target_n + LAG_SEARCH_WINDOW_MS).clamp(0, max_u_idx);
-        #[expect(clippy::cast_sign_loss, reason = "clamped index is non-negative")]
-        let u_val = u[u_array_idx as usize];
-        #[expect(clippy::cast_sign_loss, reason = "n is in 0..=d")]
-        let (lo, hi) = envelope[n as usize];
-
+    for (&u_val, &(lo, hi)) in u[u_zero_idx..=u_zero_idx + d].iter().zip(&envelope) {
         if lo - tolerance <= u_val && u_val <= hi + tolerance {
             in_band_count += 1;
         }
@@ -942,23 +935,62 @@ mod tests {
     #[test]
     fn test_13_late_ramp_stays_in_band_within_timing_window() {
         let target = second_curve();
-        let params = standard_params(&target);
-        // Same plateau and release, but the ramp reaches 79% 120 ms later.
-        let user = TraceCurve::from_points(&[
-            (0, 0.0),
-            (1000, 79.0),
-            (1930, 63.3),
-            (2790, 5.0),
-            (3700, 0.0),
-        ]);
-        let samples = generate_synthetic_samples(&user, START_US, 0.0, |_n, val| val);
+        let tolerance = 0.06;
+        let d = i32::try_from(target.duration_ms()).unwrap();
+        // The grids score_trace builds: y[0..=D], and u[-300..=D+300] a copy 100 ms late.
+        let y: Vec<f32> = (0..=d).map(|n| target.value_at(f64::from(n))).collect();
+        let u: Vec<f32> = (-LAG_SEARCH_WINDOW_MS..=d + LAG_SEARCH_WINDOW_MS)
+            .map(|n| target.value_at(f64::from(n) - 100.0))
+            .collect();
+
+        // Without the timing window, the late copy misses target ± tolerance on the ramps.
+        let u_now = &u[usize::try_from(LAG_SEARCH_WINDOW_MS).unwrap()..];
+        let near_target = y
+            .iter()
+            .zip(u_now)
+            .filter(|&(&yv, &uv)| (uv - yv).abs() <= tolerance)
+            .count();
+        #[expect(clippy::cast_precision_loss, reason = "counts fit in f32")]
+        let near_fraction = near_target as f32 / y.len() as f32;
+        assert!(near_fraction < 0.9, "near_fraction was {near_fraction}");
+
+        // With the ±150 ms window it never leaves the band, with no lag shift.
+        let (accuracy, time_in_band, rmse) = score_accuracy(&y, &u, tolerance);
+        assert!(
+            (time_in_band - 1.0).abs() < f32::EPSILON,
+            "time_in_band was {time_in_band}"
+        );
+        assert!(rmse.abs() < f32::EPSILON, "rmse was {rmse}");
+        assert!((accuracy - 100.0).abs() < 1e-3, "accuracy was {accuracy}");
+    }
+
+    #[test]
+    fn test_15_late_beyond_window_leaves_the_band() {
+        // The sample preset's hairpin, followed exactly but 250 ms late: the screen and the
+        // audio show the pedal outside the band for most of the rep, and so must the score.
+        let preset = crate::preset::parse_preset(include_str!("../../../presets/sample.json"))
+            .expect("presets/sample.json must be valid");
+        let drill = preset
+            .drills
+            .iter()
+            .find(|d| d.id == "hairpin")
+            .expect("sample preset has the hairpin trace");
+        let curve = drill.trace_curve().unwrap();
+        let params = TraceParams::new(&curve, drill.tolerance_fraction());
+        let samples = generate_synthetic_samples(&curve, START_US, 250.0, |_n, val| val);
 
         let score = score_trace(&samples, START_US, &params).unwrap();
         assert!(
-            score.time_in_band >= 0.99,
+            (score.lag_ms - 250.0).abs() <= 5.0,
+            "lag_ms was {}",
+            score.lag_ms
+        );
+        assert!(
+            score.time_in_band < 0.5,
             "time_in_band was {}",
             score.time_in_band
         );
+        assert!(score.accuracy < 90.0, "accuracy was {}", score.accuracy);
     }
 
     #[test]
@@ -967,7 +999,7 @@ mod tests {
         let params = TraceParams::new(&target, 0.10);
         let samples = generate_synthetic_samples(&target, START_US, 0.0, |n, val| {
             if (880..=1930).contains(&n) {
-                val - 0.15
+                val - 0.25
             } else {
                 val
             }

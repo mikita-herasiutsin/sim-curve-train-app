@@ -11,6 +11,7 @@
     targetVal?: number | null;
     targetTolerance?: number | null;
     decimals?: number;
+    targetRange?: [number, number] | null;
   }
 
   let {
@@ -19,6 +20,7 @@
     targetVal = null,
     targetTolerance = null,
     decimals = 0,
+    targetRange = null,
   }: Props = $props();
 
   let containerEl = $state<HTMLDivElement | null>(null);
@@ -64,6 +66,7 @@
       targetVal,
       targetTolerance,
       decimals,
+      targetRange,
     );
     ctx.restore();
   }

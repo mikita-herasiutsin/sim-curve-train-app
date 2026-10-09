@@ -470,22 +470,75 @@ describe("Drill page", () => {
     const card = (await screen.findByText("Rep Result")).closest("div")!;
     expect(card).toHaveTextContent("Lag 42 ms");
     expect(card).toHaveTextContent("In band 85%");
-    expect(card).toHaveTextContent("Avg error ±3.5%");
+    expect(card).toHaveTextContent("Off band ±3.5%");
+    expect(
+      screen.getByTitle("How late (positive) or early (negative) you followed the curve, in ms."),
+    ).toHaveTextContent("Lag 42 ms");
+    expect(screen.getByTitle("Share of the rep your pedal was inside the band.")).toHaveTextContent(
+      "In band 85%",
+    );
+    expect(
+      screen.getByTitle("Average distance outside the band, as a share of full pedal travel."),
+    ).toHaveTextContent("Off band ±3.5%");
   });
 
   it("shows trace HUD during the GO second before rep starts", async () => {
     let nowUs = 0;
     vi.spyOn(pedalStream, "dataNowUs").mockImplementation(() => nowUs);
-    presetsList = [tracePreset];
+    const leadInPreset: Preset = {
+      ...tracePreset,
+      drills: [{ ...tracePreset.drills[0], leadInMs: 3000 }],
+    };
+    presetsList = [leadInPreset];
     render(DrillPage);
     await startDrill();
     await waitFor(() => expect(drillChannel).not.toBeNull());
-    drillChannel!.onmessage({ event: "countdownStarted", rep: 0, startUs: 0, endsUs: 1_000_000 });
+    drillChannel!.onmessage({ event: "countdownStarted", rep: 0, startUs: 0, endsUs: 3_000_000 });
     nowUs = 500_000;
+    expect(await screen.findByText("2")).toBeInTheDocument();
+    expect(screen.queryByTestId("trace-hud")).not.toBeInTheDocument();
+
+    nowUs = 2_500_000;
     expect(await screen.findByText("GO")).toBeInTheDocument();
     const hud = await screen.findByTestId("trace-hud");
     expect(hud).toBeInTheDocument();
-    expect(hud).toHaveTextContent("Target");
+    expect(hud).toHaveTextContent("Target 0%");
+  });
+
+  it("shows throttle value for a throttle trace drill in trace HUD", async () => {
+    const throttleTracePreset: Preset = {
+      schemaVersion: 1,
+      id: "throttle-trace-only",
+      name: "Throttle Trace Drills",
+      description: "",
+      drills: [
+        {
+          id: "throttle-trace",
+          name: "Throttle trace 1.5s",
+          type: "trace",
+          pedal: "throttle",
+          reps: 3,
+          leadInMs: 1000,
+          tolerance: 6,
+          points: [
+            [0, 0],
+            [150, 100],
+            [1500, 0],
+          ],
+        },
+      ],
+    };
+    presetsList = [throttleTracePreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    pedalStream.ingest([{ t: 1_000_000, brake: 0.15, throttle: 0.75 }]);
+    drillChannel!.onmessage({ event: "repStarted", rep: 0, startUs: 1_000_000 });
+
+    const hud = await screen.findByTestId("trace-hud");
+    await waitFor(() => expect(hud).toHaveTextContent("You 75%"));
+    expect(hud).not.toHaveTextContent("You 15%");
   });
 
   it("formats target with one decimal when decimals=1 on hold drill", async () => {

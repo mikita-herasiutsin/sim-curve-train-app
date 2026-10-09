@@ -4,6 +4,7 @@ import {
   GO_LEAD_MS,
   TraceCurve,
   traceDurationMs,
+  traceViewPhase,
   traceX,
   type TraceViewState,
 } from "./traceDraw";
@@ -167,6 +168,36 @@ describe("TraceCurve", () => {
     expect(flatCurve.envelopeAt(0)).toEqual([0.5, 0.5]);
     expect(flatCurve.envelopeAt(1000)).toEqual([0.5, 0.5]);
   });
+
+  it("matches brute-force envelope calculation for hairpin curve at every index", () => {
+    const points: [number, number][] = [
+      [0, 0],
+      [150, 100],
+      [300, 95],
+      [600, 70],
+      [1000, 40],
+      [1500, 0],
+    ];
+    const curve = new TraceCurve(points);
+    const window = 150;
+    const len = Math.ceil(curve.durationMs) + 2 * window + 1;
+    const grid = new Float64Array(len);
+    for (let i = 0; i < len; i++) {
+      grid[i] = curve.valueAt(i - window);
+    }
+
+    for (let i = 0; i < len; i++) {
+      let expectedLo = Infinity;
+      let expectedHi = -Infinity;
+      for (let j = Math.max(0, i - window); j <= Math.min(len - 1, i + window); j++) {
+        expectedLo = Math.min(expectedLo, grid[j]);
+        expectedHi = Math.max(expectedHi, grid[j]);
+      }
+      const [actualLo, actualHi] = curve.envelopeAt(i - window);
+      expect(actualLo).toBe(expectedLo);
+      expect(actualHi).toBe(expectedHi);
+    }
+  });
 });
 
 describe("traceX", () => {
@@ -275,5 +306,84 @@ describe("drawTrace", () => {
     const ctxThrottle = makeMockContext();
     drawTrace(ctxThrottle, 600, 400, { ...baseState, pedal: "throttle", playheadMs: null }, theme);
     expect(ctxThrottle.strokeStyle).toBe(theme.throttle);
+  });
+});
+
+describe("traceViewPhase", () => {
+  it("returns zero shownStartUs and null playheadMs during early countdown", () => {
+    const phase = traceViewPhase({
+      nowUs: 1_000_000,
+      countingDown: true,
+      countdownEndsUs: 3_000_000, // 2s remaining > GO_LEAD_MS
+      active: false,
+      repStartUs: 0,
+      lastShownStartUs: 500_000,
+      durationMs: 1500,
+    });
+    expect(phase).toEqual({ shownStartUs: 0, playheadMs: null });
+  });
+
+  it("shows countdownEndsUs and negative playhead during the GO second", () => {
+    const phase = traceViewPhase({
+      nowUs: 2_600_000,
+      countingDown: true,
+      countdownEndsUs: 3_000_000, // 400ms remaining <= GO_LEAD_MS
+      active: false,
+      repStartUs: 0,
+      lastShownStartUs: 0,
+      durationMs: 1500,
+    });
+    expect(phase).toEqual({
+      shownStartUs: 3_000_000,
+      playheadMs: -400,
+    });
+  });
+
+  it("tracks active mid-rep with playhead in ms", () => {
+    const phase = traceViewPhase({
+      nowUs: 3_500_000,
+      countingDown: false,
+      countdownEndsUs: 3_000_000,
+      active: true,
+      repStartUs: 3_000_000, // 500ms into rep
+      lastShownStartUs: 3_000_000,
+      durationMs: 1500,
+    });
+    expect(phase).toEqual({
+      shownStartUs: 3_000_000,
+      playheadMs: 500,
+    });
+  });
+
+  it("clamps playhead to durationMs when active past the end", () => {
+    const phase = traceViewPhase({
+      nowUs: 5_000_000,
+      countingDown: false,
+      countdownEndsUs: 3_000_000,
+      active: true,
+      repStartUs: 3_000_000, // 2000ms > durationMs (1500)
+      lastShownStartUs: 3_000_000,
+      durationMs: 1500,
+    });
+    expect(phase).toEqual({
+      shownStartUs: 3_000_000,
+      playheadMs: 1500,
+    });
+  });
+
+  it("keeps lastShownStartUs and nulls playhead when idle after a rep", () => {
+    const phase = traceViewPhase({
+      nowUs: 5_500_000,
+      countingDown: false,
+      countdownEndsUs: 3_000_000,
+      active: false,
+      repStartUs: 3_000_000,
+      lastShownStartUs: 3_000_000,
+      durationMs: 1500,
+    });
+    expect(phase).toEqual({
+      shownStartUs: 3_000_000,
+      playheadMs: null,
+    });
   });
 });

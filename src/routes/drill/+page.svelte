@@ -46,6 +46,7 @@
   // Time left in the active trace rep, in ms (0..durationMs), refreshed every frame.
   let remainingMs = $state(0);
   let currentTargetFrac = $state<number | null>(null);
+  let currentRangeFrac = $state<[number, number] | null>(null);
   let currentFrac = $state(0);
   // While remaining > GO_LEAD_MS show the number; while remaining <= GO_LEAD_MS show "GO".
   const countdownText = $derived(
@@ -134,6 +135,7 @@
         if (view.runState === "active") {
           const repMs = Math.max(0, Math.min(durationMs, (nowUs - view.repStartUs) / 1000));
           currentTargetFrac = traceCurve.valueAt(repMs);
+          currentRangeFrac = traceCurve.envelopeAt(repMs);
           const latest = pedalStream.history.latest();
           currentFrac =
             latest && selectedDrill.pedal !== "clutch" ? latest[selectedDrill.pedal] : 0;
@@ -143,12 +145,14 @@
           const playheadMs =
             view.countdownEndsUs > 0 ? (nowUs - view.countdownEndsUs) / 1000 : -GO_LEAD_MS;
           currentTargetFrac = traceCurve.valueAt(playheadMs);
+          currentRangeFrac = traceCurve.envelopeAt(playheadMs);
           const latest = pedalStream.history.latest();
           currentFrac =
             latest && selectedDrill.pedal !== "clutch" ? latest[selectedDrill.pedal] : 0;
           remainingMs = durationMs;
         } else {
           currentTargetFrac = null;
+          currentRangeFrac = null;
           currentFrac = 0;
           remainingMs = durationMs;
         }
@@ -316,19 +320,21 @@
             <p><strong>Type:</strong> {selectedDrill.type}</p>
             <p><strong>Target Pedal:</strong> {selectedDrill.pedal}</p>
             {#if selectedDrill.type === "hold"}
-              <p><strong>Target:</strong> {selectedDrill.target}%</p>
+              <p>
+                <strong>Target:</strong>
+                {selectedDrill.target.toFixed(selectedDrill.decimals ?? 0)}%
+              </p>
               <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
               <p><strong>Hold Time:</strong> {selectedDrill.holdMs} ms</p>
             {:else if selectedDrill.type === "trace"}
+              {@const peak = selectedDrill.points.reduce((max, p) => Math.max(max, p[1]), 0)}
               <p>
                 <strong>Duration:</strong>
                 {(traceDurationMs(selectedDrill.points) / 1000).toFixed(1)} s
               </p>
               <p>
                 <strong>Peak:</strong>
-                {selectedDrill.points.length > 0
-                  ? Math.max(...selectedDrill.points.map((p) => p[1]))
-                  : 0}%
+                {formatPercentValue(peak / 100, selectedDrill.decimals ?? 0)}%
               </p>
               <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
             {/if}
@@ -374,6 +380,7 @@
                 stream={pedalStream}
                 targetPedal={selectedDrill.pedal}
                 targetVal={currentTargetFrac}
+                targetRange={currentRangeFrac}
                 targetTolerance={toleranceOf(selectedDrill) / 100}
                 decimals={selectedDrill.decimals ?? 0}
               />
@@ -381,9 +388,10 @@
           </div>
 
           <div class="graph-container">
-            {#if selectedDrill?.type === "trace"}
+            {#if selectedDrill?.type === "trace" && traceCurve}
               <TraceView
                 drill={selectedDrill}
+                curve={traceCurve}
                 repStartUs={view.repStartUs}
                 active={view.runState === "active"}
                 countdownEndsUs={view.countdownEndsUs}
@@ -470,9 +478,16 @@
                 <li>Smoothness: {Math.round(view.lastScore.smoothness)}</li>
               </ul>
               <div class="metrics">
-                <small>Lag {Math.round(view.lastScore.lagMs)} ms</small>
-                <small>In band {Math.round(view.lastScore.timeInBand * 100)}%</small>
-                <small>Avg error ±{(view.lastScore.rmse * 100).toFixed(1)}%</small>
+                <small
+                  title="How late (positive) or early (negative) you followed the curve, in ms."
+                  >Lag {Math.round(view.lastScore.lagMs)} ms</small
+                >
+                <small title="Share of the rep your pedal was inside the band."
+                  >In band {Math.round(view.lastScore.timeInBand * 100)}%</small
+                >
+                <small title="Average distance outside the band, as a share of full pedal travel."
+                  >Off band ±{(view.lastScore.rmse * 100).toFixed(1)}%</small
+                >
               </div>
             </div>
           {:else if view.lastScore}

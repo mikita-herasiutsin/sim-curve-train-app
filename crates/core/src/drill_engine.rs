@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use crate::preset::{Drill, DrillKind, TraceCurve};
+use crate::preset::{Drill, DrillKind, EnvelopeTable, TraceCurve};
 use crate::scoring::{Grade, HoldParams, HoldScore, ValueSample, score_hold};
 use crate::set_summary::{SetSummary, summarize_set};
 use crate::trace_scoring::{RAMP_WINDOW_MS, TraceParams, TraceScore, score_trace};
@@ -131,6 +131,8 @@ pub enum DrillEvent {
 pub struct DrillRun {
     drill: Drill,
     curve: Option<TraceCurve>,
+    /// Envelope of `curve` within ±[`RAMP_WINDOW_MS`], so [`Self::band_at`] is a lookup.
+    band: Option<EnvelopeTable>,
     rest_ms: u32,
     phase: Phase,
     countdown_start_us: u64,
@@ -148,9 +150,11 @@ impl DrillRun {
     #[must_use]
     pub fn new(drill: Drill, rest_ms: u32) -> Self {
         let curve = drill.trace_curve();
+        let band = curve.as_ref().map(|c| c.envelope_table(RAMP_WINDOW_MS));
         Self {
             drill,
             curve,
+            band,
             rest_ms,
             phase: Phase::Idle,
             countdown_start_us: 0,
@@ -406,21 +410,23 @@ impl DrillRun {
 
     /// Target band `(lo, hi)` as fractions at timestamp `t_us`, with the same phase rules as
     /// [`Self::target_at`]. A hold drill gives `(target, target)`; a trace drill gives the
-    /// range of the curve within ±[`RAMP_WINDOW_MS`]. The tolerance is not included.
+    /// range of the curve within ±[`RAMP_WINDOW_MS`], looked up at the nearest millisecond in
+    /// a table built once per run (this runs on the input thread). The tolerance is not
+    /// included.
     #[must_use]
     pub fn band_at(&self, t_us: u64) -> Option<(f32, f32)> {
         match self.phase {
             Phase::Active { .. } | Phase::Scoring { .. } => match &self.drill.kind {
                 DrillKind::Hold { .. } => self.drill.target_fraction().map(|v| (v, v)),
                 DrillKind::Trace { .. } => {
-                    let curve = self.curve.as_ref()?;
+                    let band = self.band.as_ref()?;
                     let elapsed_us = t_us.saturating_sub(self.current_rep_start_us);
                     #[expect(
                         clippy::cast_precision_loss,
                         reason = "elapsed time in microseconds fits within f64"
                     )]
                     let dt_ms = (elapsed_us as f64) / 1000.0;
-                    Some(curve.envelope_at(dt_ms, RAMP_WINDOW_MS))
+                    Some(band.at(dt_ms))
                 }
             },
             Phase::Idle | Phase::Countdown { .. } | Phase::Finished | Phase::Aborted => None,

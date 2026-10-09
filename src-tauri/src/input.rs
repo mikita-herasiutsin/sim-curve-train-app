@@ -1087,8 +1087,12 @@ mod tests {
             &reply,
         );
         assert_eq!(answer.recv().unwrap(), Ok(()));
+        // At 80% in the first 100 ms of the ramp the pedal is 14 to 80 points above the
+        // instant target (tolerance 6) but inside the ±150 ms band, which reaches the 90%
+        // peak. Silent, so the cue follows the band and not the instant target.
+        assert_eq!(feed(&mut stream, &audio, 1_001, 1_100, 0.80), 0.0);
         // Above the whole timing-window band during the active window: beeping.
-        assert!(feed(&mut stream, &audio, 1_001, 1_500, 1.0) > 0.0);
+        assert!(feed(&mut stream, &audio, 1_100, 1_500, 1.0) > 0.0);
         // Off target in the scoring phase, where the target is no longer shown: silent.
         assert_eq!(feed(&mut stream, &audio, 1_500, 1_700, 1.0), 0.0);
         let phase = stream.active_drill.as_ref().map(|d| d.run.phase());

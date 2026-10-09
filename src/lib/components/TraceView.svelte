@@ -4,11 +4,18 @@
   import { readThemeColors, type AppThemeColors } from "$lib/pedals/theme";
   import { onThemeChange } from "$lib/settings";
   import { toleranceOf, type TraceDrill } from "$lib/drill";
-  import { drawTrace, TraceCurve, GO_LEAD_MS, type TraceViewState } from "$lib/pedals/traceDraw";
+  import {
+    drawTrace,
+    TraceCurve,
+    GO_LEAD_MS,
+    traceViewPhase,
+    type TraceViewState,
+  } from "$lib/pedals/traceDraw";
 
   interface Props {
     stream?: PedalStream;
     drill: TraceDrill;
+    curve: TraceCurve;
     repStartUs: number;
     active: boolean;
     countdownEndsUs?: number;
@@ -18,13 +25,13 @@
   let {
     stream = pedalStream,
     drill,
+    curve,
     repStartUs,
     active,
     countdownEndsUs = 0,
     countingDown = false,
   }: Props = $props();
 
-  const curve = $derived(new TraceCurve(drill.points));
   let lastShownStartUs = 0;
 
   let containerEl = $state<HTMLDivElement | null>(null);
@@ -58,21 +65,23 @@
     const pedal = drill.pedal === "throttle" ? "throttle" : "brake";
 
     const now = stream.dataNowUs();
-    let playheadMs: number | null = null;
-    let shownStartUs = 0;
-
-    if (countingDown && countdownEndsUs > 0 && countdownEndsUs - now <= GO_LEAD_MS * 1000) {
-      shownStartUs = countdownEndsUs;
-      lastShownStartUs = shownStartUs;
-      playheadMs = (now - countdownEndsUs) / 1000;
-    } else if (active) {
-      shownStartUs = repStartUs;
-      lastShownStartUs = shownStartUs;
-      const repMs = (now - repStartUs) / 1000;
-      playheadMs = Math.max(-GO_LEAD_MS, Math.min(durationMs, repMs));
-    } else {
-      shownStartUs = lastShownStartUs > 0 ? lastShownStartUs : repStartUs;
+    if (countingDown && (countdownEndsUs <= 0 || countdownEndsUs - now > GO_LEAD_MS * 1000)) {
+      lastShownStartUs = 0;
     }
+    const phase = traceViewPhase({
+      nowUs: now,
+      countingDown,
+      countdownEndsUs,
+      active,
+      repStartUs,
+      lastShownStartUs,
+      durationMs,
+    });
+    if (phase.playheadMs !== null) {
+      lastShownStartUs = phase.shownStartUs;
+    }
+    const shownStartUs = phase.shownStartUs;
+    const playheadMs = phase.playheadMs;
 
     const user: [number, number][] = [];
     if (shownStartUs > 0) {
@@ -90,13 +99,8 @@
     if (playheadMs !== null) {
       const latest = stream.history.latest();
       const val = latest ? (pedal === "brake" ? latest.brake : latest.throttle) : 0;
-      if (playheadMs < 0) {
-        const firstVal = curve.valueAt(0);
-        inBand = val >= firstVal - tolerance && val <= firstVal + tolerance;
-      } else {
-        const [lo, hi] = curve.envelopeAt(playheadMs);
-        inBand = val >= lo - tolerance && val <= hi + tolerance;
-      }
+      const [lo, hi] = curve.envelopeAt(playheadMs);
+      inBand = val >= lo - tolerance && val <= hi + tolerance;
     }
 
     const state: TraceViewState = {

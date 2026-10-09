@@ -940,7 +940,7 @@ async function main() {
           () =>
             ev(`(() => {
               const info = document.querySelector(".drill-info")?.innerText ?? "";
-              const kind = ${JSON.stringify(d.type === "trace" ? "Duration:" : `Target: ${d.target}%`)};
+              const kind = ${JSON.stringify(d.type === "trace" ? "Duration:" : `Target: ${d.target.toFixed(d.decimals ?? 0)}%`)};
               return info.includes("Target Pedal: ${d.pedal}") && info.includes(kind) && info.includes("Reps: ${d.reps}");
             })()`),
           { what: `details of ${p.name} / ${d.name} (index ${i})` },

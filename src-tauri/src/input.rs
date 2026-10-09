@@ -1067,7 +1067,7 @@ mod tests {
             pedal: Pedal::Brake,
             reps: 1,
             lead_in_ms: 1000,
-            tolerance: 6.0,
+            tolerance: Some(6.0),
             kind: DrillKind::Trace {
                 points: vec![(0, 0.0), (150, 90.0), (600, 0.0)],
             },

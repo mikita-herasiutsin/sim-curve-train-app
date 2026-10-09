@@ -18,6 +18,8 @@ pub struct DeviceInfo {
     pub axis_count: u32,
     pub button_count: u32,
     pub hat_count: u32,
+    /// A virtual device made by the dev-only pedal simulator.
+    pub simulated: bool,
 }
 
 /// The device list as last seen by the input backend.
@@ -93,12 +95,14 @@ mod tests {
                 axis_count: 3,
                 button_count: 0,
                 hat_count: 0,
+                simulated: false,
             }],
             error: None,
         };
         let json = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(json["devices"][0]["axisCount"], 3);
         assert_eq!(json["devices"][0]["vendorId"], 0x045e);
+        assert_eq!(json["devices"][0]["simulated"], false);
         assert_eq!(json["error"], serde_json::Value::Null);
     }
 }

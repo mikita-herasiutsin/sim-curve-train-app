@@ -62,6 +62,19 @@ npm run rust:lint    # cargo clippy -D warnings (pedantic)
 npm run rust:test    # cargo test --workspace
 ```
 
+#### Simulated pedals (dev)
+
+To run in debug mode with a virtual 3-axis pedal device ("SCT Simulated Pedals") and the dev control panel:
+
+- **PowerShell**:
+  ```powershell
+  $env:SCT_SIM_PEDALS="1"; npm run tauri dev
+  ```
+- **Bash / zsh**:
+  ```sh
+  SCT_SIM_PEDALS=1 npm run tauri dev
+  ```
+
 ### Layout
 
 ```

@@ -20,6 +20,7 @@ fn main() {
             "save_attempt",
             "list_attempts",
             "best_total",
+            "set_sim_pedals",
         ]),
     ))
     .expect("failed to run tauri-build");

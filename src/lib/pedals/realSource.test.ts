@@ -13,6 +13,7 @@ type DeviceLike = {
   axisCount: number;
   buttonCount: number;
   hatCount: number;
+  simulated: boolean;
 };
 
 function makeDevice(id: number): DeviceLike {
@@ -25,6 +26,7 @@ function makeDevice(id: number): DeviceLike {
     axisCount: 4,
     buttonCount: 0,
     hatCount: 0,
+    simulated: false,
   };
 }
 

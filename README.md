@@ -1,6 +1,6 @@
 # PR screenshots
 
-This orphan branch holds the images embedded in pull request bodies, so PNGs stay out of `main`.
+Maintainers only: this orphan branch holds the images embedded in pull request bodies, so PNGs stay out of `main`.
 It shares no history with `main`; never merge it.
 
 ## Adding screenshots
@@ -12,4 +12,4 @@ It shares no history with `main`; never merge it.
 
 Screenshots follow the telemetry rule: aggregate stats and drill names only, no raw laps or exports.
 
-Screenshots for PRs up to #35 were committed to `docs/screenshots/` on `main` and stay in its history.
+Older PRs committed screenshots to `docs/screenshots/` on their feature branches and link those commits by SHA. GitHub keeps them reachable through `refs/pull/<n>/head`, so those images still render.

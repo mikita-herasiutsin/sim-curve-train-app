@@ -4,7 +4,7 @@
 
 ## Screenshots
 
-<!-- Required for UI changes. Drag images here or link to docs/screenshots/. -->
+<!-- Required for UI changes. Drag images here, or commit them to the orphan pr-screenshots branch and link them by commit SHA. -->
 
 ## Acceptance criteria
 

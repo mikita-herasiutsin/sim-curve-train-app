@@ -52,6 +52,8 @@ Formatting and linting are automated. Don't hand-tune style; run the tools.
   one (e.g. `SCT-012: add 1 kHz input thread`).
 - Fill in the pull request template. Add screenshots for UI changes, and mark the ticket ✅ in
   the backlog when its acceptance criteria are met.
+- Keep screenshots off `main`. Drag them into the pull request body, or commit them to the
+  orphan `pr-screenshots` branch and link them by commit SHA (see that branch's README).
 - Pull requests are squash-merged.
 
 ## Reporting bugs and requesting features

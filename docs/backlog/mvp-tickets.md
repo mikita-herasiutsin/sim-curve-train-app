@@ -133,13 +133,13 @@ A drill runs N reps (from the preset; default 5) with a short pause between reps
 - **AC:** you can abort mid-set; the summary shows the best, average and consistency.
 - **Deps:** SCT-032
 
-### SCT-038 · Audio feedback ⬜ · M
+### SCT-038 · Audio feedback 🟨 · M
 Audio comes from the Rust side (`cpal`/`rodio`):
-- **Hold drills:** the pitch follows the signed error, and a "lock" chime plays once the pedal is held in the band.
-- **Trace drills:** a soft tone plays while out of the band (hooked up once SCT-034 is done).
+- **Error beeps (parking-sensor style):** on Hold and Trace drills, while the pedal is outside the tolerance band during an active rep, short 784 Hz beeps repeat. The rate rises with the distance past the band edge, from 3 per second at the edge to 11 per second at 30 percentage points past it. Inside the band it is silent. There is no lock chime and no miss cue.
 
 Settings: on/off and volume. Defaults follow [D-20](../decisions/README.md): on, silent inside the band, quiet volume.
-- **AC:** the tone responds within about 20 ms with no audible glitches; mute is persisted.
+- **AC:** the beeps start within about 20 ms of leaving the band, with no audible glitches; mute is persisted.
+- **Status:** done in code. The drill sets the beep rate per sample; the synth schedules the beeps (rate sampled once per beep, so the rhythm never glides) and fades out click-free when the pedal returns to the band. Earlier versions had a continuous pitch-following tone, then a lock chime plus a one-shot miss cue; after a listening test of 8 candidates the parking-sensor beeps were chosen (2026-10-09), see `docs/investigations/2026-10-08-error-sound.md`. Tests cover the synth reaching a beep in under 20 ms; device buffering adds roughly one audio period on top, not yet measured on hardware. Audio ignores the reaction-lag compensation used in trace scoring, so on Trace drills the beeps follow the raw pedal position; revisit with SCT-034. Check by ear before marking ✅.
 - **Deps:** SCT-031
 
 ---

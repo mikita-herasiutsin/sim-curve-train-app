@@ -1,8 +1,10 @@
+mod audio;
 mod input;
 #[cfg(debug_assertions)]
 mod sim_pedals;
 mod window;
 
+use audio::AudioFeedback;
 use input::InputService;
 use sct_core::AppInfo;
 use sct_core::attempts::{Attempt, AttemptStore, NewAttempt};
@@ -294,6 +296,35 @@ fn abort_drill_run(token: u64, input: tauri::State<'_, InputService>) -> Result<
     input.abort_drill(token)
 }
 
+/// Plays a short test tone. Registered in debug builds only (see `run`).
+#[cfg(debug_assertions)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri commands require State by value"
+)]
+#[tauri::command]
+fn audio_test_tone(audio: tauri::State<'_, AudioFeedback>) {
+    audio.test_tone();
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri commands require State by value"
+)]
+#[tauri::command]
+fn audio_set_enabled(enabled: bool, audio: tauri::State<'_, AudioFeedback>) {
+    audio.set_enabled(enabled);
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri commands require State by value"
+)]
+#[tauri::command]
+fn audio_set_volume(volume: f32, audio: tauri::State<'_, AudioFeedback>) {
+    audio.set_volume(volume);
+}
+
 /// Opens the profile database in the app data directory. The app still runs without it.
 fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
     let path = match app.path().app_data_dir() {
@@ -333,10 +364,16 @@ pub fn run() {
         .setup(|app| {
             window::fit_main_window(app);
             let store = open_profile_store(app);
-            app.manage(InputService::spawn(app.handle().clone(), store));
+            let audio = AudioFeedback::new();
+            app.manage(InputService::spawn(
+                app.handle().clone(),
+                store,
+                Some(audio.clone()),
+            ));
 
             let attempt_store = open_attempt_store(app);
             app.manage(AttemptsService::new(attempt_store));
+            app.manage(audio);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -357,6 +394,10 @@ pub fn run() {
             save_attempt,
             list_attempts,
             best_total,
+            #[cfg(debug_assertions)]
+            audio_test_tone,
+            audio_set_enabled,
+            audio_set_volume,
             set_sim_pedals
         ])
         .run(tauri::generate_context!())

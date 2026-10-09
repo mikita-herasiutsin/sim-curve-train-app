@@ -10,6 +10,7 @@
   import PedalGraph from "$lib/components/PedalGraph.svelte";
   import FrameTimeHud from "$lib/components/FrameTimeHud.svelte";
   import LatencyFlash from "$lib/components/LatencyFlash.svelte";
+  import AudioControls from "$lib/components/AudioControls.svelte";
 
   let windowSeconds = $state(5);
   let latencyFlashEnabled = $state(false);
@@ -78,6 +79,7 @@
     </div>
 
     <div class="header-right">
+      <AudioControls />
       <FrameTimeHud stream={pedalStream} />
     </div>
   </header>
@@ -218,6 +220,7 @@
   .header-right {
     display: flex;
     align-items: center;
+    gap: 1rem;
   }
 
   .live-workspace {

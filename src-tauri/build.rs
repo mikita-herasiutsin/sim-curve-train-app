@@ -20,6 +20,9 @@ fn main() {
             "save_attempt",
             "list_attempts",
             "best_total",
+            "audio_test_tone",
+            "audio_set_enabled",
+            "audio_set_volume",
             "set_sim_pedals",
         ]),
     ))

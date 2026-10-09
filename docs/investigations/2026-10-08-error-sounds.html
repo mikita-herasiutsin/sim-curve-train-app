@@ -1,0 +1,952 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pedal Error Sounds</title>
+<style>
+@import url("https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap");
+
+/* Layout: a two-column test bench. The pedal rig (simulator) stays pinned on the left and the candidate rack scrolls on the right; both stack into one column below 980px.
+   Color: cool telemetry neutrals; purple is "selected" (as in a purple sector), green is in band, amber is off target. */
+:root{
+  --bg:#e8ebef;
+  --panel:#f8f9fb;
+  --panel-2:#eef1f5;
+  --ink:#141920;
+  --ink-2:#465061;
+  --ink-3:#5f6979;
+  --line:#cdd3db;
+  --accent:#6a3fd1;
+  --accent-ink:#ffffff;
+  --accent-soft:#e8e1fa;
+  --ok:#1b7a43;
+  --ok-soft:#d4ecdd;
+  --warn:#b05a00;
+  --warn-soft:#f8e3c8;
+  --focus:#6a3fd1;
+  --f-display:"Barlow Semi Condensed","Arial Narrow","Segoe UI",system-ui,sans-serif;
+  --f-body:"IBM Plex Sans",system-ui,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,"Cascadia Mono",Consolas,"Liberation Mono",monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0d1014; --panel:#151a20; --panel-2:#1b2129; --ink:#e6e9ee; --ink-2:#aab2bf; --ink-3:#8b95a5; --line:#2b333d;
+    --accent:#a88dff; --accent-ink:#140b2e; --accent-soft:#2a2346;
+    --ok:#52c985; --ok-soft:#15321f; --warn:#f0a23a; --warn-soft:#3a2810; --focus:#bba6ff;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0d1014; --panel:#151a20; --panel-2:#1b2129; --ink:#e6e9ee; --ink-2:#aab2bf; --ink-3:#8b95a5; --line:#2b333d;
+  --accent:#a88dff; --accent-ink:#140b2e; --accent-soft:#2a2346;
+  --ok:#52c985; --ok-soft:#15321f; --warn:#f0a23a; --warn-soft:#3a2810; --focus:#bba6ff;
+  color-scheme:dark;
+}
+
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 var(--f-body);-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-underline-offset:2px}
+a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.wrap{max-width:1240px;margin:0 auto;padding-inline:16px;padding-block:22px 56px;display:grid;gap:22px}
+@media (min-width:720px){.wrap{padding-inline:28px}}
+
+.mono{font-family:var(--f-mono)}
+.eyebrow{font:600 12px/1 var(--f-display);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3)}
+h1,h2,h3{font-family:var(--f-display);margin:0;text-wrap:balance}
+h1{font-size:clamp(32px,6vw,46px);line-height:1.02;font-weight:700;letter-spacing:-.005em}
+h2{font-size:15px;font-weight:700;letter-spacing:.12em;text-transform:uppercase}
+h3{font-size:21px;font-weight:600;line-height:1.1}
+
+/* header */
+.top{display:grid;gap:14px;grid-template-columns:minmax(0,1fr)}
+@media (min-width:880px){.top{grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);align-items:end;gap:28px}}
+.intro{display:grid;gap:10px;max-width:66ch}
+.intro p{margin:0;color:var(--ink-2)}
+.master{display:flex;flex-wrap:wrap;align-items:center;gap:12px 16px;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 14px}
+.master label{font:600 13px/1 var(--f-display);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-2)}
+.vol{display:flex;align-items:center;gap:10px;flex:1 1 200px;min-width:0}
+.vol input{flex:1;min-width:0;accent-color:var(--accent)}
+.vol output{font:500 13px/1 var(--f-mono);font-variant-numeric:tabular-nums;width:4.5ch;text-align:right;color:var(--ink-2)}
+
+/* buttons */
+.btn{font:600 14px/1 var(--f-display);letter-spacing:.06em;text-transform:uppercase;padding:10px 14px;border-radius:4px;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;white-space:nowrap}
+.btn:hover{background:var(--panel-2)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);color:var(--ink)}
+.btn.stop{border-color:var(--ink-3)}
+
+/* bench */
+.bench{display:grid;gap:22px;grid-template-columns:minmax(0,1fr)}
+@media (min-width:980px){
+  .bench{grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);align-items:start}
+  .rig{position:sticky;top:calc(env(safe-area-inset-top,0px) + 14px)}
+}
+
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px}
+.rig{display:grid;gap:14px;padding:16px}
+.rig-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:6px 12px}
+.rig-head .spec{font:500 12.5px/1.2 var(--f-mono);color:var(--ink-3)}
+
+.readouts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+@media (max-width:520px){.readouts{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.ro{background:var(--panel-2);border-radius:4px;padding:8px 10px;display:grid;gap:4px;min-width:0}
+.ro span{font:600 11px/1 var(--f-display);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+.ro b{font:500 18px/1.1 var(--f-mono);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ro b.small{font-size:14px;line-height:1.35;white-space:normal}
+.chip{display:inline-block;font:600 12px/1 var(--f-display);letter-spacing:.1em;text-transform:uppercase;padding:5px 8px;border-radius:999px;background:var(--panel);color:var(--ink-2);border:1px solid var(--line)}
+.chip[data-s="in"]{background:var(--ok-soft);color:var(--ok);border-color:var(--ok)}
+.chip[data-s="over"],.chip[data-s="under"]{background:var(--warn-soft);color:var(--warn);border-color:var(--warn)}
+
+/* pedal track */
+.track-wrap{display:grid;gap:4px}
+.track{position:relative;height:64px;border:1px solid var(--line);border-radius:4px;background:var(--panel-2);overflow:hidden}
+.track:has(input:focus-visible){outline:2px solid var(--focus);outline-offset:2px}
+.track .ticks{position:absolute;left:0;right:0;bottom:0;height:9px;background:repeating-linear-gradient(to right,var(--ink-3) 0 1px,transparent 1px 10%);opacity:.45}
+.track .band{position:absolute;top:0;bottom:0;background:var(--ok-soft);border-left:1px solid var(--ok);border-right:1px solid var(--ok)}
+.track .target{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:var(--ok)}
+.track .fill{position:absolute;left:0;top:26px;height:12px;border-radius:0 2px 2px 0;background:var(--warn);opacity:.85}
+.track .knob{position:absolute;top:0;bottom:0;width:3px;margin-left:-1.5px;background:var(--warn)}
+.track[data-s="in"] .fill,.track[data-s="in"] .knob{background:var(--ok)}
+.track input[type=range]{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:ew-resize;-webkit-appearance:none;appearance:none;background:transparent}
+.track input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:2px;height:64px}
+.track input[type=range]::-moz-range-thumb{width:2px;height:64px;border:0}
+.scale{display:flex;justify-content:space-between;font:400 11px/1 var(--f-mono);color:var(--ink-3)}
+
+.trace-wrap{display:grid;gap:6px}
+.trace-cap{display:flex;flex-wrap:wrap;gap:4px 14px;font:400 11.5px/1.3 var(--f-mono);color:var(--ink-3)}
+.trace-cap i{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:5px;border-radius:1px}
+canvas#trace{display:block;width:100%;height:136px;border:1px solid var(--line);border-radius:4px;background:var(--panel-2)}
+
+.rig-ctl{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:center}
+.check{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--ink-2);cursor:pointer}
+.check input{accent-color:var(--accent);width:16px;height:16px;margin:0}
+.listen{display:flex;align-items:center;gap:8px;font:400 13px/1.3 var(--f-body);color:var(--ink-3)}
+.led{width:10px;height:10px;border-radius:50%;background:var(--line);flex:none;transition:background-color 60ms linear}
+.led.armed{background:var(--ink-3)}
+.led.on{background:var(--accent)}
+.hint{margin:0;font-size:13px;color:var(--ink-3)}
+
+/* candidate rack */
+.rack{display:grid;gap:12px;min-width:0}
+.rack-head{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:6px 12px}
+.rack-head p{margin:0;font-size:13px;color:var(--ink-3)}
+.cards{display:grid;gap:10px;margin:0;padding:0;list-style:none}
+.card{position:relative;display:grid;gap:10px;padding:14px 14px 16px;background:var(--panel);border:1px solid var(--line);border-radius:6px;min-width:0;overflow:hidden}
+.card.sel{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.card-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.cid{font:500 13px/1 var(--f-mono);width:26px;height:26px;display:grid;place-items:center;border-radius:4px;background:var(--panel-2);color:var(--ink-2);flex:none}
+.card.sel .cid{background:var(--accent);color:var(--accent-ink)}
+.enc{font:600 11px/1 var(--f-display);letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);border:1px solid var(--line);border-radius:3px;padding:4px 6px}
+.active-tag{margin-left:auto;font:600 11px/1 var(--f-display);letter-spacing:.12em;text-transform:uppercase;color:var(--accent)}
+.card p.char{margin:0;color:var(--ink-2);font-size:14.5px}
+.params{display:grid;grid-template-columns:5.6rem minmax(0,1fr);gap:4px 12px;margin:0;font:400 12.5px/1.45 var(--f-mono)}
+.params dt{color:var(--ink-3);text-transform:uppercase;font-size:11px;letter-spacing:.06em;padding-top:1px}
+.params dd{margin:0;min-width:0;overflow-wrap:anywhere}
+.actions{display:flex;flex-wrap:wrap;gap:8px}
+.prog{position:absolute;left:0;bottom:0;height:3px;width:0;background:var(--accent)}
+
+/* notes */
+.notes{display:grid;gap:18px;padding:18px 16px}
+@media (min-width:720px){.notes{padding:22px 24px}}
+.notes-grid{display:grid;gap:22px;grid-template-columns:minmax(0,1fr)}
+@media (min-width:980px){.notes-grid{grid-template-columns:minmax(0,1.45fr) minmax(0,1fr)}}
+.notes h3{font-size:18px;margin-bottom:8px}
+.notes ol,.notes ul{margin:0;padding-left:1.2em;display:grid;gap:8px;font-size:14px;color:var(--ink-2)}
+.notes li{max-width:72ch}
+.notes li strong{color:var(--ink)}
+.rec li::marker{font-family:var(--f-mono);color:var(--accent)}
+.caveat{font-size:13px;color:var(--ink-3);margin:0}
+
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;animation:none!important}
+}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="intro">
+      <span class="eyebrow">SimCurveTrain · sound lab</span>
+      <h1>Pedal Error Sounds</h1>
+      <p>Eight candidates for the out-of-band cue, each synthesised live with the exact parameters the Rust engine would use. Select one, then drag the pedal or press Auto drive. Sound plays only while the pedal is outside the ±5 % band, and the lock chime plays after 100 ms inside it.</p>
+      <p>Listen for two things: whether it still tells you something after ten minutes, and whether you would notice it from the next room.</p>
+    </div>
+    <div class="master" role="group" aria-label="Master controls">
+      <label for="vol">Volume</label>
+      <div class="vol"><input id="vol" type="range" min="0" max="100" step="1" value="50"><output id="volOut" for="vol">50 %</output></div>
+      <button class="btn stop" id="stopAll" type="button">Stop all</button>
+    </div>
+  </header>
+
+  <div class="bench">
+    <section class="panel rig" aria-labelledby="rigTitle">
+      <div class="rig-head">
+        <h2 id="rigTitle">Pedal rig</h2>
+        <span class="spec">HOLD · target 60 % · band ±5 % (55–65)</span>
+      </div>
+
+      <div class="readouts">
+        <div class="ro"><span>Pedal</span><b id="roPedal">30.0 %</b></div>
+        <div class="ro"><span>Error</span><b id="roErr">−30.0</b></div>
+        <div class="ro"><span>State</span><b class="small"><span class="chip" id="roState" data-s="under">Under</span></b></div>
+        <div class="ro"><span>Sound</span><b class="small" id="roSound">A · Rolled “tr”</b></div>
+      </div>
+
+      <div class="track-wrap">
+        <div class="track" id="track" data-s="under">
+          <div class="band" style="left:55%;width:10%"></div>
+          <div class="target" style="left:60%"></div>
+          <div class="fill" id="fill" style="width:30%"></div>
+          <div class="knob" id="knob" style="left:30%"></div>
+          <div class="ticks"></div>
+          <input id="pedal" type="range" min="0" max="100" step="0.5" value="30" aria-label="Pedal position, percent" aria-describedby="rigHint">
+        </div>
+        <div class="scale" aria-hidden="true"><span>0</span><span>25</span><span>50</span><span>75</span><span>100 %</span></div>
+      </div>
+
+      <div class="trace-wrap">
+        <canvas id="trace" aria-label="Last eight seconds of pedal position against the band, with a lane of sound events underneath" role="img"></canvas>
+        <div class="trace-cap"><span><i style="background:var(--ink)"></i>in band</span><span><i style="background:var(--warn)"></i>off target</span><span><i style="background:var(--accent)"></i>error pulse</span><span><i style="background:var(--ok)"></i>lock chime</span><span>8 s window</span></div>
+      </div>
+
+      <div class="rig-ctl">
+        <button class="btn primary" id="drive" type="button" aria-pressed="false">Auto drive</button>
+        <label class="check"><input type="checkbox" id="optScale">Faster when further off <span class="mono" style="font-size:12px">(B, D, G)</span></label>
+        <label class="check"><input type="checkbox" id="optChime" checked>Lock chime</label>
+      </div>
+      <div class="listen"><span class="led" id="led"></span><span id="listenTxt">Sound off. Move the pedal or press a button to start.</span></div>
+      <p class="hint" id="rigHint">Drag the bar, or focus it and use the arrow keys (0.5 % steps). Auto drive runs 10 s: approach, overshoot, settle, slow drift out, wander back, then a big miss.</p>
+      <div class="sr" aria-live="polite" id="live"></div>
+    </section>
+
+    <section class="rack" aria-labelledby="rackTitle">
+      <div class="rack-head">
+        <h2 id="rackTitle">Candidates</h2>
+        <p>Tag shows what the sound tells you besides "off target".</p>
+      </div>
+      <ul class="cards" id="cards"></ul>
+    </section>
+  </div>
+
+  <section class="panel notes" aria-labelledby="notesTitle">
+    <h2 id="notesTitle">Research notes</h2>
+    <div class="notes-grid">
+      <div>
+        <h3>What makes a pulsed cue informative but tolerable</h3>
+        <ul>
+          <li><strong>Use rhythm for "how far off", not pitch.</strong> Pulse rate is a more robust urgency cue than frequency (<a href="https://repository.gatech.edu/entities/publication/441d087b-8b3e-4572-b046-07096dcc1b60" target="_blank" rel="noopener">Gonzalez, Lewis &amp; Baldwin 2012</a>). Parking sensors step from slow to fast beeps as distance shrinks (<a href="https://owners-manual.mazda.com/gen/en/mx-5/mx-5_8ja8ee19k/contents/05200104.html" target="_blank" rel="noopener">Mazda manual</a>). Variometers pulse faster with climb and stay silent in a dead band (<a href="https://patents.google.com/patent/EP0024904A2/en" target="_blank" rel="noopener">EP0024904</a>).</li>
+          <li><strong>Short, decaying pulses cost less.</strong> Loudness integrates over about 200 ms, so a 10 ms tick sounds far quieter than a tone at the same peak (<a href="https://www.sfu.ca/sonic-studio-webdav/cmns/Handbook5/handbook/Loudness.html" target="_blank" rel="noopener">SFU handbook</a>, <a href="https://auditory.org/asamtgs/asa93ott/4aPP/4aPP8.html" target="_blank" rel="noopener">ASA 1993</a>). At 20 % duty, average power is 7 dB below a continuous tone.</li>
+          <li><strong>Sounds like everyday sounds irritate less than flat beeps.</strong> Edworthy's review reports auditory icons as less tiring and irritating than tonal alarms (<a href="https://dael.euracoustics.org/confs/fa2025/data/articles/000375.pdf" target="_blank" rel="noopener">Forum Acusticum 2025</a>, <a href="https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12106860/" target="_blank" rel="noopener">2025 study</a>). IEC 60601-1-8 Amd 2 moved toward them. Very steep, loud onsets startle.</li>
+          <li><strong>Modulation rate sets the character.</strong> Fluctuation strength peaks near 4 Hz (siren-like) and roughness near 70 Hz (rasp) (<a href="https://community.sw.siemens.com/articles/en_US/Knowledge/sound-modulation-metrics-fluctuation-strength-and-roughness" target="_blank" rel="noopener">Siemens</a>). The old pitch-tracking sine wobbled at foot-correction speed, about 1–4 Hz. Pulses at 3–12 /s read as rhythm and 10–25 Hz as a purr.</li>
+          <li><strong>Bass goes through walls.</strong> Wall loss rises about 6 dB per octave under the mass law (<a href="https://engineersuniverse.com/labs/engineering/acoustical-engineering/noise-transmission-through-walls" target="_blank" rel="noopener">simulator</a>), and quiet bass must be played louder to be heard (<a href="https://en.wikipedia.org/wiki/Equal-loudness_contour" target="_blank" rel="noopener">equal-loudness</a>). Keep fundamentals at 400–1200 Hz and energy below about 2.5 kHz, since sharpness rises above 3 kHz.</li>
+          <li><strong>Silence in band is good training design.</strong> Bandwidth feedback, given only outside a tolerance, improves consistency (<a href="https://vivo.colorado.edu/display/pubid_105370" target="_blank" rel="noopener">Sherwood 1988</a>). Constant concurrent feedback can breed dependence (<a href="https://doi.org/10.3758/s13423-012-0333-8" target="_blank" rel="noopener">Sigrist et al. 2013</a>), so plan a fade-out or blind mode.</li>
+          <li><strong>Direction is optional.</strong> People identify only about 5–6 absolute pitch levels (<a href="https://en.wikipedia.org/wiki/The_Magical_Number_Seven,_Plus_or_Minus_Two" target="_blank" rel="noopener">Pollack via Miller 1956</a>), so a continuous pitch map is hard to read. Two fixed pitches (F) or a rising or falling pair (G) can be learned.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Recommended shortlist</h3>
+        <ol class="rec">
+          <li><strong>A · Rolled "tr".</strong> It is the "tr-tr-tr" you asked for. Noise has no pitch, so it cannot turn into a beeper. The 250–1000 Hz band keeps it soft and leaks less than bass, and size is shown by roll length rather than pitch.</li>
+          <li><strong>B · Wood tok, with "Faster when further off" on.</strong> A natural, auditory-icon-like knock at about 10 % duty. It is likely the easiest to live with for an hour, and the switch adds parking-sensor size information.</li>
+          <li><strong>F · Variometer</strong>, if you want to hear over versus under (Trace drills, or a later blind mode). Rate shows size and two fixed pitches a fourth apart show direction, with no glides.</li>
+        </ol>
+        <p class="caveat" style="margin-top:12px">Levels are energy-matched estimates, not ear-matched. Use the volume slider and tell us which one sounds too loud. Browser output latency adds about 10–40 ms that the native cpal path will not have. Full sources and the parameter table are in research.md.</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- drill constants ----------
+  const TARGET = 60;          // % pedal
+  const TOL = 5;              // +/- % band
+  const HYST = 0.4;           // %-points of re-entry hysteresis (exit is instant)
+  const LOOKAHEAD = 0.06;     // s of audio scheduled ahead
+  const TICK_MS = 15;         // scheduler period
+  const SIZE_SPAN = 30;       // %-points beyond the band edge where "size" saturates
+  const TRACE_MS = 8000;
+
+  const opts = { scale: false, chime: true };
+  const sizeK = d => Math.pow(Math.min(Math.max(d, 0) / SIZE_SPAN, 1), 0.6);
+  const fixedRate = (base, k) => (opts.scale ? base * (1 + 1.2 * k) : base);
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const $ = (s) => document.querySelector(s);
+
+  // ---------- audio core ----------
+  let ctx = null, master = null, errBus = null, noiseBuf = null;
+  const waves = {};
+  const HANN = Float32Array.from({ length: 64 }, (_, i) => 0.5 - 0.5 * Math.cos(2 * Math.PI * i / 63));
+  let live = [];              // scheduled sources: {src, t}
+  const marks = [];           // perf-ms times of error sound events (for the trace lane)
+  const chimeMarks = [];
+
+  function volGain() { const v = Number($('#vol').value) / 100; return 2 * v * v; }
+
+  function harmonicWave(amps) {
+    const n = amps.length + 1;
+    const real = new Float32Array(n), imag = new Float32Array(n);
+    amps.forEach((a, i) => { imag[i + 1] = a; });
+    return ctx.createPeriodicWave(real, imag, { disableNormalization: true });
+  }
+
+  function ensureAudio() {
+    if (!ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) { $('#listenTxt').textContent = 'This browser has no Web Audio support.'; return false; }
+      ctx = new AC({ latencyHint: 'interactive' });
+      master = ctx.createGain();
+      master.gain.value = volGain();
+      master.connect(ctx.destination);
+      errBus = ctx.createGain();
+      errBus.gain.value = 1;
+      errBus.connect(master);
+      const len = Math.floor(ctx.sampleRate * 2);
+      noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+      waves.park = harmonicWave([1, 0, 0.2]);            // sine + 0.2 x 3rd
+      waves.vario = harmonicWave([1, 0.2]);              // sine + 0.2 x 2nd
+      waves.marimba = harmonicWave([1, 0, 0, 0.12]);     // sine + 0.12 x 4th
+      waves.saw5 = harmonicWave([1, 1 / 2, 1 / 3, 1 / 4, 1 / 5]); // band-limited saw
+    }
+    if (ctx.state === 'suspended') ctx.resume();
+    return true;
+  }
+
+  function track(src, t) { live.push({ src, t }); }
+  function pruneLive(now) { if (live.length > 64) live = live.filter((x) => x.t > now - 1); }
+  function cancelFuture(now) {
+    live = live.filter(({ src, t }) => {
+      if (t > now) { try { src.stop(); } catch (e) { /* already stopped */ } return false; }
+      return true;
+    });
+    const pnow = performance.now();
+    for (let i = marks.length - 1; i >= 0; i--) if (marks[i] > pnow) marks.splice(i, 1);
+  }
+  function mark(t) {
+    if (!ctx) return;
+    marks.push(performance.now() + (t - ctx.currentTime) * 1000);
+    if (marks.length > 400) marks.splice(0, marks.length - 400);
+  }
+
+  // Linear attack, optional flat hold, then one-pole exponential decay (time constant tau).
+  function envGain(out, t, peak, atk, hold, tau) {
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(peak, t + atk);
+    if (hold > 0) g.gain.setValueAtTime(peak, t + atk + hold);
+    g.gain.setTargetAtTime(0, t + atk + hold, tau);
+    g.connect(out);
+    return { g, end: t + atk + hold + tau * 7 };
+  }
+
+  function tone(out, t, wave, freq, peak, atk, hold, tau) {
+    const o = ctx.createOscillator();
+    if (typeof wave === 'string') o.type = wave; else o.setPeriodicWave(wave);
+    o.frequency.value = freq;
+    const { g, end } = envGain(out, t, peak, atk, hold, tau);
+    o.connect(g);
+    o.start(t);
+    o.stop(end);
+    o.onended = () => { o.disconnect(); g.disconnect(); };
+    track(o, t);
+  }
+
+  // filters: [[type, freqHz, Q], ...] (Web Audio biquads = RBJ cookbook; bandpass Q is linear)
+  function noise(out, t, filters, peak, atk, hold, tau) {
+    const s = ctx.createBufferSource();
+    s.buffer = noiseBuf;
+    const chain = [s];
+    let node = s;
+    for (const f of filters) {
+      const b = ctx.createBiquadFilter();
+      b.type = f[0]; b.frequency.value = f[1]; b.Q.value = f[2];
+      node.connect(b); node = b; chain.push(b);
+    }
+    const { g, end } = envGain(out, t, peak, atk, hold, tau);
+    node.connect(g);
+    s.start(t, Math.random() * (noiseBuf.duration - 0.3));
+    s.stop(end);
+    s.onended = () => { chain.forEach((n) => n.disconnect()); g.disconnect(); };
+    track(s, t);
+  }
+
+  // One Hann-windowed grain of a periodic wave through a Butterworth low-pass.
+  function grain(out, t, wave, freq, peak, dur, lpHz) {
+    const o = ctx.createOscillator();
+    o.setPeriodicWave(wave);
+    o.frequency.value = freq;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = lpHz;
+    lp.Q.value = -3.01;  // Web Audio lowpass Q is in dB: -3.01 dB = linear 0.707 (Butterworth)
+    const g = ctx.createGain();
+    g.gain.value = 0;
+    const c = new Float32Array(HANN.length);
+    for (let i = 0; i < c.length; i++) c[i] = HANN[i] * peak;
+    g.gain.setValueCurveAtTime(c, t, dur);
+    o.connect(lp); lp.connect(g); g.connect(out);
+    o.start(t);
+    o.stop(t + dur + 0.01);
+    o.onended = () => { o.disconnect(); lp.disconnect(); g.disconnect(); };
+    track(o, t);
+  }
+
+  // 1 kHz lock chime: 2 ms attack to 0.3, ~80 ms exponential decay to -60 dB.
+  function chime(t) {
+    const o = ctx.createOscillator();
+    o.type = 'sine'; o.frequency.value = 1000;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.3, t + 0.002);
+    g.gain.exponentialRampToValueAtTime(0.0003, t + 0.082);
+    o.connect(g); g.connect(master);
+    o.start(t); o.stop(t + 0.09);
+    o.onended = () => { o.disconnect(); g.disconnect(); };
+    chimeMarks.push(performance.now() + (t - ctx.currentTime) * 1000);
+    if (chimeMarks.length > 50) chimeMarks.shift();
+    return o;
+  }
+
+  // ---------- candidates ----------
+  // pulse(t, err, d, out) schedules one pulse at audio time t and returns seconds until the next one.
+  // err = pedal - target (positive = too much pedal); d = |err| - TOL (distance beyond the band edge).
+  const CANDS = [
+    {
+      id: 'A', name: 'Rolled “tr”', enc: 'size',
+      char: 'Short rolls of soft, band-limited noise, like a tongue trill: tr-tr-tr. The further off you are, the longer each roll.',
+      params: [
+        ['Source', 'white noise → band-pass 600 Hz, Q 0.8 (≈250–1000 Hz)'],
+        ['Tap', 'attack 1.5 ms, decay τ 8 ms; taps 42 ms apart (24 Hz roll)'],
+        ['Rhythm', 'one roll per 300 ms (3.3 /s); 2 taps at the band edge → 4 taps at ≥30 % off'],
+        ['Level', 'noise ×1.0; tap gains 1 / 0.8 / 0.7 / 0.6']
+      ],
+      pulse(t, err, d, out) {
+        const n = 2 + Math.round(2 * sizeK(d));
+        const amps = [1, 0.8, 0.7, 0.6];
+        for (let i = 0; i < n; i++) {
+          const ti = t + i * 0.042;
+          noise(out, ti, [['bandpass', 600, 0.8]], amps[i], 0.0015, 0, 0.008);
+          mark(ti);
+        }
+        return 0.300;
+      }
+    },
+    {
+      id: 'B', name: 'Wood tok', enc: 'none', scalable: true,
+      char: 'A muted wood-block knock at a steady 5 per second. Sounds like an object being tapped, not a device beeping.',
+      params: [
+        ['Source', 'two decaying sines 520 Hz (×1.0) + 1430 Hz (×0.35), plus a noise click'],
+        ['Envelope', 'attack 1 ms; τ 22 ms / 8 ms; click: BP 2.5 kHz Q 0.7, τ 1.5 ms'],
+        ['Rhythm', '5 /s fixed (optional: 5·(1 + 1.2k) → up to 11 /s)'],
+        ['Level', '0.13 (chime 0.30)']
+      ],
+      pulse(t, err, d, out) {
+        const L = 0.13;
+        tone(out, t, 'sine', 520, L, 0.001, 0, 0.022);
+        tone(out, t, 'sine', 1430, L * 0.35, 0.001, 0, 0.008);
+        noise(out, t, [['bandpass', 2500, 0.7]], L * 0.6, 0.0003, 0, 0.0015);
+        mark(t);
+        return 1 / fixedRate(5, sizeK(d));
+      }
+    },
+    {
+      id: 'C', name: 'Geiger tick', enc: 'size',
+      char: 'Soft, irregular ticks like a muted Geiger counter. They grow denser, not louder or higher, as the error grows.',
+      params: [
+        ['Source', 'white noise → band-pass 1100 Hz, Q 0.9'],
+        ['Envelope', 'attack 0.5 ms, decay τ 3 ms (≈20 ms tick)'],
+        ['Rhythm', 'random (Poisson) intervals, mean 6 → 22 /s; 25 ms dead time'],
+        ['Level', 'noise ×1.0']
+      ],
+      pulse(t, err, d, out) {
+        const lam = 6 + 16 * sizeK(d);
+        noise(out, t, [['bandpass', 1100, 0.9]], 1.0, 0.0005, 0, 0.003);
+        mark(t);
+        const iv = -Math.log(1 - Math.random()) / lam;
+        return clamp(iv, 0.025, 2.2 / lam);
+      }
+    },
+    {
+      id: 'D', name: 'Soft blip', enc: 'none', scalable: true,
+      char: 'A gentle, rounded sine blip four times a second. The plainest option, and a quiet sibling of the lock chime.',
+      params: [
+        ['Source', 'sine 660 Hz'],
+        ['Envelope', 'attack 6 ms, decay τ 25 ms (no sustain)'],
+        ['Rhythm', '4 /s fixed (optional: 4·(1 + 1.2k) → up to 8.8 /s)'],
+        ['Level', '0.13']
+      ],
+      pulse(t, err, d, out) {
+        tone(out, t, 'sine', 660, 0.13, 0.006, 0, 0.025);
+        mark(t);
+        return 1 / fixedRate(4, sizeK(d));
+      }
+    },
+    {
+      id: 'E', name: 'Parking sensor', enc: 'size',
+      char: 'Short flat beeps that speed up as you drift further off, like a parking sensor, at a mellow 784 Hz instead of a shrill piezo. Never goes continuous.',
+      params: [
+        ['Source', 'sine 784 Hz + 0.2 × 3rd harmonic'],
+        ['Envelope', 'attack 4 ms, flat ≤32 ms, release τ 4 ms'],
+        ['Rhythm', '3 + 8k per second (3 → 11 /s)'],
+        ['Level', '0.06 (flat top carries more energy)']
+      ],
+      pulse(t, err, d, out) {
+        const rate = 3 + 8 * sizeK(d);
+        const hold = Math.min(0.032, 0.45 / rate - 0.008);
+        tone(out, t, waves.park, 784, 0.06, 0.004, hold, 0.004);
+        mark(t);
+        return 1 / rate;
+      }
+    },
+    {
+      id: 'F', name: 'Variometer', enc: 'size+dir',
+      char: 'Glider-vario style beeps. A higher note means too much pedal and a lower note means too little. They get faster as the error grows.',
+      params: [
+        ['Source', 'sine + 0.2 × 2nd harmonic'],
+        ['Pitch', 'over: 698 Hz (F5) · under: 523 Hz (C5), a fourth apart'],
+        ['Envelope', 'attack 4 ms, hold 25 ms, release τ 12 ms'],
+        ['Rhythm', '3.5 + 6.5k per second (3.5 → 10 /s)'],
+        ['Level', '0.065']
+      ],
+      pulse(t, err, d, out) {
+        const f = err > 0 ? 698.46 : 523.25;
+        tone(out, t, waves.vario, f, 0.065, 0.004, 0.025, 0.012);
+        mark(t);
+        return 1 / (3.5 + 6.5 * sizeK(d));
+      }
+    },
+    {
+      id: 'G', name: 'Tick-tock pair', enc: 'dir', scalable: true,
+      char: 'Soft marimba-like pairs. A falling pair means ease off and a rising pair means push. The tempo stays steady.',
+      params: [
+        ['Source', 'sine + 0.12 × 4th harmonic; notes 587 Hz (D5) and 440 Hz (A4)'],
+        ['Contour', 'over: high → low · under: low → high'],
+        ['Envelope', 'attack 2 ms, decay τ 28 ms'],
+        ['Rhythm', 'pair every 400 ms, 2nd note at +110 ms (optional: faster with size)'],
+        ['Level', '0.12']
+      ],
+      pulse(t, err, d, out) {
+        const P = 0.4 / (opts.scale ? 1 + 1.2 * sizeK(d) : 1);
+        const gap = 0.275 * P;
+        const hi = 587.33, lo = 440;
+        const f1 = err > 0 ? hi : lo, f2 = err > 0 ? lo : hi;
+        tone(out, t, waves.marimba, f1, 0.12, 0.002, 0, 0.028);
+        tone(out, t + gap, waves.marimba, f2, 0.12, 0.002, 0, 0.028);
+        mark(t); mark(t + gap);
+        return P;
+      }
+    },
+    {
+      id: 'H', name: 'Low purr', enc: 'size',
+      char: 'A soft engine-like flutter that purrs faster the further off you are. The most on-theme, and the one most likely to travel through walls.',
+      params: [
+        ['Source', 'band-limited saw 147 Hz (harmonics 1–5 at 1/n) → low-pass 700 Hz'],
+        ['Shape', 'Hann-windowed grains, 55 % duty'],
+        ['Rhythm', 'flutter 10 + 5k Hz (10 → 15 Hz)'],
+        ['Level', '0.09']
+      ],
+      pulse(t, err, d, out) {
+        const rate = 10 + 5 * sizeK(d);
+        const P = 1 / rate;
+        grain(out, t, waves.saw5, 146.83, 0.09, 0.55 * P, 700);
+        mark(t);
+        return P;
+      }
+    }
+  ];
+  const ENC_LABEL = { 'none': 'Steady', 'size': 'Size', 'dir': 'Direction', 'size+dir': 'Size + direction' };
+
+  // ---------- engine state ----------
+  let pedal = 30;
+  let selected = CANDS[0];
+  let script = null;  // {kind:'drive'|'preview', t0, dur, fn, cand?, restore?}
+  let bandState = 'in';
+  const eng = { armed: false, gate: null, cand: null, nextT: 0, inSince: null, chimeSrc: null, chimeT: 0 };
+
+  function classifyFrom(prev, err) {
+    const a = Math.abs(err);
+    if (prev === 'in') return a > TOL ? (err > 0 ? 'over' : 'under') : 'in';
+    if (a < TOL - HYST) return 'in';
+    return err > 0 ? 'over' : 'under';
+  }
+  bandState = classifyFrom('in', pedal - TARGET);
+
+  function activeCand() { return (script && script.cand) ? script.cand : selected; }
+
+  function startEpisode(now, cand) {
+    const g = ctx.createGain();
+    g.gain.value = 1;
+    g.connect(errBus);
+    eng.gate = g; eng.cand = cand; eng.nextT = now + 0.003;
+  }
+
+  function stopEpisode(now) {
+    const g = eng.gate;
+    if (!g) return;
+    eng.gate = null; eng.cand = null;
+    cancelFuture(now);
+    g.gain.cancelScheduledValues(now);
+    g.gain.setValueAtTime(1, now);
+    g.gain.setTargetAtTime(0, now, 0.006);   // ~40 ms to silence, click-free
+    setTimeout(() => { try { g.disconnect(); } catch (e) { /* gone */ } }, 400);
+  }
+
+  function cancelChime(now) {
+    if (eng.chimeSrc && eng.chimeT > now) { try { eng.chimeSrc.stop(); } catch (e) { /* ok */ } chimeMarks.pop(); }
+    eng.chimeSrc = null;
+  }
+
+  function tick() {
+    const p = currentPedal();
+    const err = p - TARGET;
+    const prev = bandState;
+    bandState = classifyFrom(prev, err);
+    if ((prev === 'in') !== (bandState === 'in')) announce();
+    if (!ctx || !eng.armed) return;
+    const now = ctx.currentTime;
+    pruneLive(now);
+    const cand = activeCand();
+    if (bandState !== 'in') {
+      eng.inSince = null;
+      cancelChime(now);
+      if (!eng.gate || eng.cand !== cand) { stopEpisode(now); startEpisode(now, cand); }
+      const d = Math.abs(err) - TOL;
+      let guard = 0;
+      while (eng.nextT < now + LOOKAHEAD && guard++ < 16) {
+        const t = Math.max(eng.nextT, now + 0.002);
+        const iv = cand.pulse(t, err, d, eng.gate);
+        eng.nextT = t + Math.max(iv, 0.02);
+      }
+    } else {
+      stopEpisode(now);
+      if (eng.inSince === null) {
+        eng.inSince = now;
+        if (opts.chime) { eng.chimeT = now + 0.1; eng.chimeSrc = chime(eng.chimeT); }
+      }
+    }
+  }
+
+  function arm() {
+    if (!ensureAudio()) return;
+    eng.armed = true;
+    updateListen();
+  }
+
+  function silence() {
+    eng.armed = false;
+    if (ctx) { const now = ctx.currentTime; stopEpisode(now); cancelChime(now); }
+    eng.inSince = null;
+    updateListen();
+  }
+
+  // ---------- scripted pedal (auto drive, preview) ----------
+  const smooth = (x) => x * x * (3 - 2 * x);
+  const DRIVE = [
+    [0, 0], [0.9, 46], [1.35, 71], [1.9, 61.5], [2.4, 59.2], [3.6, 60.6], [4.2, 61],
+    [5.6, 67.8], [6.4, 63], [6.9, 58.6], [7.6, 60.2], [7.9, 58.5], [8.5, 27], [9.1, 52],
+    [9.55, 60.4], [10.5, 60]
+  ];
+  function keyframes(kf, s) {
+    if (s <= kf[0][0]) return kf[0][1];
+    for (let i = 1; i < kf.length; i++) {
+      if (s <= kf[i][0]) {
+        const t0 = kf[i - 1][0], v0 = kf[i - 1][1], t1 = kf[i][0], v1 = kf[i][1];
+        return v0 + (v1 - v0) * smooth((s - t0) / (t1 - t0));
+      }
+    }
+    return kf[kf.length - 1][1];
+  }
+  const driveFn = (s) => clamp(keyframes(DRIVE, s) + (s > 1.9 ? 0.35 * Math.sin(2 * Math.PI * 1.7 * s) : 0), 0, 100);
+
+  function previewFn(cand) {
+    if (cand.enc === 'dir') return (s) => TARGET + (s < 1.5 ? 15 : -15);
+    if (cand.enc === 'size+dir') {
+      return (s) => TARGET + (s < 1.5 ? (TOL + 3 + 27 * (s / 1.5)) : -(TOL + 3 + 27 * ((s - 1.5) / 1.5)));
+    }
+    if (cand.enc === 'size' || (cand.scalable && opts.scale)) return (s) => TARGET + TOL + 1 + 34 * (s / 3);
+    return () => TARGET + 15;
+  }
+
+  function currentPedal() {
+    if (script) {
+      const s = (performance.now() - script.t0) / 1000;
+      if (s < script.dur) return script.fn(s);
+      endScript(true);
+    }
+    return pedal;
+  }
+
+  function endScript(finished) {
+    if (!script) return;
+    const sc = script;
+    script = null;
+    if (sc.kind === 'preview') {
+      pedal = sc.restore;
+      if (finished) silence();   // a finished preview goes quiet instead of handing over to the selected sound
+    } else {
+      const s = clamp((performance.now() - sc.t0) / 1000, 0, sc.dur);
+      pedal = Math.round(sc.fn(finished ? sc.dur : s) * 2) / 2;   // keep the pedal where the drive left it
+    }
+    $('#pedal').value = String(pedal);
+    if (sc.card) sc.card.querySelector('.prog').style.width = '0';
+    updateButtons();
+  }
+
+  function startDrive() {
+    arm();
+    endScript(false);
+    script = { kind: 'drive', t0: performance.now(), dur: 10.5, fn: driveFn };
+    updateButtons();
+    tick();
+  }
+
+  function startPreview(cand) {
+    arm();
+    endScript(false);
+    const card = document.getElementById('cand-' + cand.id);
+    script = { kind: 'preview', cand, card, t0: performance.now(), dur: 3, fn: previewFn(cand), restore: pedal };
+    updateButtons();
+    tick();
+  }
+
+  function stopAll() {
+    endScript(false);
+    silence();
+  }
+
+  // ---------- UI ----------
+  function buildCards() {
+    const list = $('#cards');
+    for (const c of CANDS) {
+      const li = document.createElement('li');
+      li.className = 'card';
+      li.id = 'cand-' + c.id;
+      const rows = c.params.map(([k, v]) => '<dt>' + k + '</dt><dd>' + v + '</dd>').join('');
+      li.innerHTML =
+        '<div class="card-head">' +
+          '<span class="cid">' + c.id + '</span>' +
+          '<h3>' + c.name + '</h3>' +
+          '<span class="enc">' + ENC_LABEL[c.enc] + '</span>' +
+          '<span class="active-tag" hidden>Active</span>' +
+        '</div>' +
+        '<p class="char">' + c.char + '</p>' +
+        '<dl class="params">' + rows + '</dl>' +
+        '<div class="actions">' +
+          '<button class="btn b-sel" type="button" id="sel-' + c.id + '" aria-pressed="false">Select</button>' +
+          '<button class="btn prev" type="button" id="prev-' + c.id + '" aria-pressed="false">Preview 3 s</button>' +
+        '</div>' +
+        '<div class="prog" aria-hidden="true"></div>';
+      list.appendChild(li);
+      li.querySelector('.b-sel').addEventListener('click', () => {
+        selected = c;
+        arm();
+        updateCards();
+        tick();
+      });
+      li.querySelector('.prev').addEventListener('click', () => {
+        if (script && script.kind === 'preview' && script.cand === c) { endScript(false); silence(); return; }
+        startPreview(c);
+      });
+    }
+  }
+
+  function updateCards() {
+    for (const c of CANDS) {
+      const li = document.getElementById('cand-' + c.id);
+      const isSel = c === selected;
+      li.classList.toggle('sel', isSel);
+      li.querySelector('.active-tag').hidden = !isSel;
+      const sb = li.querySelector('.b-sel');
+      sb.textContent = isSel ? 'Selected' : 'Select';
+      sb.setAttribute('aria-pressed', String(isSel));
+    }
+    $('#roSound').textContent = selected.id + ' · ' + selected.name;
+  }
+
+  function updateButtons() {
+    const drv = $('#drive');
+    const driving = !!(script && script.kind === 'drive');
+    drv.textContent = driving ? 'Stop drive' : 'Auto drive';
+    drv.setAttribute('aria-pressed', String(driving));
+    for (const c of CANDS) {
+      const b = document.getElementById('prev-' + c.id);
+      const on = !!(script && script.kind === 'preview' && script.cand === c);
+      b.textContent = on ? 'Stop preview' : 'Preview 3 s';
+      b.setAttribute('aria-pressed', String(on));
+    }
+    const sc = script && script.kind === 'preview' ? script.cand : null;
+    $('#roSound').textContent = sc ? sc.id + ' · ' + sc.name + ' (preview)' : selected.id + ' · ' + selected.name;
+  }
+
+  function updateListen() {
+    $('#led').classList.toggle('armed', eng.armed);
+    $('#listenTxt').textContent = eng.armed
+      ? 'Listening. Error sound plays while the pedal is outside the band.'
+      : 'Sound off. Move the pedal or press a button to start.';
+  }
+
+  function announce() {
+    $('#live').textContent = bandState === 'in' ? 'In band' : (bandState === 'over' ? 'Out of band, too much pedal' : 'Out of band, too little pedal');
+  }
+
+  const fmtSigned = (v) => (v < 0 ? '−' : (v > 0 ? '+' : '±')) + Math.abs(v).toFixed(1);
+
+  let lastRig = '';
+  function renderRig(p) {
+    const err = p - TARGET;
+    const key = p.toFixed(1) + bandState;
+    if (key === lastRig) return;
+    lastRig = key;
+    $('#roPedal').textContent = p.toFixed(1) + ' %';
+    $('#roErr').textContent = fmtSigned(err);
+    const chip = $('#roState');
+    chip.dataset.s = bandState;
+    chip.textContent = bandState === 'in' ? 'In band' : (bandState === 'over' ? 'Over' : 'Under');
+    $('#track').dataset.s = bandState;
+    $('#fill').style.width = p + '%';
+    $('#knob').style.left = p + '%';
+  }
+
+  // ---------- trace ----------
+  const traceBuf = [];
+  let col = null, colAt = 0;
+  function readColors(nowMs) {
+    if (col && nowMs - colAt < 500) return col;
+    const cs = getComputedStyle(document.documentElement);
+    const v = (n) => cs.getPropertyValue(n).trim();
+    col = { ink: v('--ink'), ink3: v('--ink-3'), line: v('--line'), ok: v('--ok'), okSoft: v('--ok-soft'), warn: v('--warn'), accent: v('--accent'), mono: v('--f-mono') };
+    colAt = nowMs;
+    return col;
+  }
+
+  function drawTrace(nowMs) {
+    const cv = $('#trace');
+    const dpr = window.devicePixelRatio || 1;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) {
+      cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+    }
+    const c = readColors(nowMs);
+    const g = cv.getContext('2d');
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    const lane = 18, top = 8, bot = h - lane - 6;
+    const y = (p) => top + (1 - p / 100) * (bot - top);
+    const x = (ms) => w - ((nowMs - ms) / TRACE_MS) * w;
+
+    g.lineWidth = 1;
+    g.strokeStyle = c.line;
+    for (const v of [0, 25, 50, 75, 100]) { g.beginPath(); g.moveTo(0, Math.round(y(v)) + 0.5); g.lineTo(w, Math.round(y(v)) + 0.5); g.stroke(); }
+    g.fillStyle = c.okSoft;
+    g.fillRect(0, y(TARGET + TOL), w, y(TARGET - TOL) - y(TARGET + TOL));
+    g.strokeStyle = c.ok;
+    g.setLineDash([4, 4]);
+    g.beginPath(); g.moveTo(0, y(TARGET)); g.lineTo(w, y(TARGET)); g.stroke();
+    g.setLineDash([]);
+
+    g.lineWidth = 2;
+    g.lineJoin = 'round';
+    for (let i = 1; i < traceBuf.length; i++) {
+      const a = traceBuf[i - 1], b = traceBuf[i];
+      g.strokeStyle = b.out ? c.warn : c.ink;
+      g.beginPath(); g.moveTo(x(a.ms), y(a.p)); g.lineTo(x(b.ms), y(b.p)); g.stroke();
+    }
+
+    g.lineWidth = 1;
+    g.strokeStyle = c.line;
+    g.beginPath(); g.moveTo(0, h - lane - 0.5); g.lineTo(w, h - lane - 0.5); g.stroke();
+    g.strokeStyle = c.accent;
+    g.lineWidth = 1.5;
+    for (const m of marks) {
+      if (m > nowMs || m < nowMs - TRACE_MS) continue;
+      const xm = x(m);
+      g.beginPath(); g.moveTo(xm, h - lane + 4); g.lineTo(xm, h - 4); g.stroke();
+    }
+    g.fillStyle = c.ok;
+    for (const m of chimeMarks) {
+      if (m > nowMs || m < nowMs - TRACE_MS) continue;
+      g.beginPath(); g.arc(x(m), h - lane / 2, 4, 0, Math.PI * 2); g.fill();
+    }
+
+    g.fillStyle = c.ink3;
+    g.font = '10.5px ' + (c.mono || 'monospace');
+    g.textBaseline = 'middle';
+    g.fillText('100', 4, y(100) + 7);
+    g.fillText('60±5', 4, y(TARGET + TOL) - 7);
+    g.fillText('0', 4, y(0) - 7);
+  }
+
+  const reduceMotion = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : { matches: false };
+
+  function frame() {
+    const nowMs = performance.now();
+    const p = currentPedal();
+    if (script) $('#pedal').value = p.toFixed(1);
+    renderRig(p);
+    traceBuf.push({ ms: nowMs, p, out: bandState !== 'in' });
+    while (traceBuf.length && traceBuf[0].ms < nowMs - TRACE_MS - 250) traceBuf.shift();
+    drawTrace(nowMs);
+
+    let flash = false;
+    if (eng.armed && eng.gate) {
+      if (reduceMotion.matches) flash = true;
+      else for (let i = marks.length - 1; i >= 0 && i >= marks.length - 24; i--) { if (marks[i] <= nowMs && nowMs - marks[i] < 70) { flash = true; break; } }
+    }
+    $('#led').classList.toggle('on', flash);
+
+    if (script && script.kind === 'preview' && script.card) {
+      const frac = clamp((nowMs - script.t0) / (script.dur * 1000), 0, 1);
+      script.card.querySelector('.prog').style.width = (frac * 100).toFixed(1) + '%';
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- wiring ----------
+  function init() {
+    buildCards();
+    updateCards();
+    updateButtons();
+    updateListen();
+
+    const pedalIn = $('#pedal');
+    const grab = () => { if (script) endScript(false); arm(); };
+    pedalIn.addEventListener('pointerdown', grab);
+    pedalIn.addEventListener('keydown', (e) => { if (e.key.startsWith('Arrow') || e.key === 'Home' || e.key === 'End' || e.key.startsWith('Page')) grab(); });
+    pedalIn.addEventListener('input', () => {
+      if (script) endScript(false);
+      pedal = Number(pedalIn.value);
+      if (!eng.armed) arm();
+      tick();
+    });
+
+    const vol = $('#vol');
+    vol.addEventListener('input', () => {
+      $('#volOut').textContent = vol.value + ' %';
+      if (master) master.gain.setTargetAtTime(volGain(), ctx.currentTime, 0.02);
+    });
+
+    $('#stopAll').addEventListener('click', stopAll);
+    $('#drive').addEventListener('click', () => {
+      if (script && script.kind === 'drive') { endScript(false); return; }
+      startDrive();
+    });
+    $('#optScale').addEventListener('change', (e) => { opts.scale = e.target.checked; });
+    $('#optChime').addEventListener('change', (e) => {
+      opts.chime = e.target.checked;
+      if (!opts.chime && ctx) cancelChime(ctx.currentTime);
+    });
+
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stopAll(); });
+
+    setInterval(tick, TICK_MS);
+    requestAnimationFrame(frame);
+  }
+
+  init();
+})();
+</script>

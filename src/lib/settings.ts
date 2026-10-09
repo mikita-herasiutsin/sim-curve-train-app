@@ -169,3 +169,56 @@ export function initTheme(): () => void {
     }
   };
 }
+
+const AUDIO_ENABLED_KEY = "sct:audio_enabled";
+const AUDIO_VOLUME_KEY = "sct:audio_volume";
+export const DEFAULT_AUDIO_ENABLED = true;
+export const DEFAULT_AUDIO_VOLUME = 0.2;
+
+export function clampAudioVolume(volume: number): number {
+  if (Number.isNaN(volume) || !Number.isFinite(volume)) {
+    return DEFAULT_AUDIO_VOLUME;
+  }
+  return Math.max(0, Math.min(1, volume));
+}
+
+export function loadAudioEnabled(): boolean {
+  try {
+    if (typeof localStorage === "undefined") return DEFAULT_AUDIO_ENABLED;
+    const stored = localStorage.getItem(AUDIO_ENABLED_KEY);
+    return stored !== null ? stored === "true" : DEFAULT_AUDIO_ENABLED;
+  } catch {
+    return DEFAULT_AUDIO_ENABLED;
+  }
+}
+
+export function saveAudioEnabled(enabled: boolean): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(AUDIO_ENABLED_KEY, String(enabled));
+  } catch {
+    // Ignore error
+  }
+}
+
+export function loadAudioVolume(): number {
+  try {
+    if (typeof localStorage === "undefined") return DEFAULT_AUDIO_VOLUME;
+    const stored = localStorage.getItem(AUDIO_VOLUME_KEY);
+    if (stored === null) return DEFAULT_AUDIO_VOLUME;
+    const parsed = Number(stored);
+    return clampAudioVolume(parsed);
+  } catch {
+    return DEFAULT_AUDIO_VOLUME;
+  }
+}
+
+export function saveAudioVolume(volume: number): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const clamped = clampAudioVolume(volume);
+    localStorage.setItem(AUDIO_VOLUME_KEY, String(clamped));
+  } catch {
+    // Ignore error
+  }
+}

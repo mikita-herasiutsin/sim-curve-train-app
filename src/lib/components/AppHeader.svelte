@@ -3,6 +3,7 @@
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
   import { formatVersion, getAppInfo, type AppInfo } from "$lib/appInfo";
+  import AudioControls from "$lib/components/AudioControls.svelte";
   import {
     loadTheme,
     onThemeChange,
@@ -97,6 +98,7 @@
         </svg>
       {/if}
     </button>
+    <AudioControls />
     {#if info}
       <span class="version" data-testid="app-version">{formatVersion(info.version)}</span>
     {:else if failed}

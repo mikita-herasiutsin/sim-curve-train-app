@@ -174,6 +174,8 @@ Weights depend on the drill type. Grades: S ≥ 95, A ≥ 85, B ≥ 70, C ≥ 55
   - A pitch tone follows the signed error: above target sounds higher, below sounds lower.
   - A short "lock" chime plays once you stay inside the band.
 - **Trace drills:** a soft tone while you are out of the band, and silence while you are in it.
+
+> **Superseded (2026-10-09):** the pitch-following tone and the lock chime described here were replaced by parking-sensor beeps; see D-20 and [2026-10-08-error-sound.md](2026-10-08-error-sound.md).
 - **Implementation:** `cpal`/`rodio` on the Rust side, so audio does not add WebView latency.
 - **"Blind" variant** (as in SIXTYCM/BrakeMaster): the graph is hidden and only audio feedback plays. It is a good test of muscle memory.
 

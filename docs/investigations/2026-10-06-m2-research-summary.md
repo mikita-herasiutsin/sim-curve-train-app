@@ -40,6 +40,8 @@
 - **Pitch from the error:** use a musical (exponential) mapping, around one octave per 20% error, with silence inside the tolerance band ("bandwidth feedback"). That fits the motor-learning research.
 - Warn about Bluetooth headsets: they typically add 100–200 ms.
 
+> **Superseded (2026-10-09):** the pitch-following tone and the lock chime described here were replaced by parking-sensor beeps; see D-20 and [2026-10-08-error-sound.md](2026-10-08-error-sound.md).
+
 ### .ibt extraction (SCT-044)
 
 - **Reader:** pyirsdk (MIT) can read `.ibt` files offline. A NumPy-based reader is much faster if speed matters. Driver inputs (`Brake`, `Throttle`) are 0–1 at the 60 Hz base rate.

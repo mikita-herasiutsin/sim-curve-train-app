@@ -16,6 +16,7 @@
   } from "$lib/drill";
   import { pedalStream } from "$lib/pedals/stream";
   import { startRealSource, type SourceStatus } from "$lib/pedals/realSource";
+  import AudioControls from "$lib/components/AudioControls.svelte";
   import PedalBars from "$lib/components/PedalBars.svelte";
   import PedalGraph from "$lib/components/PedalGraph.svelte";
   import type { TargetBand } from "$lib/pedals/graphDraw";
@@ -186,11 +187,14 @@
       <a href={resolve("/")} class="home-link">← Home</a>
       <h1>Practice Drills</h1>
     </div>
-    {#if sourceStatus.kind === "live"}
-      <span class="source-status">Pedals Active: {sourceStatus.device.name}</span>
-    {:else}
-      <span class="source-status error">Pedals disconnected</span>
-    {/if}
+    <div class="header-right">
+      <AudioControls />
+      {#if sourceStatus.kind === "live"}
+        <span class="source-status">Pedals Active: {sourceStatus.device.name}</span>
+      {:else}
+        <span class="source-status error">Pedals disconnected</span>
+      {/if}
+    </div>
   </header>
 
   <main class="content">
@@ -424,6 +428,12 @@
     padding: 0.75rem 1.5rem;
     background: var(--surface);
     border-bottom: 1px solid var(--border);
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
   }
 
   .brand {

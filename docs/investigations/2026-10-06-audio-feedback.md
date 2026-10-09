@@ -1,6 +1,8 @@
 # Audio feedback from Rust on Windows (SCT-038 research)
 
 Date: 2026-10-06
+
+> **Superseded (2026-10-09):** the pitch-following tone and the lock chime described here were replaced by parking-sensor beeps; see D-20 and [2026-10-08-error-sound.md](2026-10-08-error-sound.md).
 > **Editor's note (Claude):** this document was drafted by Gemini from web research and reviewed by Claude. Crate versions and licences were checked with `cargo info` on 2026-10-06 and are correct: cpal 0.18.2 (Apache-2.0), rodio 0.22.2 and ringbuf 0.5.2 (MIT OR Apache-2.0). All are compatible with GPL-3.0-only. The claim that rodio adds a "default 100 ms buffer" wasn't verified; treat it as Unverified until checked against rodio's source. The latency figures for WASAPI shared mode are typical values, not measurements on this app.
 
 

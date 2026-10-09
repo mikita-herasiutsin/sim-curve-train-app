@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-audio-set-enabled"
+description = "Enables the audio_set_enabled command without any pre-configured scope."
+commands.allow = ["audio_set_enabled"]
+
+[[permission]]
+identifier = "deny-audio-set-enabled"
+description = "Denies the audio_set_enabled command without any pre-configured scope."
+commands.deny = ["audio_set_enabled"]

@@ -4,6 +4,13 @@ import {
   saveGraphWindow,
   clampGraphWindow,
   DEFAULT_GRAPH_WINDOW_S,
+  loadAudioEnabled,
+  saveAudioEnabled,
+  loadAudioVolume,
+  saveAudioVolume,
+  clampAudioVolume,
+  DEFAULT_AUDIO_ENABLED,
+  DEFAULT_AUDIO_VOLUME,
   loadTheme,
   saveTheme,
   getSystemTheme,
@@ -202,6 +209,104 @@ describe("settings", () => {
       expect(removeListenerSpy).toHaveBeenCalledWith("change", expect.any(Function));
 
       window.matchMedia = original;
+    });
+  });
+
+  describe("clampAudioVolume", () => {
+    it("clamps values between 0 and 1 and handles non-finite", () => {
+      expect(clampAudioVolume(-0.5)).toBe(0);
+      expect(clampAudioVolume(0)).toBe(0);
+      expect(clampAudioVolume(0.5)).toBe(0.5);
+      expect(clampAudioVolume(1)).toBe(1);
+      expect(clampAudioVolume(1.5)).toBe(1);
+      expect(clampAudioVolume(NaN)).toBe(DEFAULT_AUDIO_VOLUME);
+      expect(clampAudioVolume(Infinity)).toBe(DEFAULT_AUDIO_VOLUME);
+      expect(clampAudioVolume(-Infinity)).toBe(DEFAULT_AUDIO_VOLUME);
+    });
+  });
+
+  describe("loadAudioEnabled & saveAudioEnabled", () => {
+    it("defaults to true when nothing is in localStorage", () => {
+      expect(loadAudioEnabled()).toBe(DEFAULT_AUDIO_ENABLED);
+    });
+
+    it("saves and loads audio enabled state", () => {
+      saveAudioEnabled(false);
+      expect(loadAudioEnabled()).toBe(false);
+
+      saveAudioEnabled(true);
+      expect(loadAudioEnabled()).toBe(true);
+    });
+
+    it("handles corrupt localStorage values safely", () => {
+      localStorage.setItem("sct:audio_enabled", "invalid-value");
+      expect(loadAudioEnabled()).toBe(false); // only "true" parses to true
+    });
+
+    it("handles localStorage exceptions gracefully", () => {
+      const getSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("SecurityError");
+      });
+      const setSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new Error("QuotaExceededError");
+      });
+
+      expect(() => saveAudioEnabled(false)).not.toThrow();
+      expect(loadAudioEnabled()).toBe(DEFAULT_AUDIO_ENABLED);
+
+      getSpy.mockRestore();
+      setSpy.mockRestore();
+    });
+  });
+
+  describe("loadAudioVolume & saveAudioVolume", () => {
+    it("defaults to 0.2 when nothing is in localStorage", () => {
+      expect(loadAudioVolume()).toBe(DEFAULT_AUDIO_VOLUME);
+    });
+
+    it("saves and loads a valid volume value", () => {
+      saveAudioVolume(0.7);
+      expect(loadAudioVolume()).toBe(0.7);
+    });
+
+    it("clamps values when saved and loaded", () => {
+      saveAudioVolume(-0.3);
+      expect(loadAudioVolume()).toBe(0);
+
+      saveAudioVolume(1.8);
+      expect(loadAudioVolume()).toBe(1);
+
+      localStorage.setItem("sct:audio_volume", "1.5");
+      expect(loadAudioVolume()).toBe(1);
+
+      localStorage.setItem("sct:audio_volume", "-0.5");
+      expect(loadAudioVolume()).toBe(0);
+    });
+
+    it("handles NaN safely on save and load", () => {
+      saveAudioVolume(NaN);
+      expect(loadAudioVolume()).toBe(DEFAULT_AUDIO_VOLUME);
+
+      localStorage.setItem("sct:audio_volume", "NaN");
+      expect(loadAudioVolume()).toBe(DEFAULT_AUDIO_VOLUME);
+
+      localStorage.setItem("sct:audio_volume", "not-a-number");
+      expect(loadAudioVolume()).toBe(DEFAULT_AUDIO_VOLUME);
+    });
+
+    it("handles localStorage exceptions gracefully", () => {
+      const getSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("SecurityError");
+      });
+      const setSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new Error("QuotaExceededError");
+      });
+
+      expect(() => saveAudioVolume(0.5)).not.toThrow();
+      expect(loadAudioVolume()).toBe(DEFAULT_AUDIO_VOLUME);
+
+      getSpy.mockRestore();
+      setSpy.mockRestore();
     });
   });
 });

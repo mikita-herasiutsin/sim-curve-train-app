@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::audio::AudioFeedback;
+use sct_core::audio_map::ToneTracker;
 use sct_core::axis_detect::{AxisDetector, Detection};
 use sct_core::calibration::RangeCapture;
 use sct_core::device::{DeviceInfo, DevicesSnapshot, usb_ids_from_guid};
@@ -88,10 +90,16 @@ struct ActiveDrill {
     profile: DeviceProfile,
     /// The UI already got the terminal `SetFinished`.
     finished: bool,
+    /// Audio feedback output; `None` when the app runs without it (and in tests).
+    audio: Option<AudioFeedback>,
+    tone: ToneTracker,
 }
 
 impl Drop for ActiveDrill {
     fn drop(&mut self) {
+        if let Some(audio) = &self.audio {
+            audio.set_pulse_rate(0.0);
+        }
         if !self.finished {
             let summary = self.run.abort();
             let _ = self.channel.send(DrillEvent::SetFinished { summary });
@@ -117,11 +125,17 @@ pub struct InputService {
     /// Saved device profiles; `None` if the database couldn't be opened.
     store: Arc<Mutex<Option<ProfileStore>>>,
     active: Arc<Mutex<ActiveStream>>,
+    /// Audio feedback handed to each drill.
+    audio: Option<AudioFeedback>,
 }
 
 impl InputService {
     /// Spawns the input thread. Failures are reported through the snapshot's `error`.
-    pub fn spawn(app: AppHandle, store: Option<ProfileStore>) -> Self {
+    pub fn spawn(
+        app: AppHandle,
+        store: Option<ProfileStore>,
+        audio: Option<AudioFeedback>,
+    ) -> Self {
         let (commands, receiver) = mpsc::channel();
         let service = Self {
             snapshot: Arc::default(),
@@ -129,6 +143,7 @@ impl InputService {
             commands,
             store: Arc::new(Mutex::new(store)),
             active: Arc::default(),
+            audio,
         };
         let shared = service.clone();
         let spawned = thread::Builder::new()
@@ -398,6 +413,16 @@ impl Stream {
         for event in drill.run.push(ValueSample::new(sample.t_us, value)) {
             let _ = drill.channel.send(event);
         }
+        if let Some(audio) = &drill.audio {
+            // Beeps only while a rep is active: silent in the countdown and the rest pause.
+            let target = matches!(drill.run.phase(), Phase::Active { .. })
+                .then(|| drill.run.target_at(sample.t_us))
+                .flatten();
+            let rate = drill
+                .tone
+                .step(target, value, drill.run.drill().tolerance_fraction());
+            audio.set_pulse_rate(rate);
+        }
         if matches!(drill.run.phase(), Phase::Finished) {
             // The engine sent `SetFinished` itself.
             drill.finished = true;
@@ -449,6 +474,7 @@ fn start_drill(
     t_us: u64,
     drill: Drill,
     channel: Channel<DrillEvent>,
+    audio: Option<AudioFeedback>,
     reply: &Sender<Result<(), String>>,
 ) {
     let (stream, profile) = match check_start(stream, profile, drill.pedal) {
@@ -471,6 +497,8 @@ fn start_drill(
         channel,
         profile,
         finished: false,
+        audio,
+        tone: ToneTracker::default(),
     });
 }
 
@@ -524,6 +552,7 @@ fn drain_commands(
                     t_us,
                     drill,
                     channel,
+                    service.audio.clone(),
                     &reply,
                 );
             }
@@ -681,9 +710,6 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
             _ => Vec::new(),
         }
     };
-    if let Some(drill) = &stream.active_drill {
-        send_audio_feedback(drill, &frames);
-    }
     let batch = SampleBatch {
         samples: std::mem::take(&mut stream.pending),
         frames,
@@ -693,35 +719,6 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
         },
     };
     stream.channel.send(batch).is_ok()
-}
-
-/// Flipped on by SCT-038 once the audio hook does something.
-const AUDIO_FEEDBACK_ENABLED: bool = false;
-
-/// Passes the signed error and in-band flag of each frame to the audio hook.
-fn send_audio_feedback(drill: &ActiveDrill, frames: &[PedalFrame]) {
-    // TODO(SCT-038): the hook is a stub, so compute nothing until audio is wired.
-    if !AUDIO_FEEDBACK_ENABLED {
-        return;
-    }
-    let tolerance = drill.run.drill().tolerance_fraction();
-    let pedal = drill.run.drill().pedal;
-    let audio_data: Vec<(f32, bool)> = frames
-        .iter()
-        .filter_map(|frame| {
-            let err = pedal_value(frame, pedal) - drill.run.target_at(frame.t_us)?;
-            Some((err, err.abs() <= tolerance))
-        })
-        .collect();
-    if !audio_data.is_empty() {
-        audio_feedback_hook(&audio_data);
-    }
-}
-
-/// TODO(SCT-038): Audio feedback hook.
-/// Called with the signed error and in-band flag for each sample batch during a drill.
-fn audio_feedback_hook(_samples: &[(f32, bool)]) {
-    // Intentionally blank for SCT-038
 }
 
 /// Opens a joystick unless it's already open. Returns whether the list changed.
@@ -846,6 +843,7 @@ mod tests {
             0,
             drill(pedal),
             channel,
+            None,
             &reply,
         );
         (log, answer.recv().unwrap())
@@ -902,7 +900,7 @@ mod tests {
     fn missing_stream_or_profile_is_an_error() {
         let (channel, log) = event_channel();
         let (reply, answer) = mpsc::channel();
-        start_drill(None, None, 0, drill(Pedal::Brake), channel, &reply);
+        start_drill(None, None, 0, drill(Pedal::Brake), channel, None, &reply);
         assert!(answer.recv().unwrap().is_err());
 
         let mut stream = stream();
@@ -913,6 +911,7 @@ mod tests {
             0,
             drill(Pedal::Brake),
             channel,
+            None,
             &reply,
         );
         assert!(answer.recv().unwrap().is_err());
@@ -932,9 +931,154 @@ mod tests {
             0,
             drill(Pedal::Brake),
             channel,
+            None,
             &reply,
         );
         assert!(stream.active_drill.is_none());
         assert!(log.lock().unwrap().is_empty());
+    }
+
+    /// A brake sample at `fraction` of full travel on axis 0.
+    fn sample_at(t_us: u64, fraction: f32) -> RawSample {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the value is within the i16 range"
+        )]
+        let raw = (f32::from(i16::MIN) + fraction * 65535.0).round() as i16;
+        let mut axes = [0; MAX_AXES];
+        axes[0] = raw;
+        RawSample {
+            t_us,
+            axis_count: 1,
+            axes,
+        }
+    }
+
+    /// Starts a brake drill (1 s countdown, then a 1 s hold at 70 % ±5 %) with a detached audio
+    /// output.
+    fn start_with_audio(stream: &mut Stream) -> AudioFeedback {
+        let audio = AudioFeedback::detached();
+        let (channel, _) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        start_drill(
+            Some(stream),
+            Some(brake_profile()),
+            0,
+            drill(Pedal::Brake),
+            channel,
+            Some(audio.clone()),
+            &reply,
+        );
+        assert_eq!(answer.recv().unwrap(), Ok(()));
+        audio
+    }
+
+    /// Feeds one sample per millisecond over `[from_ms, to_ms)` at `fraction` and returns the
+    /// pulse rate after the last one.
+    fn feed(
+        stream: &mut Stream,
+        audio: &AudioFeedback,
+        from_ms: u64,
+        to_ms: u64,
+        fraction: f32,
+    ) -> f32 {
+        for ms in from_ms..to_ms {
+            stream.step_drill(&sample_at(ms * 1000, fraction));
+        }
+        audio.pulse_rate()
+    }
+
+    #[test]
+    fn beeps_while_off_target_and_silent_in_band() {
+        let mut stream = stream();
+        let audio = start_with_audio(&mut stream);
+        // Active rep, too light: beeping.
+        assert!(feed(&mut stream, &audio, 1_001, 1_010, 0.2) > 0.0);
+        // Held in the band: silent.
+        assert_eq!(feed(&mut stream, &audio, 1_010, 1_300, 0.70), 0.0);
+        // Leaving the band: beeping again on the first sample.
+        assert!(feed(&mut stream, &audio, 1_300, 1_301, 0.2) > 0.0);
+    }
+
+    #[test]
+    fn beeps_faster_the_further_off() {
+        let mut stream = stream();
+        let audio = start_with_audio(&mut stream);
+        let near = feed(&mut stream, &audio, 1_001, 1_010, 0.62);
+        let far = feed(&mut stream, &audio, 1_010, 1_020, 0.20);
+        assert!(near >= 3.0 && far > near, "near {near}, far {far}");
+        assert!(far <= 11.0);
+    }
+
+    #[test]
+    fn trace_scoring_phase_is_silent() {
+        let mut stream = stream();
+        let audio = AudioFeedback::detached();
+        let (channel, _) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        // A 600 ms trace after a 1 s countdown: active from 1.0 s to 1.6 s, then scoring until
+        // 1.9 s (TRACE_LAG_MARGIN_MS after the active window).
+        let trace = Drill {
+            id: "t".into(),
+            name: "T".into(),
+            pedal: Pedal::Brake,
+            reps: 1,
+            lead_in_ms: 1000,
+            tolerance: 6.0,
+            kind: DrillKind::Trace {
+                points: vec![(0, 0.0), (150, 90.0), (600, 0.0)],
+            },
+        };
+        start_drill(
+            Some(&mut stream),
+            Some(brake_profile()),
+            0,
+            trace,
+            channel,
+            Some(audio.clone()),
+            &reply,
+        );
+        assert_eq!(answer.recv().unwrap(), Ok(()));
+        // Off target during the active window: beeping.
+        assert!(feed(&mut stream, &audio, 1_001, 1_500, 0.5) > 0.0);
+        // Off target in the scoring phase, where the target is no longer shown: silent.
+        assert_eq!(feed(&mut stream, &audio, 1_500, 1_700, 0.5), 0.0);
+        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
+        assert!(matches!(phase, Some(Phase::Scoring { .. })), "{phase:?}");
+    }
+
+    #[test]
+    fn no_beeps_outside_the_active_phase() {
+        let mut stream = stream();
+        let audio = start_with_audio(&mut stream);
+        // Countdown: far off target, still silent.
+        assert_eq!(feed(&mut stream, &audio, 100, 900, 0.2), 0.0);
+        assert_eq!(feed(&mut stream, &audio, 900, 1_000, 0.70), 0.0);
+    }
+
+    #[test]
+    fn every_drill_end_silences_the_beeps() {
+        // Abort (finish_drill).
+        let mut stream = stream();
+        let audio = start_with_audio(&mut stream);
+        assert!(feed(&mut stream, &audio, 1_001, 1_100, 0.2) > 0.0);
+        stream.finish_drill();
+        assert_eq!(audio.pulse_rate(), 0.0);
+
+        // Drop (replaced by a new drill, or the stream ending).
+        let mut stream = Stream::new(1, 1, Channel::new(|_| Ok(())));
+        let audio = start_with_audio(&mut stream);
+        assert!(feed(&mut stream, &audio, 1_001, 1_100, 0.2) > 0.0);
+        stream.active_drill = None;
+        assert_eq!(audio.pulse_rate(), 0.0);
+
+        // Finish: run the whole drill off target (1 s countdown, 1 s hold).
+        let mut stream = Stream::new(1, 1, Channel::new(|_| Ok(())));
+        let audio = start_with_audio(&mut stream);
+        for ms in 1_001..10_000 {
+            stream.step_drill(&sample_at(ms * 1000, 0.2));
+        }
+        assert!(stream.active_drill.is_none(), "drill should have finished");
+        assert_eq!(audio.pulse_rate(), 0.0);
     }
 }

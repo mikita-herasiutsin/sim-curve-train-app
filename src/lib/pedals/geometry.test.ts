@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { getBarFillHeight, getPercentLabel, formatPercent, getGraphX, getGraphY } from "./geometry";
+import {
+  getBarFillHeight,
+  getPercentLabel,
+  formatPercent,
+  formatPercentValue,
+  getGraphX,
+  getGraphY,
+} from "./geometry";
 
 describe("geometry helpers", () => {
   describe("getBarFillHeight", () => {
@@ -25,6 +32,23 @@ describe("geometry helpers", () => {
       expect(formatPercent(0.72)).toBe("72%");
       expect(formatPercent(0)).toBe("0%");
       expect(formatPercent(1)).toBe("100%");
+    });
+  });
+
+  describe("formatPercentValue", () => {
+    it("formats percentage without % using specified decimals", () => {
+      expect(formatPercentValue(0.35, 1)).toBe("35.0");
+      expect(formatPercentValue(0.35, 0)).toBe("35");
+      expect(formatPercentValue(0.35)).toBe("35");
+      expect(formatPercentValue(0.724, 1)).toBe("72.4");
+      expect(formatPercentValue(0.726, 1)).toBe("72.6");
+    });
+
+    it("clamps values outside 0..1", () => {
+      expect(formatPercentValue(-0.1, 0)).toBe("0");
+      expect(formatPercentValue(-0.1, 1)).toBe("0.0");
+      expect(formatPercentValue(1.5, 0)).toBe("100");
+      expect(formatPercentValue(1.5, 1)).toBe("100.0");
     });
   });
 

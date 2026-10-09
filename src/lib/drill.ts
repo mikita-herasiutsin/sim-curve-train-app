@@ -8,6 +8,8 @@ export interface BaseDrill {
   leadInMs: number;
   /** Band half-width in percentage points; omitted means the D-17 default. */
   tolerance?: number;
+  /** Decimal places (0 or 1) when showing percentages; omitted means 0. */
+  decimals?: number;
 }
 
 export interface HoldDrill extends BaseDrill {

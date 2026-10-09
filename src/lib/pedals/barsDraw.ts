@@ -1,4 +1,4 @@
-import { getBarFillHeight, getPercentLabel } from "./geometry";
+import { formatPercentValue, getBarFillHeight } from "./geometry";
 import type { AppThemeColors } from "./theme";
 
 export interface BarColumnLayout {
@@ -89,6 +89,7 @@ export function drawPedalBars(
   targetPedal?: "brake" | "throttle" | "clutch",
   targetVal?: number | null,
   targetTolerance?: number | null,
+  decimals = 0,
 ): void {
   ctx.clearRect(0, 0, width, height);
 
@@ -127,8 +128,8 @@ export function drawPedalBars(
 
     if (hasTarget) {
       // Draw two numbers side by side: Target -> Current
-      const tLabel = getPercentLabel(targetVal!);
-      const cLabel = getPercentLabel(val);
+      const tLabel = formatPercentValue(targetVal!, decimals);
+      const cLabel = formatPercentValue(val, decimals);
       const inBand = targetTolerance != null && Math.abs(val - targetVal!) <= targetTolerance;
 
       const valColor = inBand ? theme.accent : color;
@@ -145,7 +146,7 @@ export function drawPedalBars(
       ctx.textAlign = "center"; // reset for label below
     } else {
       ctx.fillStyle = color;
-      ctx.fillText(`${getPercentLabel(val)}%`, centerX, col.percentY);
+      ctx.fillText(`${formatPercentValue(val, decimals)}%`, centerX, col.percentY);
     }
 
     // 2. Label

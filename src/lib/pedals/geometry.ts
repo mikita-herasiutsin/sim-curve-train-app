@@ -1,8 +1,15 @@
 /**
+ * Clamps a number to the normalized 0..1 range.
+ */
+export function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+/**
  * Computes the pixel fill height of a pedal bar from a normalized 0..1 value.
  */
 export function getBarFillHeight(value: number, maxBarHeight: number): number {
-  const clamped = Math.max(0, Math.min(1, value));
+  const clamped = clamp01(value);
   return clamped * maxBarHeight;
 }
 
@@ -10,7 +17,7 @@ export function getBarFillHeight(value: number, maxBarHeight: number): number {
  * Returns the rounded integer percentage (0–100) for a normalized 0..1 value.
  */
 export function getPercentLabel(value: number): number {
-  const clamped = Math.max(0, Math.min(1, value));
+  const clamped = clamp01(value);
   return Math.round(clamped * 100);
 }
 
@@ -19,6 +26,13 @@ export function getPercentLabel(value: number): number {
  */
 export function formatPercent(value: number): string {
   return `${getPercentLabel(value)}%`;
+}
+
+/**
+ * Formats a normalized 0..1 value as a percentage number string without '%' (e.g. "72" or "35.0").
+ */
+export function formatPercentValue(value: number, decimals = 0): string {
+  return (clamp01(value) * 100).toFixed(decimals);
 }
 
 /**

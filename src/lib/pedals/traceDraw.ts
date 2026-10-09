@@ -3,47 +3,141 @@ import { getGraphY } from "./geometry";
 import { computeHorizontalGridLines } from "./graphDraw";
 import type { AppThemeColors } from "./theme";
 
-/** Target fraction (0..1) at `tMs` ms into the rep. Points are [ms, percent 0..100].
- *  Linear between points; before the first point returns the first value, after the last the last value;
- *  empty -> 0; non-finite tMs -> first value. Same rules as Rust TraceCurve::value_at. */
-export function traceTargetAt(points: [number, number][], tMs: number): number {
-  if (points.length === 0) {
-    return 0;
-  }
-  if (points.length === 1) {
-    return points[0][1] / 100;
-  }
+/** Timing window (ms) of the band, mirroring RAMP_WINDOW_MS in crates/core/src/trace_scoring.rs. */
+export const TRACE_RAMP_WINDOW_MS = 150;
 
-  const firstT = points[0][0];
-  if (!Number.isFinite(tMs) || tMs <= firstT) {
-    return points[0][1] / 100;
-  }
+export class TraceCurve {
+  readonly points: [number, number][];
+  readonly durationMs: number;
+  private readonly m: number[];
+  private readonly minArr: Float64Array;
+  private readonly maxArr: Float64Array;
 
-  const lastT = points[points.length - 1][0];
-  if (tMs >= lastT) {
-    return points[points.length - 1][1] / 100;
-  }
+  constructor(points: [number, number][]) {
+    this.points = points.slice();
+    this.durationMs = traceDurationMs(this.points);
 
-  let low = 0;
-  let high = points.length;
-  while (low < high) {
-    const mid = (low + high) >>> 1;
-    if (points[mid][0] <= tMs) {
-      low = mid + 1;
-    } else {
-      high = mid;
+    const n = this.points.length;
+    if (n <= 1) {
+      this.m = [];
+      this.minArr = new Float64Array(0);
+      this.maxArr = new Float64Array(0);
+      return;
+    }
+
+    const d = new Float64Array(n - 1);
+    for (let k = 0; k < n - 1; k++) {
+      const dt = this.points[k + 1][0] - this.points[k][0];
+      d[k] = dt === 0 ? 0 : (this.points[k + 1][1] - this.points[k][1]) / dt;
+    }
+
+    const m = new Float64Array(n);
+    m[0] = 0;
+    m[n - 1] = 0;
+    for (let k = 1; k < n - 1; k++) {
+      if (d[k - 1] * d[k] <= 0) {
+        m[k] = 0;
+      } else {
+        m[k] = (d[k - 1] + d[k]) / 2;
+      }
+    }
+
+    for (let k = 0; k < n - 1; k++) {
+      if (d[k] === 0) {
+        m[k] = 0;
+        m[k + 1] = 0;
+        continue;
+      }
+      const a = m[k] / d[k];
+      const b = m[k + 1] / d[k];
+      if (a * a + b * b > 9) {
+        const tau = 3 / Math.hypot(a, b);
+        m[k] = tau * a * d[k];
+        m[k + 1] = tau * b * d[k];
+      }
+    }
+    this.m = Array.from(m);
+
+    // Envelope on a 1 ms grid over [-window, duration + window]. Further out every value in the
+    // window is the clamped first or last value, so envelopeAt falls back to valueAt there.
+    const window = TRACE_RAMP_WINDOW_MS;
+    const len = Math.max(0, Math.ceil(this.durationMs)) + 2 * window + 1;
+    const grid = new Float64Array(len);
+    for (let i = 0; i < len; i++) {
+      grid[i] = this.valueAt(i - window);
+    }
+    this.minArr = new Float64Array(len);
+    this.maxArr = new Float64Array(len);
+    for (let i = 0; i < len; i++) {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let j = Math.max(0, i - window); j <= Math.min(len - 1, i + window); j++) {
+        lo = Math.min(lo, grid[j]);
+        hi = Math.max(hi, grid[j]);
+      }
+      this.minArr[i] = lo;
+      this.maxArr[i] = hi;
     }
   }
-  const idx = low;
-  const [t0, v0] = points[idx - 1];
-  const [t1, v1] = points[idx];
-  const dt = t1 - t0;
-  if (dt <= 0) {
-    return v0 / 100;
+
+  /** Target fraction 0..1 at tMs (monotone cubic, see below). */
+  valueAt(tMs: number): number {
+    const n = this.points.length;
+    if (n === 0) {
+      return 0;
+    }
+    if (n === 1) {
+      return this.points[0][1] / 100;
+    }
+    if (!Number.isFinite(tMs) || tMs <= this.points[0][0]) {
+      return this.points[0][1] / 100;
+    }
+    if (tMs >= this.points[n - 1][0]) {
+      return this.points[n - 1][1] / 100;
+    }
+
+    let low = 0;
+    let high = n;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (this.points[mid][0] <= tMs) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    const k = low - 1;
+    const [t0, y0] = this.points[k];
+    const [t1, y1] = this.points[k + 1];
+    const h = t1 - t0;
+    if (h <= 0) {
+      return y0 / 100;
+    }
+    const mk = this.m[k];
+    const mk1 = this.m[k + 1];
+    if (y0 === y1 && mk === 0 && mk1 === 0) {
+      return y0 / 100;
+    }
+    const s = (tMs - t0) / h;
+    const s2 = s * s;
+    const s3 = s2 * s;
+    const v =
+      (2 * s3 - 3 * s2 + 1) * y0 +
+      (s3 - 2 * s2 + s) * h * mk +
+      (-2 * s3 + 3 * s2) * y1 +
+      (s3 - s2) * h * mk1;
+    return v / 100;
   }
-  const factor = (tMs - t0) / dt;
-  const val = v0 + factor * (v1 - v0);
-  return val / 100;
+
+  /** [min, max] of valueAt over integer ms offsets -window..+window around round(tMs); fractions. */
+  envelopeAt(tMs: number): [number, number] {
+    const i = Math.round(tMs) + TRACE_RAMP_WINDOW_MS;
+    if (!(i >= 0 && i < this.minArr.length)) {
+      const v = this.valueAt(tMs);
+      return [v, v];
+    }
+    return [this.minArr[i], this.maxArr[i]];
+  }
 }
 
 /** Rep duration in ms: time of the last point, 0 when empty. */
@@ -52,23 +146,28 @@ export function traceDurationMs(points: [number, number][]): number {
   return points[points.length - 1][0];
 }
 
-/** X pixel for rep time tMs on a plot spanning [0, durationMs] across [padLeft, width - padRight]. Not clamped. */
+/** The approach second before the rep starts. */
+export const GO_LEAD_MS = 1000;
+
+/** X pixel for rep time tMs on a plot spanning [startMs, durationMs] across [padLeft, width - padRight]. Not clamped. */
 export function traceX(
   tMs: number,
   durationMs: number,
   width: number,
   padLeft: number,
   padRight: number,
+  startMs = 0,
 ): number {
   const usableW = width - padLeft - padRight;
-  if (durationMs <= 0 || usableW <= 0) {
+  const totalDuration = durationMs - startMs;
+  if (totalDuration <= 0 || usableW <= 0) {
     return padLeft;
   }
-  return padLeft + (tMs / durationMs) * usableW;
+  return padLeft + ((tMs - startMs) / totalDuration) * usableW;
 }
 
 export interface TraceViewState {
-  points: [number, number][];
+  curve: TraceCurve;
   pedal: "brake" | "throttle";
   tolerance: number; // fraction 0..1
   /** Rep time of the playhead in ms, or null to hide it (idle, countdown of the first rep). */
@@ -122,10 +221,21 @@ export function drawTrace(
     ctx.fillText(line.label, 8, line.fraction === 1 ? line.y + 9 : line.y - 7);
   }
 
-  const durationMs = traceDurationMs(state.points);
+  const durationMs = state.curve.durationMs;
 
-  // Vertical grid lines every 500 ms labelled in seconds ("0.5 s")
+  // Vertical grid lines and rep start mark
   if (durationMs > 0 && width > 0) {
+    // A thin solid vertical line in theme.textMuted at t = 0 marks where the rep starts
+    const x0 = traceX(0, durationMs, width, 0, 0, -GO_LEAD_MS);
+    ctx.strokeStyle = theme.textMuted;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(x0, paddingTop);
+    ctx.lineTo(x0, height - paddingBottom);
+    ctx.stroke();
+
+    // Vertical grid lines every 500 ms from 0 (labels "0.5 s" etc. as today)
     ctx.strokeStyle = theme.border;
     ctx.setLineDash([4, 4]);
     ctx.textAlign = "center";
@@ -133,7 +243,7 @@ export function drawTrace(
     ctx.fillStyle = theme.textMuted;
 
     for (let tMs = 500; tMs <= durationMs; tMs += 500) {
-      const x = traceX(tMs, durationMs, width, 0, 0);
+      const x = traceX(tMs, durationMs, width, 0, 0, -GO_LEAD_MS);
       if (x < 0 || x > width) continue;
       ctx.beginPath();
       ctx.moveTo(x, paddingTop);
@@ -148,15 +258,18 @@ export function drawTrace(
   }
 
   // Tolerance band as a filled polygon
-  // Sample the curve at every point time plus every 10 ms in between so that clamping at 0 and 1 is drawn correctly
-  if (state.points.length >= 2 && durationMs > 0) {
+  // Band polygon: upper min(1, hi + tolerance), lower max(0, lo - tolerance) from envelopeAt,
+  // sampled every 10 ms across the domain plus at each point time.
+  if (state.curve.points.length >= 2 && durationMs > 0) {
     const timeSet = new Set<number>();
-    for (const p of state.points) {
+    for (const p of state.curve.points) {
       timeSet.add(p[0]);
     }
-    for (let t = 0; t <= durationMs; t += 10) {
+    for (let t = -GO_LEAD_MS; t <= durationMs; t += 10) {
       timeSet.add(t);
     }
+    timeSet.add(-GO_LEAD_MS);
+    timeSet.add(0);
     timeSet.add(durationMs);
     const sampleTimes = Array.from(timeSet).sort((a, b) => a - b);
 
@@ -164,9 +277,9 @@ export function drawTrace(
     ctx.beginPath();
     for (let i = 0; i < sampleTimes.length; i++) {
       const t = sampleTimes[i];
-      const target = traceTargetAt(state.points, t);
-      const topVal = Math.min(1, target + state.tolerance);
-      const x = traceX(t, durationMs, width, 0, 0);
+      const [, hi] = state.curve.envelopeAt(t);
+      const topVal = Math.min(1, hi + state.tolerance);
+      const x = traceX(t, durationMs, width, 0, 0, -GO_LEAD_MS);
       const y = getGraphY(topVal, height, paddingTop, paddingBottom);
       if (i === 0) {
         ctx.moveTo(x, y);
@@ -176,9 +289,9 @@ export function drawTrace(
     }
     for (let i = sampleTimes.length - 1; i >= 0; i--) {
       const t = sampleTimes[i];
-      const target = traceTargetAt(state.points, t);
-      const botVal = Math.max(0, target - state.tolerance);
-      const x = traceX(t, durationMs, width, 0, 0);
+      const [lo] = state.curve.envelopeAt(t);
+      const botVal = Math.max(0, lo - state.tolerance);
+      const x = traceX(t, durationMs, width, 0, 0, -GO_LEAD_MS);
       const y = getGraphY(botVal, height, paddingTop, paddingBottom);
       ctx.lineTo(x, y);
     }
@@ -186,21 +299,29 @@ export function drawTrace(
     ctx.fill();
   }
 
-  // Target curve as a 2 px dashed line in theme.text
-  if (state.points.length > 0 && durationMs > 0) {
+  // Target curve: dashed line sampled from valueAt every 5 ms across the domain
+  if (state.curve.points.length > 0 && durationMs > 0) {
     ctx.strokeStyle = theme.text;
     ctx.lineWidth = 2;
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
-    for (let i = 0; i < state.points.length; i++) {
-      const [pT, pPct] = state.points[i];
-      const x = traceX(pT, durationMs, width, 0, 0);
-      const y = getGraphY(pPct / 100, height, paddingTop, paddingBottom);
-      if (i === 0) {
+    let first = true;
+    for (let t = -GO_LEAD_MS; t <= durationMs; t += 5) {
+      const val = state.curve.valueAt(t);
+      const x = traceX(t, durationMs, width, 0, 0, -GO_LEAD_MS);
+      const y = getGraphY(val, height, paddingTop, paddingBottom);
+      if (first) {
         ctx.moveTo(x, y);
+        first = false;
       } else {
         ctx.lineTo(x, y);
       }
+    }
+    if (durationMs % 5 !== 0) {
+      const val = state.curve.valueAt(durationMs);
+      const x = traceX(durationMs, durationMs, width, 0, 0, -GO_LEAD_MS);
+      const y = getGraphY(val, height, paddingTop, paddingBottom);
+      ctx.lineTo(x, y);
     }
     ctx.stroke();
     ctx.setLineDash([]);
@@ -216,7 +337,7 @@ export function drawTrace(
     ctx.beginPath();
     for (let i = 0; i < state.user.length; i++) {
       const [userT, userVal] = state.user[i];
-      const x = traceX(userT, durationMs, width, 0, 0);
+      const x = traceX(userT, durationMs, width, 0, 0, -GO_LEAD_MS);
       const y = getGraphY(userVal, height, paddingTop, paddingBottom);
       if (i === 0) {
         ctx.moveTo(x, y);
@@ -229,7 +350,7 @@ export function drawTrace(
 
   // Playhead as a 2 px vertical line in theme.accent
   if (state.playheadMs !== null && durationMs > 0) {
-    const x = traceX(state.playheadMs, durationMs, width, 0, 0);
+    const x = traceX(state.playheadMs, durationMs, width, 0, 0, -GO_LEAD_MS);
     ctx.strokeStyle = theme.accent;
     ctx.lineWidth = 2;
     ctx.setLineDash([]);

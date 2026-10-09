@@ -49,6 +49,8 @@
       "type": "hold",
       "pedal": "throttle",
       "target": 35,
+      "tolerance": 2,
+      "decimals": 1,
       "holdMs": 10000,
       "reps": 3,
       "leadInMs": 3000

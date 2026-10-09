@@ -10,6 +10,7 @@
     targetPedal?: "brake" | "throttle" | "clutch";
     targetVal?: number | null;
     targetTolerance?: number | null;
+    decimals?: number;
   }
 
   let {
@@ -17,6 +18,7 @@
     targetPedal,
     targetVal = null,
     targetTolerance = null,
+    decimals = 0,
   }: Props = $props();
 
   let containerEl = $state<HTMLDivElement | null>(null);
@@ -61,6 +63,7 @@
       targetPedal,
       targetVal,
       targetTolerance,
+      decimals,
     );
     ctx.restore();
   }

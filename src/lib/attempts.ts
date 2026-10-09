@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { PedalName } from "$lib/wizard";
+import type { RepScore, SetSummary } from "$lib/drill";
 
 /** Mirrors `sct_core::attempts::AttemptRep`. Detailed scores and sub-scores for a single drill repetition. */
 export interface AttemptRep {
@@ -57,6 +58,55 @@ export interface NewAttempt {
 export interface Attempt extends NewAttempt {
   /** Database primary key for this attempt. */
   id: number;
+}
+
+/** A scored rep of a set, numbered like the engine's zero-based `rep`. */
+export interface ScoredRep {
+  rep: number;
+  score: RepScore;
+}
+
+/** Maps one engine rep score to the stored rep. Fields the score kind lacks are left out. */
+export function attemptRep(rep: number, score: RepScore): AttemptRep {
+  const common = {
+    repIndex: rep,
+    total: score.total,
+    accuracy: score.accuracy,
+    timing: score.timing,
+    smoothness: score.smoothness,
+    timeInBand: score.timeInBand,
+    rmse: score.rmse,
+    overshoot: score.overshoot,
+  };
+  return score.kind === "hold"
+    ? { ...common, timeToBandMs: score.timeToBandMs, jitter: score.jitter }
+    : { ...common, lagMs: score.lagMs, ldljUser: score.ldljUser, ldljTarget: score.ldljTarget };
+}
+
+/**
+ * Builds the record for a finished or aborted set. Failed reps have no scores, so only scored
+ * reps are stored; the summary fields are null when no rep was scored.
+ */
+export function buildAttempt(set: {
+  drillId: string;
+  presetId: string;
+  pedal: PedalName;
+  startedAt: string;
+  aborted: boolean;
+  summary: SetSummary | null;
+  scored: ScoredRep[];
+}): NewAttempt {
+  return {
+    drillId: set.drillId,
+    presetId: set.presetId,
+    pedal: set.pedal,
+    startedAt: set.startedAt,
+    aborted: set.aborted,
+    best: set.summary?.best ?? null,
+    average: set.summary?.average ?? null,
+    consistency: set.summary?.consistency ?? null,
+    reps: [...set.scored].sort((a, b) => a.rep - b.rep).map((r) => attemptRep(r.rep, r.score)),
+  };
 }
 
 /** Saves a completed or aborted attempt set and each of its reps, returning the assigned attempt ID. */

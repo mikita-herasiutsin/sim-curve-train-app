@@ -750,14 +750,26 @@ async function main() {
     const summaryGrade = snap.summary.match(/Average:\s*\d+\s*\((\w)\)/)?.[1];
     assert(summaryGrade === "S", `set grade ${summaryGrade}, expected S`);
 
-    // The finished set should be in the attempts database. The drill screen does not save
-    // attempts yet (nothing calls saveAttempt), so this is reported, not failed.
-    const attempts = await invoke("list_attempts", { drillId: drill.id, limit: 5 });
-    const saved = attempts.find((a) => a.presetId === "sample" && a.reps.length === drill.reps);
+    // The drill page saves the finished set. The save is async, so poll for it.
+    const saved = await waitFor(
+      async () => {
+        const attempts = await invoke("list_attempts", { drillId: drill.id, limit: 5 });
+        return attempts.find((a) => a.presetId === "sample") ?? null;
+      },
+      { what: `the attempt for ${drill.id} to be saved` },
+    );
+    assert(saved.drillId === drill.id, `saved attempt is for ${saved.drillId}`);
+    assert(!saved.aborted, "saved attempt is marked aborted");
+    assert(
+      saved.reps.length === drill.reps,
+      `saved attempt has ${saved.reps.length} reps, expected ${drill.reps}`,
+    );
+    assert(
+      saved.best !== null && saved.best >= 95,
+      `saved attempt best ${saved.best}, expected >= 95`,
+    );
     log(
-      saved
-        ? `      attempt saved: id ${saved.id}, ${saved.reps.length} reps`
-        : `      WARN known gap: no attempt saved for ${drill.id} (list_attempts returned ${attempts.length}); the drill page never calls save_attempt`,
+      `      attempt saved: id ${saved.id}, ${saved.reps.length} reps, best ${saved.best.toFixed(1)}`,
     );
   });
 

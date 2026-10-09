@@ -13,7 +13,9 @@
     type HoldDrill,
     type DrillEvent,
     type RunView,
+    type SetSummary,
   } from "$lib/drill";
+  import { buildAttempt, saveAttempt, type ScoredRep } from "$lib/attempts";
   import { pedalStream } from "$lib/pedals/stream";
   import { startRealSource, type SourceStatus } from "$lib/pedals/realSource";
   import AudioControls from "$lib/components/AudioControls.svelte";
@@ -57,6 +59,19 @@
   // Bumped on every start and whenever a run is given up, so late events of a replaced or
   // dead run are ignored. An aborted run keeps its id: its final `setFinished` ends the set.
   let runId = 0;
+
+  // What the current run saves when it ends. Not reactive: only the save reads it.
+  interface RunRecord {
+    presetId: string;
+    drill: HoldDrill;
+    startedAt: string;
+    aborted: boolean;
+    scored: ScoredRep[];
+    /** Reps that ended, failed ones included. */
+    ended: number;
+    saved: boolean;
+  }
+  let run: RunRecord | null = null;
 
   let rafId: number | null = null;
 
@@ -130,6 +145,8 @@
     if (stopSource) stopSource();
     if (rafId !== null) cancelAnimationFrame(rafId);
     if (sourceStatus.kind === "live" && view.runState !== "idle" && view.runState !== "finished") {
+      // The engine still sends `setFinished`, which saves the set as aborted.
+      if (run) run.aborted = true;
       abortDrillRun(sourceStatus.token).catch(console.error);
     }
   });
@@ -144,8 +161,27 @@
     errorMessage = null;
     aborting = false;
     const id = ++runId;
+    const record: RunRecord = {
+      presetId: selectedPreset.id,
+      drill: selectedDrill,
+      startedAt: new Date().toISOString(),
+      aborted: false,
+      scored: [],
+      ended: 0,
+      saved: false,
+    };
+    run = record;
     const onEvent = (e: DrillEvent) => {
-      if (id === runId) view = applyDrillEvent(view, e);
+      if (id !== runId) return;
+      view = applyDrillEvent(view, e);
+      if (e.event === "repScored") {
+        record.scored.push({ rep: e.rep, score: e.score });
+        record.ended++;
+      } else if (e.event === "repFailed") {
+        record.ended++;
+      } else if (e.event === "setFinished") {
+        persist(record, e.summary);
+      }
     };
     startDrillRun(sourceStatus.token, selectedPreset.id, selectedDrill.id, onEvent).catch((e) => {
       if (id !== runId) return;
@@ -161,17 +197,46 @@
 
   function abort() {
     if (sourceStatus.kind !== "live") {
-      // No stream to ask for a final event, so give the run up here.
+      // No stream to ask for a final event, so give the run up and save it here.
+      if (run) {
+        run.aborted = true;
+        persist(run, null);
+      }
       runId++;
       view = { ...IDLE_VIEW };
       return;
     }
-    // The run stays current: its final `setFinished` shows the summary of what was scored.
+    // The run stays current: its final `setFinished` shows the summary and saves the set.
     aborting = true;
+    if (run) run.aborted = true;
     abortDrillRun(sourceStatus.token).catch((e) => {
       console.error(e);
       aborting = false;
       errorMessage = `Failed to abort drill: ${e}`;
+    });
+  }
+
+  /**
+   * Saves a set once. A set aborted before any rep ended is not saved. A failed save is
+   * logged and shown, and the drill screen keeps working.
+   */
+  function persist(record: RunRecord, summary: SetSummary | null) {
+    if (record.saved) return;
+    record.saved = true;
+    if (run === record) run = null;
+    if (record.aborted && record.ended === 0) return;
+    const attempt = buildAttempt({
+      drillId: record.drill.id,
+      presetId: record.presetId,
+      pedal: record.drill.pedal,
+      startedAt: record.startedAt,
+      aborted: record.aborted,
+      summary,
+      scored: record.scored,
+    });
+    saveAttempt(attempt).catch((e) => {
+      console.error("Failed to save attempt", e);
+      errorMessage = `This set was not saved: ${e}`;
     });
   }
 

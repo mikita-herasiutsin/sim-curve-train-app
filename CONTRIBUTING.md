@@ -55,6 +55,10 @@ Formatting and linting are automated. Don't hand-tune style; run the tools.
   the rendered diff for docs-only changes. Bot pull requests, such as Dependabot updates, are
   exempt; their CI run is the evidence. Mark the ticket ✅ in the backlog when its acceptance
   criteria are met.
+- Drag screenshots into the pull request body. Don't commit them to `main`. Maintainers may
+  instead commit them to the orphan
+  [`pr-screenshots`](https://github.com/mikita-herasiutsin/sim-curve-train-app/tree/pr-screenshots)
+  branch and link them by commit SHA, as its README describes.
 - Pull requests are squash-merged.
 
 ## Reporting bugs and requesting features

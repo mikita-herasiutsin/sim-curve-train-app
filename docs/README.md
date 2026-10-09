@@ -7,7 +7,6 @@
 | [`open-questions.md`](open-questions.md) | Unanswered questions. Once one is answered, move it into the decision log. |
 | [`backlog/mvp-tickets.md`](backlog/mvp-tickets.md) | MVP tickets: small, working slices with acceptance criteria. |
 | [`releasing.md`](releasing.md) | How to cut a release: version bump, tag, smoke test, publish. |
-| [`screenshots/`](screenshots/) | Pull request screenshots. PR bodies link them by commit SHA, so keep old files. |
 
 ## Conventions
 

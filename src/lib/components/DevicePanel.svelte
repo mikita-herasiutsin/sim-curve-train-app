@@ -65,6 +65,9 @@
 <div class="panel">
   <div class="title">
     <h3>{device.name}</h3>
+    {#if device.simulated}
+      <span class="simulated-badge">Simulated</span>
+    {/if}
     {#if profile}
       <span class="saved">Profile saved</span>
       <button type="button" onclick={reset}>Reset profile</button>
@@ -101,6 +104,16 @@
 
   h3 {
     margin: 0;
+  }
+
+  .simulated-badge {
+    padding: 0.15rem 0.5rem;
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: 9999px;
+    font-size: 0.75rem;
+    font-weight: 600;
   }
 
   .saved {

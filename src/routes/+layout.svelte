@@ -3,6 +3,7 @@
   import { onMount, type Snippet } from "svelte";
   import { invoke, isTauri } from "@tauri-apps/api/core";
   import { initTheme, loadAudioEnabled, loadAudioVolume } from "$lib/settings";
+  import SimPedalsPanel from "$lib/components/SimPedalsPanel.svelte";
 
   let { children }: { children: Snippet } = $props();
 
@@ -17,3 +18,6 @@
 </script>
 
 {@render children()}
+{#if import.meta.env.DEV && isTauri()}
+  <SimPedalsPanel />
+{/if}

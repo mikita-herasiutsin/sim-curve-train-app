@@ -34,6 +34,7 @@ const device = {
   axisCount: 3,
   buttonCount: 0,
   hatCount: 0,
+  simulated: false,
 };
 
 interface Channelish {

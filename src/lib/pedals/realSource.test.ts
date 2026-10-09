@@ -13,6 +13,7 @@ type DeviceLike = {
   axisCount: number;
   buttonCount: number;
   hatCount: number;
+  simulated: boolean;
 };
 
 function makeDevice(id: number): DeviceLike {
@@ -25,6 +26,7 @@ function makeDevice(id: number): DeviceLike {
     axisCount: 4,
     buttonCount: 0,
     hatCount: 0,
+    simulated: false,
   };
 }
 
@@ -97,6 +99,25 @@ describe("startRealSource", () => {
     await vi.waitFor(() => {
       expect(statuses[statuses.length - 1]).toMatchObject({ kind: "live", device: pedals });
       expect(calls.startStream).toContain(1);
+    });
+  });
+
+  it("prefers the profiled simulated device over real ones listed before it", async () => {
+    const { state, calls, handler } = createMockState();
+    mockIPC(handler, { shouldMockEvents: true });
+
+    const real = makeDevice(1);
+    const sim = { ...makeDevice(2), simulated: true };
+    state.devices = [real, sim];
+    state.profiled = [1, 2];
+
+    const statuses: SourceStatus[] = [];
+    const stream = { clear: vi.fn(), ingest: vi.fn() } as unknown as PedalStream;
+    startRealSource(stream, (status) => statuses.push(status));
+
+    await vi.waitFor(() => {
+      expect(statuses[statuses.length - 1]).toMatchObject({ kind: "live", device: sim });
+      expect(calls.startStream).toEqual([2]);
     });
   });
 

@@ -11,6 +11,7 @@ export interface DeviceInfo {
   axisCount: number;
   buttonCount: number;
   hatCount: number;
+  simulated: boolean;
 }
 
 /** Mirrors `sct_core::device::DevicesSnapshot` on the Rust side. */
@@ -30,6 +31,11 @@ export function listDevices(): Promise<DevicesSnapshot> {
 /** Calls `onChange` with the new list whenever a controller is plugged in or removed. */
 export function onDevicesChanged(onChange: (s: DevicesSnapshot) => void): Promise<UnlistenFn> {
   return listen<DevicesSnapshot>(DEVICES_CHANGED_EVENT, (event) => onChange(event.payload));
+}
+
+/** Sets simulated pedal axes (dev only). Values are fractions 0..1 in order [throttle, brake, clutch]. */
+export function setSimPedals(values: [number, number, number], auto: boolean): Promise<void> {
+  return invoke<void>("set_sim_pedals", { values, auto });
 }
 
 /** Formats USB ids as `VID:PID` in lowercase hex, e.g. `045e:028e`. */

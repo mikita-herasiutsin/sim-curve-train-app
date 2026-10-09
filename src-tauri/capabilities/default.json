@@ -25,6 +25,7 @@
     "core:event:allow-unlisten",
     "allow-list-presets",
     "allow-start-drill-run",
-    "allow-abort-drill-run"
+    "allow-abort-drill-run",
+    "allow-set-sim-pedals"
   ]
 }

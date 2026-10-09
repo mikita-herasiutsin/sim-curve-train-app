@@ -36,6 +36,7 @@ describe("DevicesPage", () => {
       axisCount: 3,
       buttonCount: 12,
       hatCount: 1,
+      simulated: false,
     };
 
     mockDevices({ devices: [device], error: null });
@@ -71,6 +72,7 @@ describe("DevicesPage", () => {
       axisCount: 2,
       buttonCount: 8,
       hatCount: 0,
+      simulated: false,
     };
 
     mockDevices({ devices: [], error: null });

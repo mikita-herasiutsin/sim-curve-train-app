@@ -70,7 +70,10 @@
           <tbody>
             {#each snapshot.devices as device (device.id)}
               <tr class:selected={selectedId === device.id}>
-                <td>{device.name}</td>
+                <td>
+                  {device.name}
+                  {#if device.simulated}<span class="simulated-badge">Simulated</span>{/if}
+                </td>
                 <td class="mono">{formatUsbIds(device)}</td>
                 <td class="num">{device.axisCount}</td>
                 <td class="num">{device.buttonCount}</td>
@@ -106,6 +109,17 @@
 </div>
 
 <style>
+  .simulated-badge {
+    margin-left: 0.5rem;
+    padding: 0.1rem 0.45rem;
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+    color: var(--accent);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-radius: 9999px;
+    font-size: 0.7rem;
+    font-weight: 600;
+  }
+
   /* The header stays put; only the content below it scrolls. */
   .devices-page {
     display: flex;

@@ -1,5 +1,7 @@
 mod audio;
 mod input;
+#[cfg(debug_assertions)]
+mod sim_pedals;
 mod window;
 
 use audio::AudioFeedback;
@@ -151,6 +153,21 @@ fn reset_profile(device_id: u32, input: tauri::State<'_, InputService>) -> Resul
 )]
 fn profiled_devices(input: tauri::State<'_, InputService>) -> Vec<u32> {
     input.profiled_devices()
+}
+
+/// Dev only: sets the simulated pedals (fractions 0 to 1: throttle, brake, clutch) or turns on
+/// their automatic cycle.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn set_sim_pedals(
+    values: [f32; 3],
+    auto: bool,
+    input: tauri::State<'_, InputService>,
+) -> Result<(), String> {
+    input.set_sim_pedals(values, auto)
 }
 
 /// Shared handle to the attempts database, managed by Tauri.
@@ -380,7 +397,8 @@ pub fn run() {
             #[cfg(debug_assertions)]
             audio_test_tone,
             audio_set_enabled,
-            audio_set_volume
+            audio_set_volume,
+            set_sim_pedals
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

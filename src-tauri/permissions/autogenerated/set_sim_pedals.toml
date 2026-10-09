@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-sim-pedals"
+description = "Enables the set_sim_pedals command without any pre-configured scope."
+commands.allow = ["set_sim_pedals"]
+
+[[permission]]
+identifier = "deny-set-sim-pedals"
+description = "Denies the set_sim_pedals command without any pre-configured scope."
+commands.deny = ["set_sim_pedals"]

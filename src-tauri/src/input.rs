@@ -37,6 +37,9 @@ use sdl3::joystick::{Joystick, JoystickId};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter};
 
+#[cfg(debug_assertions)]
+use crate::sim_pedals::{self, SimControl, SimPedals};
+
 /// Event emitted with a [`DevicesSnapshot`] whenever the device list changes.
 pub const DEVICES_CHANGED_EVENT: &str = "devices-changed";
 
@@ -127,6 +130,9 @@ pub struct InputService {
     active: Arc<Mutex<ActiveStream>>,
     /// Audio feedback handed to each drill.
     audio: Option<AudioFeedback>,
+    /// Control of the simulated pedals; `Some` only with `SCT_SIM_PEDALS=1` in a debug build.
+    #[cfg(debug_assertions)]
+    sim: Option<Arc<SimControl>>,
 }
 
 impl InputService {
@@ -144,6 +150,8 @@ impl InputService {
             store: Arc::new(Mutex::new(store)),
             active: Arc::default(),
             audio,
+            #[cfg(debug_assertions)]
+            sim: sim_pedals::enabled_by_env().then(|| Arc::new(SimControl::new())),
         };
         let shared = service.clone();
         let spawned = thread::Builder::new()
@@ -177,6 +185,25 @@ impl InputService {
     /// Returns the latest device list.
     pub fn snapshot(&self) -> DevicesSnapshot {
         lock(&self.snapshot).clone()
+    }
+
+    /// Sets the simulated pedals (fractions 0 to 1: throttle, brake, clutch) or switches them to
+    /// the automatic cycle.
+    #[cfg(debug_assertions)]
+    pub fn set_sim_pedals(&self, values: [f32; 3], auto: bool) -> Result<(), String> {
+        let sim = self
+            .sim
+            .as_ref()
+            .ok_or("simulated pedals are off; start with SCT_SIM_PEDALS=1")?;
+        sim.set(values, auto);
+        Ok(())
+    }
+
+    /// Simulated pedals only exist in debug builds.
+    #[cfg(not(debug_assertions))]
+    #[expect(clippy::unused_self, reason = "same signature as the debug build")]
+    pub fn set_sim_pedals(&self, _values: [f32; 3], _auto: bool) -> Result<(), String> {
+        Err("simulated pedals are only available in debug builds".to_owned())
     }
 
     /// Starts streaming samples of `device_id` to `channel`, replacing any active stream.
@@ -588,6 +615,15 @@ fn run(
         .event_pump()
         .map_err(|e| format!("SDL event pump failed: {e}"))?;
 
+    // A failed simulator must not take the real devices down with it. Declared before `open`
+    // so the device detaches after the handles to it are closed.
+    #[cfg(debug_assertions)]
+    let mut sim = service.sim.as_ref().and_then(|control| {
+        SimPedals::attach(&joysticks, Arc::clone(control))
+            .inspect_err(|error| eprintln!("simulated pedals unavailable: {error}"))
+            .ok()
+    });
+
     let mut open: HashMap<u32, Joystick> = HashMap::new();
     for id in joysticks
         .joysticks()
@@ -603,6 +639,12 @@ fn run(
     loop {
         if !drain_commands(commands, service, epoch, &mut stream, &mut next_tick) {
             return Ok(());
+        }
+
+        // Before the event pump, so `read_sample` sees the new axes on this pass.
+        #[cfg(debug_assertions)]
+        if let Some(sim) = sim.as_mut() {
+            sim.tick(u64::try_from(epoch.elapsed().as_micros()).unwrap_or(u64::MAX));
         }
 
         // Idle: block on events. Streaming: pumping events also refreshes joystick state.
@@ -758,6 +800,7 @@ fn snapshot_of(open: &HashMap<u32, Joystick>) -> DevicesSnapshot {
                 axis_count: joystick.num_axes(),
                 button_count: joystick.num_buttons(),
                 hat_count: joystick.num_hats(),
+                simulated: joystick.is_virtual(),
             }
         })
         .collect();

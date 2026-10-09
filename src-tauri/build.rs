@@ -23,6 +23,7 @@ fn main() {
             "audio_test_tone",
             "audio_set_enabled",
             "audio_set_volume",
+            "set_sim_pedals",
         ]),
     ))
     .expect("failed to run tauri-build");

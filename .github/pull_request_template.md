@@ -4,7 +4,7 @@
 
 ## Screenshots
 
-<!-- Required for UI changes. Drag images here, or commit them to the orphan pr-screenshots branch and link them by commit SHA. -->
+<!-- Required for every pull request: the changed app screens for UI changes, terminal output (test, smoke or command run) for other code changes, the rendered diff for docs-only changes. Bot pull requests (Dependabot) are exempt. Drag images here. Maintainers may instead commit them to the orphan pr-screenshots branch and link them by commit SHA. Never commit images to main. -->
 
 ## Acceptance criteria
 

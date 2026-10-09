@@ -50,10 +50,15 @@ Formatting and linting are automated. Don't hand-tune style; run the tools.
 - Branch names: `feat/SCT-NNN-short-name`, `fix/...`, `docs/...`, `chore/...`.
 - Commit subjects: imperative mood, ≤ 72 characters, starting with the ticket ID when there is
   one (e.g. `SCT-012: add 1 kHz input thread`).
-- Fill in the pull request template. Add screenshots for UI changes, and mark the ticket ✅ in
-  the backlog when its acceptance criteria are met.
-- Keep screenshots off `main`. Drag them into the pull request body, or commit them to the
-  orphan `pr-screenshots` branch and link them by commit SHA (see that branch's README).
+- Fill in the pull request template. Every pull request needs screenshots: the changed app
+  screens for UI changes, terminal output (test, smoke or command run) for other code changes, and
+  the rendered diff for docs-only changes. Bot pull requests, such as Dependabot updates, are
+  exempt; their CI run is the evidence. Mark the ticket ✅ in the backlog when its acceptance
+  criteria are met.
+- Drag screenshots into the pull request body. Don't commit them to `main`. Maintainers may
+  instead commit them to the orphan
+  [`pr-screenshots`](https://github.com/mikita-herasiutsin/sim-curve-train-app/tree/pr-screenshots)
+  branch and link them by commit SHA, as its README describes.
 - Pull requests are squash-merged.
 
 ## Reporting bugs and requesting features

@@ -135,12 +135,11 @@ A drill runs N reps (from the preset; default 5) with a short pause between reps
 
 ### SCT-038 · Audio feedback 🟨 · M
 Audio comes from the Rust side (`cpal`/`rodio`):
-- **Lock chime:** on Hold drills, a short chime plays once per rep after the pedal has been held in the band.
-- **Miss cue:** on Hold and Trace drills, leaving the band after settling in it plays one short, soft, low cue (a falling glide), at most once per second. Nothing sounds while the pedal is out of the band, and there is no continuous tone.
+- **Error beeps (parking-sensor style):** on Hold and Trace drills, while the pedal is outside the tolerance band during an active rep, short 784 Hz beeps repeat. The rate rises with the distance past the band edge, from 3 per second at the edge to 11 per second at 30 percentage points past it. Inside the band it is silent. There is no lock chime and no miss cue.
 
 Settings: on/off and volume. Defaults follow [D-20](../decisions/README.md): on, silent inside the band, quiet volume.
-- **AC:** each cue sounds within about 20 ms with no audible glitches; mute is persisted.
-- **Status:** done in code. The drill drives the cues per sample; Hold drills play the lock chime once per rep after 100 ms in the band, and both drill kinds play the miss cue when a pedal that was settled (100 ms) in the band leaves it, with a small hysteresis at the band edge and a 1 s cooldown. The first version had a continuous pitch-following error tone; after a listening test it was replaced by the miss cue (2026-10-08) because it was too intrusive. Tests cover the synth reaching each cue in under 20 ms; device buffering adds roughly one audio period on top, not yet measured on hardware. Audio ignores the reaction-lag compensation used in trace scoring, so on Trace drills the miss cue fires on the raw pedal position; revisit with SCT-034. Check by ear before marking ✅.
+- **AC:** the beeps start within about 20 ms of leaving the band, with no audible glitches; mute is persisted.
+- **Status:** done in code. The drill sets the beep rate per sample; the synth schedules the beeps (rate sampled once per beep, so the rhythm never glides) and fades out click-free when the pedal returns to the band. Earlier versions had a continuous pitch-following tone, then a lock chime plus a one-shot miss cue; after a listening test of 8 candidates the parking-sensor beeps were chosen (2026-10-09), see `docs/investigations/2026-10-08-error-sound.md`. Tests cover the synth reaching a beep in under 20 ms; device buffering adds roughly one audio period on top, not yet measured on hardware. Audio ignores the reaction-lag compensation used in trace scoring, so on Trace drills the beeps follow the raw pedal position; revisit with SCT-034. Check by ear before marking ✅.
 - **Deps:** SCT-031
 
 ---

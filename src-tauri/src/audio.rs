@@ -4,32 +4,37 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-/// Lock chime: a short, bright 1 kHz ping.
-const CHIME_FREQ_HZ: f32 = 1000.0;
-const CHIME_GAIN: f32 = 0.3;
-const CHIME_DECAY_TIME_S: f32 = 0.08;
-const CHIME_ATTACK_TIME_S: f32 = 0.002;
-
-/// Miss cue: soft and low, a sine gliding down from ~G4 to ~C4, clearly apart from the chime.
-const MISS_START_FREQ_HZ: f32 = 392.0;
-const MISS_END_FREQ_HZ: f32 = 262.0;
-const MISS_GLIDE_TIME_S: f32 = 0.06;
-const MISS_GAIN: f32 = 0.2;
-const MISS_DECAY_TIME_S: f32 = 0.12;
-const MISS_ATTACK_TIME_S: f32 = 0.005;
+/// The error beep: a sine plus a weaker third harmonic, like a parking sensor.
+const BEEP_FREQ_HZ: f32 = 784.0;
+/// Level of the third harmonic relative to the fundamental.
+const BEEP_HARMONIC_GAIN: f32 = 0.2;
+/// Peak gain of a beep before the master volume.
+const ERROR_GAIN: f32 = 0.15;
+const BEEP_ATTACK_TIME_S: f32 = 0.004;
+/// Longest flat part of a beep.
+const BEEP_HOLD_MAX_S: f32 = 0.032;
+/// The beep (attack, hold) never takes more than this share of the interval.
+const BEEP_ACTIVE_SHARE: f32 = 0.45;
+/// Reserved for the attack when capping the hold.
+const BEEP_HOLD_MARGIN_S: f32 = 0.008;
+/// Time constant of the exponential release.
+const BEEP_RELEASE_TAU_S: f32 = 0.004;
 
 const DENORMAL_THRESHOLD: f32 = 1e-6;
 const SLEW_TIME_S: f32 = 0.0025;
-/// Gap between the chime and the miss cue of the debug test sounds.
-const TEST_SOUNDS_GAP: Duration = Duration::from_millis(400);
+/// The debug demo steps the rate from 3 to 11 Hz in 30 steps of 50 ms (1.5 s).
+const TEST_DEMO_STEP: Duration = Duration::from_millis(50);
+const TEST_DEMO_STEPS: u32 = 30;
+const TEST_DEMO_MIN_HZ: f32 = 3.0;
+const TEST_DEMO_MAX_HZ: f32 = 11.0;
 pub const DEFAULT_AUDIO_VOLUME: f32 = 0.2;
 
 /// Contains the lock-free shared state read by the audio callback.
 pub struct SharedState {
     pub enabled: AtomicBool,
     pub master_volume: AtomicU32, // f32 bits
-    pub chime_trigger: AtomicBool,
-    pub miss_trigger: AtomicBool,
+    /// Beeps per second, `0.0` for silence (f32 bits).
+    pub pulse_rate: AtomicU32,
 }
 
 impl Default for SharedState {
@@ -44,8 +49,7 @@ impl SharedState {
         Self {
             enabled: AtomicBool::new(true),
             master_volume: AtomicU32::new(DEFAULT_AUDIO_VOLUME.to_bits()),
-            chime_trigger: AtomicBool::new(false),
-            miss_trigger: AtomicBool::new(false),
+            pulse_rate: AtomicU32::new(0.0_f32.to_bits()),
         }
     }
 
@@ -62,111 +66,156 @@ impl SharedState {
         self.master_volume.store(vol.to_bits(), Ordering::Relaxed);
     }
 
-    pub fn chime(&self) {
-        self.chime_trigger.store(true, Ordering::Relaxed);
-    }
-
-    pub fn miss(&self) {
-        self.miss_trigger.store(true, Ordering::Relaxed);
+    pub fn set_pulse_rate(&self, hz: f32) {
+        let rate = if hz.is_finite() && hz > 0.0 { hz } else { 0.0 };
+        self.pulse_rate.store(rate.to_bits(), Ordering::Relaxed);
     }
 }
 
-/// Takes a pending trigger (lock-free, as the callback may not block).
-#[inline]
-fn take_trigger(flag: &AtomicBool) -> bool {
-    flag.load(Ordering::Relaxed) && flag.swap(false, Ordering::Relaxed)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Idle,
+    Attack,
+    Hold,
+    Release,
 }
 
-/// A one-shot sine cue: a short linear attack, then an exponential decay, with the pitch
-/// optionally gliding exponentially from `start_freq` to `end_freq`. A retrigger restarts the
-/// attack from the current envelope and never resets the phase, so it cannot click.
-struct Voice {
-    gain: f32,
-    start_freq: f32,
-    end_freq: f32,
-    decay: f32,
+/// The repeating error beep. A countdown in samples spaces the beeps; the rate is read once per
+/// beep, so the rhythm never glides. When the rate drops to 0 (or audio is disabled) no new
+/// beep starts and a running one moves into its release from its current level.
+struct Beeper {
+    sample_rate: f32,
+    dt: f32,
     attack_step: f32,
-    glide_decay: f32,
-    freq: f32,
-    phase: f32,
+    release_decay: f32,
+    stage: Stage,
     env: f32,
-    attacking: bool,
+    phase: f32,
+    samples_to_next: u32,
+    hold_left: u32,
+    /// Beeps started so far (for tests).
+    starts: u32,
 }
 
-impl Voice {
-    fn new(
-        dt: f32,
-        gain: f32,
-        start_freq: f32,
-        end_freq: f32,
-        glide_time_s: f32,
-        attack_time_s: f32,
-        decay_time_s: f32,
-    ) -> Self {
+impl Beeper {
+    fn new(sample_rate: f32) -> Self {
+        let dt = 1.0 / sample_rate;
         Self {
-            gain,
-            start_freq,
-            end_freq,
-            decay: (-dt / decay_time_s).exp(),
-            attack_step: (dt / attack_time_s).clamp(0.0, 1.0),
-            glide_decay: (-dt / glide_time_s).exp(),
-            freq: start_freq,
-            phase: 0.0,
+            sample_rate,
+            dt,
+            attack_step: (dt / BEEP_ATTACK_TIME_S).clamp(0.0, 1.0),
+            release_decay: (-dt / BEEP_RELEASE_TAU_S).exp(),
+            stage: Stage::Idle,
             env: 0.0,
-            attacking: false,
+            phase: 0.0,
+            samples_to_next: 0,
+            hold_left: 0,
+            starts: 0,
         }
     }
 
-    /// The next sample. A disabled synth ignores (but consumes) the trigger and fades the cue
-    /// out at the slew rate instead of cutting it.
-    fn next(&mut self, dt: f32, triggered: bool, enabled: bool, smooth_factor: f32) -> f32 {
+    /// Hold length in samples for a beep at `rate` Hz.
+    fn hold_samples(&self, rate: f32) -> u32 {
+        let hold_s = BEEP_HOLD_MAX_S
+            .min(BEEP_ACTIVE_SHARE / rate - BEEP_HOLD_MARGIN_S)
+            .max(0.0);
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a small non-negative sample count"
+        )]
+        let samples = (hold_s * self.sample_rate).round() as u32;
+        samples
+    }
+
+    /// Samples between two beep starts at `rate` Hz.
+    fn period_samples(&self, rate: f32) -> u32 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a positive sample count, saturating for absurdly low rates"
+        )]
+        let samples = (self.sample_rate / rate).round() as u32;
+        samples.max(1)
+    }
+
+    /// The next sample, before the master volume.
+    fn next(&mut self, rate: f32, enabled: bool, smooth_factor: f32) -> f32 {
         if !self.phase.is_finite() {
             self.phase = 0.0;
         }
         if !self.env.is_finite() {
             self.env = 0.0;
-        }
-        if !self.freq.is_finite() {
-            self.freq = self.start_freq;
+            self.stage = Stage::Idle;
         }
 
-        if !enabled {
-            self.attacking = false;
-        } else if triggered {
-            self.attacking = true;
-            self.freq = self.start_freq;
-        }
-
-        if self.attacking {
-            self.env += self.attack_step;
-            if self.env >= 1.0 {
-                self.env = 1.0;
-                self.attacking = false;
+        if enabled && rate > 0.0 {
+            if self.samples_to_next == 0 {
+                if self.env == 0.0 {
+                    // The envelope is 0, so restarting the phase cannot click.
+                    self.phase = 0.0;
+                }
+                self.stage = Stage::Attack;
+                self.hold_left = self.hold_samples(rate);
+                self.samples_to_next = self.period_samples(rate);
+                self.starts = self.starts.wrapping_add(1);
             }
-        } else if enabled {
-            self.env *= self.decay;
+            self.samples_to_next = self.samples_to_next.saturating_sub(1);
         } else {
-            self.env -= self.env * smooth_factor;
+            // The next band exit beeps on the very next sample.
+            self.samples_to_next = 0;
+            if matches!(self.stage, Stage::Attack | Stage::Hold) {
+                self.stage = Stage::Release;
+            }
         }
-        if !self.attacking && self.env.abs() < DENORMAL_THRESHOLD {
-            self.env = 0.0;
+
+        match self.stage {
+            Stage::Idle => {}
+            Stage::Attack => {
+                self.env += self.attack_step;
+                if self.env >= 1.0 {
+                    self.env = 1.0;
+                    self.stage = if self.hold_left == 0 {
+                        Stage::Release
+                    } else {
+                        Stage::Hold
+                    };
+                }
+            }
+            Stage::Hold => {
+                self.hold_left = self.hold_left.saturating_sub(1);
+                if self.hold_left == 0 {
+                    self.stage = Stage::Release;
+                }
+            }
+            Stage::Release => {
+                if enabled {
+                    self.env *= self.release_decay;
+                } else {
+                    // Muting fades at the slew rate instead of cutting.
+                    self.env -= self.env * smooth_factor;
+                }
+                if self.env < DENORMAL_THRESHOLD {
+                    self.env = 0.0;
+                    self.stage = Stage::Idle;
+                }
+            }
         }
 
         if self.env <= 0.0 {
             return 0.0;
         }
-        self.freq = self.end_freq + (self.freq - self.end_freq) * self.glide_decay;
-        self.phase = (self.phase + self.freq * dt) % 1.0;
-        (self.phase * std::f32::consts::TAU).sin() * self.env * self.gain
+        self.phase = (self.phase + BEEP_FREQ_HZ * self.dt) % 1.0;
+        let angle = self.phase * std::f32::consts::TAU;
+        let wave = angle.sin() + BEEP_HARMONIC_GAIN * (3.0 * angle).sin();
+        wave * self.env * ERROR_GAIN
     }
 }
 
 pub struct Synth {
-    dt: f32,
     smooth_factor: f32,
     current_vol: f32,
-    chime: Voice,
-    miss: Voice,
+    beeper: Beeper,
 }
 
 impl Synth {
@@ -183,27 +232,9 @@ impl Synth {
         let smooth_factor = (dt / SLEW_TIME_S).clamp(0.0, 1.0);
 
         Self {
-            dt,
             smooth_factor,
             current_vol: 0.0,
-            chime: Voice::new(
-                dt,
-                CHIME_GAIN,
-                CHIME_FREQ_HZ,
-                CHIME_FREQ_HZ,
-                1.0,
-                CHIME_ATTACK_TIME_S,
-                CHIME_DECAY_TIME_S,
-            ),
-            miss: Voice::new(
-                dt,
-                MISS_GAIN,
-                MISS_START_FREQ_HZ,
-                MISS_END_FREQ_HZ,
-                MISS_GLIDE_TIME_S,
-                MISS_ATTACK_TIME_S,
-                MISS_DECAY_TIME_S,
-            ),
+            beeper: Beeper::new(sr),
         }
     }
 
@@ -219,22 +250,21 @@ impl Synth {
         } else {
             0.0
         };
+        let raw_rate = f32::from_bits(shared.pulse_rate.load(Ordering::Relaxed));
+        let rate = if raw_rate.is_finite() && raw_rate > 0.0 {
+            raw_rate
+        } else {
+            0.0
+        };
 
         self.current_vol += (master_vol - self.current_vol) * self.smooth_factor;
         if master_vol == 0.0 && self.current_vol.abs() < DENORMAL_THRESHOLD {
             self.current_vol = 0.0;
         }
 
-        let chime_triggered = take_trigger(&shared.chime_trigger);
-        let miss_triggered = take_trigger(&shared.miss_trigger);
-        let chime = self
-            .chime
-            .next(self.dt, chime_triggered, enabled, self.smooth_factor);
-        let miss = self
-            .miss
-            .next(self.dt, miss_triggered, enabled, self.smooth_factor);
+        let beep = self.beeper.next(rate, enabled, self.smooth_factor);
 
-        let out_sample = (chime + miss) * self.current_vol;
+        let out_sample = beep * self.current_vol;
         if out_sample.is_finite() {
             out_sample.clamp(-1.0, 1.0)
         } else {
@@ -246,18 +276,23 @@ impl Synth {
 #[cfg(test)]
 impl Synth {
     #[must_use]
-    pub fn chime_env(&self) -> f32 {
-        self.chime.env
+    pub fn beep_env(&self) -> f32 {
+        self.beeper.env
     }
 
     #[must_use]
-    pub fn miss_env(&self) -> f32 {
-        self.miss.env
+    pub fn beep_starts(&self) -> u32 {
+        self.beeper.starts
     }
 
     #[must_use]
-    pub fn miss_freq(&self) -> f32 {
-        self.miss.freq
+    pub fn beep_hold_samples(&self, rate: f32) -> u32 {
+        self.beeper.hold_samples(rate)
+    }
+
+    #[must_use]
+    pub fn beep_period_samples(&self, rate: f32) -> u32 {
+        self.beeper.period_samples(rate)
     }
 }
 
@@ -338,16 +373,10 @@ impl AudioFeedback {
         }
     }
 
-    /// Whether a chime was requested since the last call.
+    /// The beep rate last set, in Hz.
     #[cfg(test)]
-    pub(crate) fn take_chime(&self) -> bool {
-        self.state.chime_trigger.swap(false, Ordering::Relaxed)
-    }
-
-    /// Whether a miss cue was requested since the last call.
-    #[cfg(test)]
-    pub(crate) fn take_miss(&self) -> bool {
-        self.state.miss_trigger.swap(false, Ordering::Relaxed)
+    pub(crate) fn pulse_rate(&self) -> f32 {
+        f32::from_bits(self.state.pulse_rate.load(Ordering::Relaxed))
     }
 
     pub fn set_enabled(&self, enabled: bool) {
@@ -358,33 +387,35 @@ impl AudioFeedback {
         self.state.set_volume(volume);
     }
 
-    pub fn chime(&self) {
-        self.state.chime();
+    /// Sets the error beep rate in Hz; `0.0` (or a non-finite or negative value) is silence.
+    pub fn set_pulse_rate(&self, hz: f32) {
+        self.state.set_pulse_rate(hz);
     }
 
-    pub fn miss(&self) {
-        self.state.miss();
-    }
-
-    /// Plays the chime now and the miss cue shortly after. A newer call cancels the pending
-    /// miss cue of an older one, so rapid clicks do not stack.
+    /// Plays a 1.5 s demo: the beep rate steps from 3 to 11 Hz, then falls silent. A newer
+    /// call supersedes an older demo, so rapid clicks do not stack.
     #[cfg_attr(
         not(debug_assertions),
         expect(dead_code, reason = "test sounds are debug-only")
     )]
     pub fn test_tone(&self) {
-        self.chime();
-        {
-            let generation = self.test_tone_generation.fetch_add(1, Ordering::Relaxed) + 1;
-            let state = self.state.clone();
-            let latest = self.test_tone_generation.clone();
-            std::thread::spawn(move || {
-                std::thread::sleep(TEST_SOUNDS_GAP);
-                if latest.load(Ordering::Relaxed) == generation {
-                    state.miss();
+        let generation = self.test_tone_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let state = self.state.clone();
+        let latest = self.test_tone_generation.clone();
+        std::thread::spawn(move || {
+            for step in 0..TEST_DEMO_STEPS {
+                if latest.load(Ordering::Relaxed) != generation {
+                    return;
                 }
-            });
-        }
+                #[expect(clippy::cast_precision_loss, reason = "tiny step counts")]
+                let k = step as f32 / (TEST_DEMO_STEPS - 1) as f32;
+                state.set_pulse_rate(TEST_DEMO_MIN_HZ + (TEST_DEMO_MAX_HZ - TEST_DEMO_MIN_HZ) * k);
+                std::thread::sleep(TEST_DEMO_STEP);
+            }
+            if latest.load(Ordering::Relaxed) == generation {
+                state.set_pulse_rate(0.0);
+            }
+        });
     }
 }
 
@@ -492,236 +523,258 @@ mod tests {
     }
 
     #[test]
-    fn silent_without_a_cue() {
+    fn set_pulse_rate_maps_bad_input_to_zero() {
+        let audio = AudioFeedback::detached();
+        audio.set_pulse_rate(7.5);
+        assert_eq!(audio.pulse_rate(), 7.5);
+        for bad in [f32::NAN, f32::INFINITY, -3.0] {
+            audio.set_pulse_rate(7.5);
+            audio.set_pulse_rate(bad);
+            assert_eq!(audio.pulse_rate(), 0.0);
+        }
+    }
+
+    #[test]
+    fn silent_at_rate_zero() {
         let mut synth = Synth::new(48_000.0);
         let shared = SharedState::new();
         shared.set_volume(1.0);
-        for _ in 0..2000 {
+        for _ in 0..5000 {
             assert_eq!(synth.next_sample(&shared), 0.0);
         }
+        assert_eq!(synth.beep_starts(), 0);
     }
 
     #[test]
     fn silent_when_disabled() {
-        let mut synth = Synth::new(48000.0);
+        let mut synth = Synth::new(48_000.0);
         let shared = SharedState::new();
         shared.set_enabled(false);
         shared.set_volume(1.0);
-        shared.chime();
-        shared.miss();
-
-        for _ in 0..1000 {
-            let sample = synth.next_sample(&shared);
-            assert_eq!(sample, 0.0);
+        shared.set_pulse_rate(11.0);
+        for _ in 0..5000 {
+            assert_eq!(synth.next_sample(&shared), 0.0);
         }
-        // The triggers were consumed, so enabling does not play them late.
-        assert!(!shared.chime_trigger.load(Ordering::Relaxed));
-        assert!(!shared.miss_trigger.load(Ordering::Relaxed));
+        assert_eq!(synth.beep_starts(), 0);
     }
 
     #[test]
-    fn no_nan_after_nan_input() {
-        let mut synth = Synth::new(48000.0);
-        let shared = SharedState::new();
-
-        shared
-            .master_volume
-            .store(f32::NAN.to_bits(), Ordering::Relaxed);
-        shared.chime();
-        shared.miss();
-        for _ in 0..100 {
-            let sample = synth.next_sample(&shared);
-            assert!(sample.is_finite());
-            assert_eq!(sample, 0.0);
-        }
-
-        // Now resume normal inputs and verify synth recovers
-        shared.set_volume(0.5);
-        shared.miss();
-        let mut non_zero_seen = false;
-        for _ in 0..1000 {
-            let sample = synth.next_sample(&shared);
-            assert!(sample.is_finite());
-            if sample.abs() > 0.01 {
-                non_zero_seen = true;
-            }
-        }
-        assert!(non_zero_seen);
-    }
-
-    #[test]
-    fn corrupted_voice_state_recovers() {
-        let mut synth = Synth::new(48_000.0);
-        let shared = SharedState::new();
-        shared.set_volume(1.0);
-        synth.miss.phase = f32::NAN;
-        synth.miss.env = f32::NAN;
-        synth.miss.freq = f32::NAN;
-        synth.current_vol = f32::NAN;
-        for _ in 0..100 {
-            assert!(synth.next_sample(&shared).is_finite());
-        }
-        shared.miss();
-        for _ in 0..1000 {
-            assert!(synth.next_sample(&shared).is_finite());
-        }
-        assert!(synth.miss_env() > 0.0);
-    }
-
-    #[test]
-    fn chime_decays_to_zero_at_48khz_and_96khz() {
-        // Test at 48 kHz
-        let mut synth48 = Synth::new(48_000.0);
-        let shared = SharedState::new();
-        shared.chime();
-
-        // Sample 0: starts the attack ramp instead of jumping to full level
-        let s0 = synth48.next_sample(&shared);
-        assert!(s0.is_finite());
-        assert!(synth48.chime_env() < 0.05);
-
-        // 2 ms attack (96 samples), then 0.08 s (3840 samples) of decay: envelope is about 1/e
-        for _ in 1..(96 + 3840) {
-            synth48.next_sample(&shared);
-        }
-        let env_48_80ms = synth48.chime_env();
-        let expected_e_decay = (-1.0_f32).exp();
-        assert!((env_48_80ms - expected_e_decay).abs() < 0.01);
-
-        // At ~1.15s (55200 samples total), envelope should be flushed to 0.0
-        for _ in (96 + 3840)..55_200 {
-            synth48.next_sample(&shared);
-        }
-        assert_eq!(synth48.chime_env(), 0.0);
-
-        // Test at 96 kHz
-        let mut synth96 = Synth::new(96_000.0);
-        shared.chime();
-
-        synth96.next_sample(&shared);
-        for _ in 1..(192 + 7680) {
-            synth96.next_sample(&shared);
-        }
-        let env_96_80ms = synth96.chime_env();
-        assert!((env_96_80ms - expected_e_decay).abs() < 0.01);
-
-        // At ~1.15s (110400 samples total), envelope should be flushed to 0.0
-        for _ in (192 + 7680)..110_400 {
-            synth96.next_sample(&shared);
-        }
-        assert_eq!(synth96.chime_env(), 0.0);
-    }
-
-    #[test]
-    fn miss_decays_to_zero_at_48khz_and_96khz() {
-        for rate in [48_000.0_f32, 96_000.0] {
-            let mut synth = Synth::new(rate);
+    fn first_beep_starts_on_the_first_sample() {
+        for sr in [48_000.0_f32, 96_000.0] {
+            let mut synth = Synth::new(sr);
             let shared = SharedState::new();
             shared.set_volume(1.0);
-            shared.miss();
-            // 5 ms attack, then 0.12 s of decay: about 1/e of the peak.
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "small positive sample counts"
-            )]
-            let (attack, decay_tau, total) = (
-                (rate * MISS_ATTACK_TIME_S) as usize,
-                (rate * MISS_DECAY_TIME_S) as usize,
-                (rate * 2.0) as usize,
-            );
-            for _ in 0..attack + decay_tau {
+            for _ in 0..100 {
                 synth.next_sample(&shared);
             }
-            assert!(
-                (synth.miss_env() - (-1.0_f32).exp()).abs() < 0.01,
-                "env at {rate} Hz: {}",
-                synth.miss_env()
-            );
-            for _ in 0..total {
-                synth.next_sample(&shared);
-            }
-            assert_eq!(synth.miss_env(), 0.0, "at {rate} Hz");
-        }
-    }
-
-    #[test]
-    fn miss_pitch_glides_down() {
-        let mut synth = Synth::new(48_000.0);
-        let shared = SharedState::new();
-        shared.set_volume(1.0);
-        shared.miss();
-        synth.next_sample(&shared);
-        assert!(synth.miss_freq() <= MISS_START_FREQ_HZ);
-        assert!(synth.miss_freq() > 380.0);
-        for _ in 0..48_000 / 2 {
+            shared.set_pulse_rate(3.0);
             synth.next_sample(&shared);
-        }
-        assert!((synth.miss_freq() - MISS_END_FREQ_HZ).abs() < 1.0);
-        // A retrigger restarts the glide from the top.
-        shared.miss();
-        synth.next_sample(&shared);
-        assert!(synth.miss_freq() > 380.0);
-    }
-
-    /// Both cues respond within ~20 ms of the trigger (SCT-038), at 48 kHz and 96 kHz.
-    #[test]
-    fn cues_respond_within_20ms() {
-        for rate in [48_000.0_f32, 96_000.0] {
+            assert_eq!(synth.beep_starts(), 1, "at {sr} Hz");
+            assert!(synth.beep_env() > 0.0);
+            // Audible within 20 ms.
             #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "20 ms of samples is a small positive count"
             )]
-            let samples = (rate * 0.020) as usize;
-            for miss in [false, true] {
-                let mut synth = Synth::new(rate);
-                let shared = SharedState::new();
-                shared.set_volume(1.0);
-                if miss {
-                    shared.miss();
-                } else {
-                    shared.chime();
+            let samples = (sr * 0.020) as usize;
+            let mut peak = 0.0_f32;
+            for _ in 0..samples {
+                peak = peak.max(synth.next_sample(&shared).abs());
+            }
+            assert!(peak > 0.05, "peak {peak} at {sr} Hz");
+        }
+    }
+
+    /// The sample indexes at which beeps start over `samples` samples at a fixed `rate`.
+    fn start_indexes(sr: f32, rate: f32, samples: usize) -> Vec<usize> {
+        let mut synth = Synth::new(sr);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        shared.set_pulse_rate(rate);
+        let mut starts = Vec::new();
+        let mut seen = 0;
+        for i in 0..samples {
+            synth.next_sample(&shared);
+            if synth.beep_starts() != seen {
+                seen = synth.beep_starts();
+                starts.push(i);
+            }
+        }
+        starts
+    }
+
+    #[test]
+    fn beeps_are_spaced_by_the_rounded_period() {
+        for sr in [48_000.0_f32, 96_000.0] {
+            for rate in [3.0_f32, 7.0, 11.0] {
+                let synth = Synth::new(sr);
+                let period = synth.beep_period_samples(rate) as usize;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "small positive count"
+                )]
+                let expected = (sr / rate).round() as usize;
+                assert_eq!(period, expected);
+                let starts = start_indexes(sr, rate, period * 5 + 10);
+                assert_eq!(starts.len(), 6, "{rate} Hz at {sr}");
+                assert_eq!(starts[0], 0);
+                for pair in starts.windows(2) {
+                    assert_eq!(pair[1] - pair[0], period, "{rate} Hz at {sr}");
                 }
-                let mut peak = 0.0_f32;
-                for _ in 0..samples {
-                    peak = peak.max(synth.next_sample(&shared).abs());
-                }
-                let env = if miss {
-                    synth.miss_env()
-                } else {
-                    synth.chime_env()
-                };
-                assert!(env > 0.5, "env (miss: {miss}) at {rate} Hz: {env}");
-                assert!(peak > 0.05, "peak (miss: {miss}) at {rate} Hz: {peak}");
             }
         }
     }
 
-    /// The miss cue peaks below the chime and below the headroom of the master volume.
     #[test]
-    fn miss_is_softer_than_the_chime() {
-        const { assert!(MISS_GAIN < CHIME_GAIN) };
-        const { assert!(MISS_START_FREQ_HZ < CHIME_FREQ_HZ) };
-        let peak = |miss: bool| {
+    fn hold_length_follows_the_formula() {
+        let synth = Synth::new(48_000.0);
+        // 3 Hz: capped at 32 ms. 11 Hz: 0.45 / 11 - 8 ms = 32.9 ms, still capped.
+        assert_eq!(synth.beep_hold_samples(3.0), 1536);
+        assert_eq!(synth.beep_hold_samples(11.0), 1536);
+        // 20 Hz: 0.45 / 20 - 8 ms = 14.5 ms.
+        assert_eq!(synth.beep_hold_samples(20.0), 696);
+        // Very high rates clamp at 0.
+        assert_eq!(synth.beep_hold_samples(100.0), 0);
+
+        // The envelope really stays at 1 for hold + 1 samples (the sample that ends the attack
+        // plus the hold itself).
+        for rate in [3.0_f32, 11.0] {
             let mut synth = Synth::new(48_000.0);
             let shared = SharedState::new();
             shared.set_volume(1.0);
-            if miss {
-                shared.miss();
-            } else {
-                shared.chime();
+            shared.set_pulse_rate(rate);
+            let mut full = 0;
+            for _ in 0..4000 {
+                synth.next_sample(&shared);
+                if synth.beep_env() >= 1.0 {
+                    full += 1;
+                }
             }
-            (0..4800)
-                .map(|_| synth.next_sample(&shared).abs())
-                .fold(0.0, f32::max)
-        };
-        assert!(peak(true) < peak(false));
+            assert_eq!(full, synth.beep_hold_samples(rate) + 1, "{rate} Hz");
+        }
     }
 
-    /// Largest per-sample jump allowed at 48 kHz. A 0.3-amplitude 1 kHz chime has a natural
-    /// slope of about 0.039 per sample; the 0.2-amplitude miss cue about 0.01, so the two
-    /// overlapping stay below 0.05.
+    #[test]
+    fn release_reaches_exactly_zero() {
+        for sr in [48_000.0_f32, 96_000.0] {
+            let mut synth = Synth::new(sr);
+            let shared = SharedState::new();
+            shared.set_volume(1.0);
+            shared.set_pulse_rate(3.0);
+            synth.next_sample(&shared);
+            // Stop further beeps and let the first one die away.
+            shared.set_pulse_rate(0.0);
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "small positive count"
+            )]
+            let samples = (sr * 0.2) as usize;
+            for _ in 0..samples {
+                synth.next_sample(&shared);
+            }
+            assert_eq!(synth.beep_env(), 0.0, "at {sr} Hz");
+            assert_eq!(synth.beep_starts(), 1);
+        }
+    }
+
+    #[test]
+    fn rate_change_applies_from_the_next_beep() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        shared.set_pulse_rate(3.0);
+        let slow = synth.beep_period_samples(3.0) as usize;
+        let fast = synth.beep_period_samples(11.0) as usize;
+        let mut starts = Vec::new();
+        let mut seen = 0;
+        for i in 0..slow + fast * 3 + 10 {
+            if i == 1000 {
+                shared.set_pulse_rate(11.0);
+            }
+            synth.next_sample(&shared);
+            if synth.beep_starts() != seen {
+                seen = synth.beep_starts();
+                starts.push(i);
+            }
+        }
+        assert_eq!(starts[0], 0);
+        assert_eq!(starts[1] - starts[0], slow, "old interval finishes first");
+        assert_eq!(starts[2] - starts[1], fast);
+        assert_eq!(starts[3] - starts[2], fast);
+    }
+
+    #[test]
+    fn rate_drop_to_zero_resets_the_countdown() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        shared.set_pulse_rate(3.0);
+        for _ in 0..1000 {
+            synth.next_sample(&shared);
+        }
+        shared.set_pulse_rate(0.0);
+        for _ in 0..20_000 {
+            synth.next_sample(&shared);
+        }
+        let before = synth.beep_starts();
+        shared.set_pulse_rate(3.0);
+        synth.next_sample(&shared);
+        assert_eq!(synth.beep_starts(), before + 1);
+    }
+
+    #[test]
+    fn no_nan_after_nan_input() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        shared.set_pulse_rate(11.0);
+        for _ in 0..500 {
+            assert!(synth.next_sample(&shared).is_finite());
+        }
+        shared
+            .pulse_rate
+            .store(f32::NAN.to_bits(), Ordering::Relaxed);
+        for _ in 0..5000 {
+            assert!(synth.next_sample(&shared).is_finite());
+        }
+        shared
+            .master_volume
+            .store(f32::NAN.to_bits(), Ordering::Relaxed);
+        for _ in 0..2000 {
+            assert!(synth.next_sample(&shared).is_finite());
+        }
+        // Normal input resumes the beeps.
+        shared.set_volume(0.5);
+        shared.set_pulse_rate(11.0);
+        let mut non_zero_seen = false;
+        for _ in 0..3000 {
+            let sample = synth.next_sample(&shared);
+            assert!(sample.is_finite());
+            non_zero_seen |= sample.abs() > 0.005;
+        }
+        assert!(non_zero_seen);
+    }
+
+    #[test]
+    fn corrupted_state_recovers() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        shared.set_pulse_rate(5.0);
+        synth.beeper.phase = f32::NAN;
+        synth.beeper.env = f32::NAN;
+        synth.current_vol = f32::NAN;
+        for _ in 0..2000 {
+            assert!(synth.next_sample(&shared).is_finite());
+        }
+        assert!(synth.beep_starts() > 0);
+    }
+
+    /// Largest per-sample jump allowed at 48 kHz: a 0.15-peak, 784 Hz beep with its third
+    /// harmonic has a natural slope of about 0.03 per sample.
     const MAX_STEP: f32 = 0.05;
 
     struct StepMeter {
@@ -754,116 +807,58 @@ mod tests {
         }
     }
 
-    fn cue(shared: &SharedState, miss: bool) {
-        if miss {
-            shared.miss();
-        } else {
-            shared.chime();
-        }
-    }
-
-    fn env(synth: &Synth, miss: bool) -> f32 {
-        if miss {
-            synth.miss_env()
-        } else {
-            synth.chime_env()
-        }
-    }
-
     #[test]
-    fn enable_disable_has_no_clicks() {
-        for miss in [false, true] {
-            let mut synth = Synth::new(48_000.0);
-            let shared = SharedState::new();
-            shared.set_volume(1.0);
-            let mut meter = StepMeter::new();
-            cue(&shared, miss);
-            meter.run(&mut synth, &shared, 1000);
-            shared.set_enabled(false);
-            meter.run(&mut synth, &shared, 6000);
-            shared.set_enabled(true);
-            cue(&shared, miss);
-            meter.run(&mut synth, &shared, 6000);
-            meter.assert_smooth("enable/disable");
-        }
-    }
-
-    #[test]
-    fn volume_steps_have_no_clicks() {
-        for miss in [false, true] {
-            let mut synth = Synth::new(48_000.0);
-            let shared = SharedState::new();
-            shared.set_volume(0.0);
-            let mut meter = StepMeter::new();
-            cue(&shared, miss);
-            meter.run(&mut synth, &shared, 500);
-            shared.set_volume(1.0);
-            meter.run(&mut synth, &shared, 2000);
-            shared.set_volume(0.0);
-            meter.run(&mut synth, &shared, 6000);
-            shared.set_volume(1.0);
-            cue(&shared, miss);
-            meter.run(&mut synth, &shared, 6000);
-            meter.assert_smooth("volume step");
-        }
-    }
-
-    #[test]
-    fn mute_during_a_cue_fades_out() {
-        for miss in [false, true] {
-            let mut synth = Synth::new(48_000.0);
-            let shared = SharedState::new();
-            shared.set_volume(1.0);
-            let mut meter = StepMeter::new();
-            meter.run(&mut synth, &shared, 3000);
-            cue(&shared, miss);
-            meter.run(&mut synth, &shared, 300);
-            assert!(env(&synth, miss) > 0.5);
-            shared.set_enabled(false);
-            meter.run(&mut synth, &shared, 1);
-            assert!(env(&synth, miss) > 0.0, "cue must fade, not cut");
-            meter.run(&mut synth, &shared, 8000);
-            meter.assert_smooth("mute during cue");
-            assert_eq!(env(&synth, miss), 0.0);
-        }
-    }
-
-    #[test]
-    fn cue_retrigger_has_no_clicks() {
-        for miss in [false, true] {
-            let mut synth = Synth::new(48_000.0);
-            let shared = SharedState::new();
-            shared.set_volume(1.0);
-            let mut meter = StepMeter::new();
-            meter.run(&mut synth, &shared, 3000);
-            cue(&shared, miss);
-            meter.run(&mut synth, &shared, 1500);
-            let before = env(&synth, miss);
-            assert!(before < 0.9 && before > 0.1, "env {before}");
-            cue(&shared, miss);
-            meter.run(&mut synth, &shared, 300);
-            assert!(
-                env(&synth, miss) > before,
-                "retrigger must raise the envelope"
-            );
-            meter.run(&mut synth, &shared, 6000);
-            meter.assert_smooth("cue retrigger");
-        }
-    }
-
-    #[test]
-    fn miss_overlapping_chime_has_no_clicks() {
+    fn rate_to_zero_mid_hold_has_no_clicks() {
         let mut synth = Synth::new(48_000.0);
         let shared = SharedState::new();
         shared.set_volume(1.0);
         let mut meter = StepMeter::new();
-        meter.run(&mut synth, &shared, 1000);
-        shared.chime();
-        meter.run(&mut synth, &shared, 200);
-        shared.miss();
-        meter.run(&mut synth, &shared, 8000);
-        assert!(synth.chime_env() < 0.5 && synth.miss_env() > 0.0);
-        meter.assert_smooth("miss over chime");
+        shared.set_pulse_rate(5.0);
+        // Attack is 192 samples; stop well inside the hold.
+        meter.run(&mut synth, &shared, 500);
+        assert!(synth.beep_env() >= 1.0);
+        shared.set_pulse_rate(0.0);
+        meter.run(&mut synth, &shared, 6000);
+        meter.assert_smooth("rate to zero");
+        assert_eq!(synth.beep_env(), 0.0);
+    }
+
+    #[test]
+    fn enable_disable_mid_beep_has_no_clicks() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(1.0);
+        shared.set_pulse_rate(11.0);
+        let mut meter = StepMeter::new();
+        meter.run(&mut synth, &shared, 600);
+        shared.set_enabled(false);
+        meter.run(&mut synth, &shared, 6000);
+        assert_eq!(synth.beep_env(), 0.0);
+        shared.set_enabled(true);
+        meter.run(&mut synth, &shared, 600);
+        // Mute and un-mute within one beep.
+        shared.set_enabled(false);
+        meter.run(&mut synth, &shared, 50);
+        shared.set_enabled(true);
+        meter.run(&mut synth, &shared, 6000);
+        meter.assert_smooth("enable/disable");
+    }
+
+    #[test]
+    fn volume_steps_have_no_clicks() {
+        let mut synth = Synth::new(48_000.0);
+        let shared = SharedState::new();
+        shared.set_volume(0.0);
+        shared.set_pulse_rate(11.0);
+        let mut meter = StepMeter::new();
+        meter.run(&mut synth, &shared, 500);
+        shared.set_volume(1.0);
+        meter.run(&mut synth, &shared, 2000);
+        shared.set_volume(0.0);
+        meter.run(&mut synth, &shared, 6000);
+        shared.set_volume(1.0);
+        meter.run(&mut synth, &shared, 6000);
+        meter.assert_smooth("volume step");
     }
 
     #[test]

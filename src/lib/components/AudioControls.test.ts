@@ -80,7 +80,7 @@ describe("AudioControls", () => {
     expect(volumeSlider).toBeDisabled();
   });
 
-  it("invokes audio_test_tone when clicking test sounds button in dev mode", async () => {
+  it("invokes audio_test_tone when clicking the test sound button in dev mode", async () => {
     const invoked: Array<{ cmd: string; args: unknown }> = [];
     mockIPC((cmd, args) => {
       invoked.push({ cmd, args });

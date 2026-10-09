@@ -8,6 +8,8 @@ export interface BaseDrill {
   leadInMs: number;
   /** Band half-width in percentage points; omitted means the D-17 default. */
   tolerance?: number;
+  /** Decimal places (0 or 1) when showing percentages; omitted means 0. */
+  decimals?: number;
 }
 
 export interface HoldDrill extends BaseDrill {
@@ -32,14 +34,13 @@ export function toleranceOf(drill: Drill): number {
 }
 
 /**
- * Whether the drill screen can run it. Trace drills arrive with SCT-034; the engine already
- * runs them, but the screen can't show their target curve yet. Clutch has no bar.
+ * Whether the drill screen can run it. Hold and trace drills work; clutch has no bar.
  */
-export function isPlayable(drill: Drill): drill is HoldDrill {
-  return drill.type === "hold" && drill.pedal !== "clutch";
+export function isPlayable(drill: Drill): boolean {
+  return drill.pedal !== "clutch";
 }
 
-export function playableDrills(preset: Preset): HoldDrill[] {
+export function playableDrills(preset: Preset): Drill[] {
   return preset.drills.filter(isPlayable);
 }
 

@@ -3,7 +3,7 @@
 //! Presets define a collection of sim-racing pedal drills (e.g. threshold braking,
 //! trail-off traces, or throttle modulation) with configurable tolerance and repetitions.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,19 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_REPS: u32 = 5;
 pub const DEFAULT_LEAD_IN_MS: u32 = 3000;
 pub const DEFAULT_TOLERANCE: f32 = 10.0;
+
+/// Shortest allowed lead-in in milliseconds: the countdown shows GO for its last second.
+pub const MIN_LEAD_IN_MS: u32 = 1000;
+/// Longest allowed lead-in in milliseconds.
+pub const MAX_LEAD_IN_MS: u32 = 10000;
+/// Shortest allowed trace duration in milliseconds, so the ±150 ms timing window stays small
+/// next to the trace.
+pub const MIN_TRACE_MS: u32 = 500;
+/// Longest allowed trace duration in milliseconds: it fits the UI's 20 s pedal history with
+/// the lead-in.
+pub const MAX_TRACE_MS: u32 = 15000;
+/// Most points a trace may have.
+pub const MAX_TRACE_POINTS: usize = 64;
 
 const fn default_reps() -> u32 {
     DEFAULT_REPS
@@ -60,13 +73,17 @@ pub struct Drill {
     /// Number of repetitions (`1..=50`, defaults to 5).
     #[serde(default = "default_reps")]
     pub reps: u32,
-    /// Lead-in preparation countdown before each rep in milliseconds (`0..=10000`, defaults to 3000).
+    /// Lead-in preparation countdown before each rep in milliseconds (`1000..=10000`, defaults to 3000).
     #[serde(default = "default_lead_in")]
     pub lead_in_ms: u32,
     /// Permissible error tolerance in percent (`0.5..=50.0`).
     /// `None` (omitted, or an explicit `null`) means unset: the drill uses 10.0 (D-17).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tolerance: Option<f32>,
+    /// Display precision of percentages for this drill (0 or 1 decimal places).
+    /// `None` (omitted) means 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decimals: Option<u8>,
     /// Drill type and parameters (flattened in JSON).
     #[serde(flatten)]
     pub kind: DrillKind,
@@ -199,11 +216,11 @@ fn validate_drill(drill: &Drill) -> Result<(), PresetError> {
         });
     }
 
-    if !(0..=10000).contains(&drill.lead_in_ms) {
+    if !(MIN_LEAD_IN_MS..=MAX_LEAD_IN_MS).contains(&drill.lead_in_ms) {
         return Err(PresetError::Invalid {
             drill: drill_ctx,
             message: format!(
-                "field 'leadInMs' ({}) must be between 0 and 10000",
+                "field 'leadInMs' ({}) must be between {MIN_LEAD_IN_MS} and {MAX_LEAD_IN_MS}",
                 drill.lead_in_ms
             ),
         });
@@ -215,6 +232,15 @@ fn validate_drill(drill: &Drill) -> Result<(), PresetError> {
         return Err(PresetError::Invalid {
             drill: drill_ctx,
             message: format!("field 'tolerance' ({tol}) must be finite and between 0.5 and 50"),
+        });
+    }
+
+    if let Some(decimals) = drill.decimals
+        && decimals > 1
+    {
+        return Err(PresetError::Invalid {
+            drill: drill_ctx,
+            message: format!("field 'decimals' ({decimals}) must be 0 or 1"),
         });
     }
 
@@ -256,6 +282,16 @@ fn validate_trace_points(points: &[(u32, f32)], drill_id: &str) -> Result<(), Pr
         });
     }
 
+    if points.len() > MAX_TRACE_POINTS {
+        return Err(PresetError::Invalid {
+            drill: drill_ctx,
+            message: format!(
+                "field 'points' must contain at most {MAX_TRACE_POINTS} points, found {}",
+                points.len()
+            ),
+        });
+    }
+
     if points[0].0 != 0 {
         return Err(PresetError::Invalid {
             drill: drill_ctx,
@@ -291,10 +327,12 @@ fn validate_trace_points(points: &[(u32, f32)], drill_id: &str) -> Result<(), Pr
     }
 
     let duration = points[points.len() - 1].0;
-    if duration > 60000 {
+    if !(MIN_TRACE_MS..=MAX_TRACE_MS).contains(&duration) {
         return Err(PresetError::Invalid {
             drill: drill_ctx,
-            message: format!("field 'points': duration ({duration} ms) must be at most 60000 ms"),
+            message: format!(
+                "field 'points': duration ({duration} ms) must be between {MIN_TRACE_MS} and {MAX_TRACE_MS} ms"
+            ),
         });
     }
 
@@ -309,17 +347,27 @@ fn is_valid_id(id: &str) -> bool {
 }
 
 /// A validated target curve expressed in normalized fractional pedal positions `[0.0, 1.0]`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct TraceCurve {
     points: Vec<(u32, f32)>,
+    /// Final Fritsch–Carlson tangent at each point, in fraction per ms.
+    tangents: Vec<f64>,
+}
+
+/// The tangents follow from the points, so two curves are equal when their points are.
+impl PartialEq for TraceCurve {
+    fn eq(&self, other: &Self) -> bool {
+        self.points == other.points
+    }
 }
 
 impl TraceCurve {
     /// Constructs a `TraceCurve` by converting percentage values (`0.0..=100.0`) to fractions (`0.0..=1.0`).
     #[must_use]
     pub fn from_points(points: &[(u32, f32)]) -> Self {
-        let converted = points.iter().map(|&(t, pct)| (t, pct / 100.0)).collect();
-        Self { points: converted }
+        let points: Vec<(u32, f32)> = points.iter().map(|&(t, pct)| (t, pct / 100.0)).collect();
+        let tangents = fritsch_carlson_tangents(&points);
+        Self { points, tangents }
     }
 
     /// Returns the duration of the trace in milliseconds (timestamp of the final point).
@@ -334,7 +382,8 @@ impl TraceCurve {
         &self.points
     }
 
-    /// Computes the linearly interpolated target value at `t_ms`.
+    /// Computes the target value at `t_ms` by monotone cubic (Fritsch–Carlson) interpolation
+    /// with zero slope at both ends, so the curve is rounded and never overshoots its points.
     ///
     /// Timestamps outside `[0, duration]` are clamped to the first or last point value.
     #[must_use]
@@ -362,15 +411,21 @@ impl TraceCurve {
 
         let t0 = f64::from(t0_u32);
         let t1 = f64::from(t1_u32);
-        let dt = t1 - t0;
-        if dt <= 0.0 {
+        let h = t1 - t0;
+        if h <= 0.0 {
             return v0_f32;
         }
 
-        let factor = (t_ms - t0) / dt;
+        let (m0, m1) = (self.tangents[idx - 1], self.tangents[idx]);
+        let s = (t_ms - t0) / h;
+        let s2 = s * s;
+        let s3 = s2 * s;
         let v0 = f64::from(v0_f32);
         let v1 = f64::from(v1_f32);
-        let val = v0 + factor * (v1 - v0);
+        let val = (2.0 * s3 - 3.0 * s2 + 1.0) * v0
+            + (s3 - 2.0 * s2 + s) * h * m0
+            + (-2.0 * s3 + 3.0 * s2) * v1
+            + (s3 - s2) * h * m1;
 
         #[expect(
             clippy::cast_possible_truncation,
@@ -379,6 +434,153 @@ impl TraceCurve {
         let result = val as f32;
         result
     }
+
+    /// Returns the minimum and maximum of [`Self::value_at`] over `t_ms - window_ms ..= t_ms +
+    /// window_ms` in 1 ms steps. Outside `[0, duration]` the end values extend the curve.
+    #[must_use]
+    pub fn envelope_at(&self, t_ms: f64, window_ms: u32) -> (f32, f32) {
+        let window = i64::from(window_ms);
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for s in -window..=window {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "window offset in milliseconds is small"
+            )]
+            let v = self.value_at(t_ms + s as f64);
+            lo = lo.min(v);
+            hi = hi.max(v);
+        }
+        (lo, hi)
+    }
+
+    /// Envelope `[lo, hi]` of `value_at` over `t ± window_ms` for every integer `t` in
+    /// `-window_ms ..= duration + window_ms`, so index `i` is `t = i - window_ms`.
+    ///
+    /// Each entry equals [`Self::envelope_at`] at that integer t. Building it is O(duration);
+    /// a lookup with [`EnvelopeTable::at`] is O(1), for the input thread.
+    #[must_use]
+    pub fn envelope_table(&self, window_ms: u32) -> EnvelopeTable {
+        let w = i64::from(window_ms);
+        let grid: Vec<f32> = (-w..=i64::from(self.duration_ms()) + w)
+            .map(|t| {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "table times in milliseconds are small"
+                )]
+                let t = t as f64;
+                self.value_at(t)
+            })
+            .collect();
+        let window = window_ms as usize;
+        // Past both ends of the grid the curve is constant at the end values, which the grid's
+        // first and last window_ms + 1 entries already hold, so clamping the window is exact.
+        EnvelopeTable {
+            window_ms,
+            lo: sliding_extreme(&grid, window, |back, new| back >= new),
+            hi: sliding_extreme(&grid, window, |back, new| back <= new),
+        }
+    }
+}
+
+/// Precomputed [`TraceCurve::envelope_at`] at every integer millisecond, built by
+/// [`TraceCurve::envelope_table`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct EnvelopeTable {
+    window_ms: u32,
+    lo: Vec<f32>,
+    hi: Vec<f32>,
+}
+
+impl EnvelopeTable {
+    /// Envelope `(lo, hi)` at `t_ms` rounded to the nearest millisecond. Before the table it is
+    /// `(v, v)` with `v` the first point value, after it the last point value.
+    #[must_use]
+    pub fn at(&self, t_ms: f64) -> (f32, f32) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the index saturates and is clamped to the table below"
+        )]
+        let i = (t_ms.round() as i64).saturating_add(i64::from(self.window_ms));
+        let last = self.lo.len().saturating_sub(1);
+        // The first and last entries are the end values (see `TraceCurve::envelope_table`).
+        let i = usize::try_from(i.max(0)).map_or(last, |i| i.min(last));
+        (self.lo[i], self.hi[i])
+    }
+}
+
+/// Extreme of `grid` over `i - window ..= i + window` (clamped to the grid) for every index
+/// `i`, with a monotonic deque in O(len). `drop(back, new)` says whether the deque's back
+/// entry can never be the extreme again once `new` has entered the window.
+fn sliding_extreme(grid: &[f32], window: usize, drop: fn(f32, f32) -> bool) -> Vec<f32> {
+    let mut out = Vec::with_capacity(grid.len());
+    let mut deque: VecDeque<usize> = VecDeque::new();
+    let mut next = 0;
+    for i in 0..grid.len() {
+        let end = (i + window).min(grid.len() - 1);
+        while next <= end {
+            while deque.back().is_some_and(|&b| drop(grid[b], grid[next])) {
+                deque.pop_back();
+            }
+            deque.push_back(next);
+            next += 1;
+        }
+        while deque.front().is_some_and(|&f| f + window < i) {
+            deque.pop_front();
+        }
+        out.push(grid[deque[0]]);
+    }
+    out
+}
+
+/// Final Fritsch–Carlson tangents at each point of `points`, in fraction per ms, with zero
+/// slope at both ends. One sequential pass: limiting segment `j` may lower the tangents at
+/// both of its ends, and after it `m_j` is final.
+fn fritsch_carlson_tangents(points: &[(u32, f32)]) -> Vec<f64> {
+    let n = points.len();
+    if n < 2 {
+        return vec![0.0; n];
+    }
+    let slope = |j: usize| {
+        let (ta, ya) = points[j];
+        let (tb, yb) = points[j + 1];
+        (f64::from(yb) - f64::from(ya)) / (f64::from(tb) - f64::from(ta))
+    };
+
+    let mut tangents = Vec::with_capacity(n);
+    let mut m_cur = 0.0_f64; // m_0
+    for j in 0..n - 1 {
+        let d_j = slope(j);
+        let mut m_next = if j + 1 == n - 1 {
+            0.0
+        } else {
+            let d_next = slope(j + 1);
+            if d_j * d_next <= 0.0 {
+                0.0
+            } else {
+                f64::midpoint(d_j, d_next)
+            }
+        };
+        if d_j == 0.0 {
+            m_cur = 0.0;
+            m_next = 0.0;
+        } else {
+            let a = m_cur / d_j;
+            let b = m_next / d_j;
+            let r2 = a * a + b * b;
+            if r2 > 9.0 {
+                let tau = 3.0 / r2.sqrt();
+                m_cur = tau * a * d_j;
+                m_next = tau * b * d_j;
+            }
+        }
+        // m_cur is now the final m_j: later steps never touch it.
+        tangents.push(m_cur);
+        m_cur = m_next;
+    }
+    // m_cur is the final last tangent.
+    tangents.push(m_cur);
+    tangents
 }
 
 /// Errors that can occur when parsing or validating preset files.
@@ -452,6 +654,7 @@ const HOLD_KEYS: &[&str] = &[
     "reps",
     "leadInMs",
     "tolerance",
+    "decimals",
     "target",
     "holdMs",
 ];
@@ -463,6 +666,7 @@ const TRACE_KEYS: &[&str] = &[
     "reps",
     "leadInMs",
     "tolerance",
+    "decimals",
     "points",
 ];
 
@@ -622,6 +826,7 @@ mod tests {
             reps: 5,
             lead_in_ms: 3000,
             tolerance: Some(5.0),
+            decimals: None,
             kind: DrillKind::Hold {
                 target: 70.0,
                 hold_ms: 2000,
@@ -637,6 +842,7 @@ mod tests {
             reps: 5,
             lead_in_ms: 2000,
             tolerance: Some(6.0),
+            decimals: None,
             kind: DrillKind::Trace {
                 points: vec![(0, 0.0), (150, 92.0), (600, 60.0), (1500, 0.0)],
             },
@@ -908,8 +1114,26 @@ mod tests {
             PresetError::Invalid {
                 drill: Some(d),
                 message
-            } if d == "brake-hold-70" && message.contains("field 'leadInMs'")
+            } if d == "brake-hold-70" && message.contains("field 'leadInMs' (10001) must be between 1000 and 10000")
         ));
+
+        // GO shows for the last second of the countdown, so shorter lead-ins are rejected.
+        preset.drills[0].lead_in_ms = 3000;
+        for lead_in_ms in [0, 999] {
+            preset.drills[1].lead_in_ms = lead_in_ms;
+            let err = preset.validate().unwrap_err();
+            assert!(matches!(
+                err,
+                PresetError::Invalid {
+                    drill: Some(d),
+                    message
+                } if d == "hairpin" && message.contains("field 'leadInMs'")
+            ));
+        }
+        for lead_in_ms in [1000, 10000] {
+            preset.drills[1].lead_in_ms = lead_in_ms;
+            assert!(preset.validate().is_ok(), "leadInMs {lead_in_ms} rejected");
+        }
     }
 
     #[test]
@@ -1087,10 +1311,10 @@ mod tests {
     }
 
     #[test]
-    fn validation_trace_duration_max() {
+    fn validation_trace_duration_range() {
         let mut preset = valid_preset();
         preset.drills[1].kind = DrillKind::Trace {
-            points: vec![(0, 0.0), (60001, 50.0)],
+            points: vec![(0, 0.0), (15001, 50.0)],
         };
         let json = serde_json::to_string(&preset).unwrap();
         let err = parse_preset(&json).unwrap_err();
@@ -1099,7 +1323,41 @@ mod tests {
             PresetError::Invalid {
                 drill: Some(d),
                 message
-            } if d == "hairpin" && message.contains("duration (60001 ms)")
+            } if d == "hairpin" && message.contains("duration (15001 ms) must be between 500 and 15000 ms")
+        ));
+
+        preset.drills[1].kind = DrillKind::Trace {
+            points: vec![(0, 0.0), (499, 50.0)],
+        };
+        let err = preset.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            PresetError::Invalid { message, .. } if message.contains("duration (499 ms)")
+        ));
+
+        for end in [500, 15000] {
+            preset.drills[1].kind = DrillKind::Trace {
+                points: vec![(0, 0.0), (end, 50.0)],
+            };
+            assert!(preset.validate().is_ok(), "duration {end} rejected");
+        }
+    }
+
+    #[test]
+    fn validation_trace_points_max() {
+        let mut preset = valid_preset();
+        let points = |n: u32| (0..n).map(|i| (i * 100, 50.0)).collect::<Vec<_>>();
+        preset.drills[1].kind = DrillKind::Trace { points: points(64) };
+        assert!(preset.validate().is_ok(), "64 points rejected");
+
+        preset.drills[1].kind = DrillKind::Trace { points: points(65) };
+        let err = preset.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            PresetError::Invalid {
+                drill: Some(d),
+                message
+            } if d == "hairpin" && message.contains("at most 64 points, found 65")
         ));
     }
 
@@ -1132,14 +1390,152 @@ mod tests {
         // Between points: midpoint of (0, 0.0) and (150, 0.92) is t=75 -> 0.46
         assert!((curve.value_at(75.0) - 0.46).abs() < 1e-6);
 
-        // Midpoint of (150, 0.92) and (600, 0.60) is t=375 -> 0.76
-        assert!((curve.value_at(375.0) - 0.76).abs() < 1e-6);
+        // Midpoint of (150, 0.92) and (600, 0.60) is t=375: the rounded curve sits above the
+        // 0.76 chord because the slope at 150 is zero and steepest near 600.
+        assert!((curve.value_at(375.0) - 0.798_75).abs() < 1e-4);
 
         // Before 0 (clamped to first value)
         assert!((curve.value_at(-100.0) - 0.0).abs() < 1e-6);
 
         // After the end (clamped to last value)
         assert!((curve.value_at(2000.0) - 0.0).abs() < 1e-6);
+    }
+
+    fn hairpin_reference() -> TraceCurve {
+        TraceCurve::from_points(&[
+            (0, 0.0),
+            (150, 100.0),
+            (300, 95.0),
+            (600, 70.0),
+            (1000, 40.0),
+            (1500, 0.0),
+        ])
+    }
+
+    fn second_reference() -> TraceCurve {
+        TraceCurve::from_points(&[
+            (0, 0.0),
+            (880, 79.0),
+            (1930, 63.3),
+            (2790, 5.0),
+            (3700, 0.0),
+        ])
+    }
+
+    /// The scoring timing window (`trace_scoring::RAMP_WINDOW_MS`).
+    const RAMP_WINDOW: u32 = crate::trace_scoring::RAMP_WINDOW_MS;
+
+    fn assert_close(actual: f32, expected: f32, what: &str) {
+        assert!(
+            (actual - expected).abs() < 1e-5,
+            "{what}: got {actual}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn value_at_matches_monotone_cubic_reference() {
+        let hairpin = hairpin_reference();
+        for (t, v) in [
+            (0.0, 0.0),
+            (75.0, 0.5),
+            (150.0, 1.0),
+            (225.0, 0.985_938),
+            (450.0, 0.832_812),
+            (800.0, 0.549_167),
+            (1250.0, 0.151_562),
+            (1500.0, 0.0),
+        ] {
+            assert_close(hairpin.value_at(t), v, &format!("hairpin t={t}"));
+        }
+        for t in 0..=1500 {
+            let v = hairpin.value_at(f64::from(t));
+            assert!((0.0..=1.0).contains(&v), "hairpin t={t} left [0, 1]: {v}");
+        }
+
+        let second = second_reference();
+        for (t, v) in [
+            (440.0, 0.395),
+            (880.0, 0.79),
+            (1400.0, 0.7664),
+            (1930.0, 0.633),
+            (2360.0, 0.314_745),
+            (3245.0, 0.006_25),
+        ] {
+            assert_close(second.value_at(t), v, &format!("second t={t}"));
+        }
+    }
+
+    #[test]
+    fn envelope_at_matches_reference() {
+        let hairpin = hairpin_reference();
+        for (t, lo, hi) in [
+            (225.0, 0.5, 1.0),
+            (450.0, 0.7, 0.95),
+            (800.0, 0.438_229, 0.661_042),
+            (1250.0, 0.029_2, 0.308_8),
+            (1500.0, 0.0, 0.061_988),
+        ] {
+            let (l, h) = hairpin.envelope_at(t, 150);
+            assert_close(l, lo, &format!("hairpin lo t={t}"));
+            assert_close(h, hi, &format!("hairpin hi t={t}"));
+        }
+
+        let second = second_reference();
+        for (t, lo, hi) in [
+            (440.0, 0.200_836, 0.589_164),
+            (880.0, 0.728_965, 0.79),
+            (1400.0, 0.743_817, 0.780_187),
+            (1930.0, 0.547_242, 0.687_29),
+            (3245.0, 0.001_883, 0.014_693),
+        ] {
+            let (l, h) = second.envelope_at(t, 150);
+            assert_close(l, lo, &format!("second lo t={t}"));
+            assert_close(h, hi, &format!("second hi t={t}"));
+        }
+    }
+
+    #[test]
+    fn envelope_table_equals_envelope_at() {
+        for curve in [hairpin_reference(), second_reference()] {
+            let table = curve.envelope_table(RAMP_WINDOW);
+            let end = i32::try_from(curve.duration_ms()).unwrap() + 400;
+            for t in -400..=end {
+                let t = f64::from(t);
+                assert_eq!(table.at(t), curve.envelope_at(t, RAMP_WINDOW), "t={t}");
+            }
+            // Between grid points the lookup rounds to the nearest millisecond.
+            assert_eq!(table.at(74.6), curve.envelope_at(75.0, RAMP_WINDOW));
+        }
+    }
+
+    #[test]
+    fn decimals_accepted_rejected_and_omitted() {
+        let json = |decimals: &str| {
+            format!(
+                r#"{{"schemaVersion":1,"id":"p","name":"P","drills":[{{"id":"d","name":"D","type":"hold","pedal":"brake","target":70,"holdMs":2000{decimals}}}]}}"#
+            )
+        };
+        assert_eq!(parse_preset(&json("")).unwrap().drills[0].decimals, None);
+        assert_eq!(
+            parse_preset(&json(r#","decimals":0"#)).unwrap().drills[0].decimals,
+            Some(0)
+        );
+        assert_eq!(
+            parse_preset(&json(r#","decimals":1"#)).unwrap().drills[0].decimals,
+            Some(1)
+        );
+
+        let err = parse_preset(&json(r#","decimals":2"#)).unwrap_err();
+        assert!(matches!(
+            &err,
+            PresetError::Invalid {
+                drill: Some(d),
+                message
+            } if d == "d" && message.contains("field 'decimals'")
+        ));
+
+        let trace = r#"{"schemaVersion":1,"id":"p","name":"P","drills":[{"id":"t","name":"T","type":"trace","pedal":"brake","decimals":1,"points":[[0,0],[1000,50]]}]}"#;
+        assert_eq!(parse_preset(trace).unwrap().drills[0].decimals, Some(1));
     }
 
     #[test]
@@ -1167,7 +1563,8 @@ mod tests {
         assert_eq!(preset.drills[2].pedal, Pedal::Brake);
         assert_eq!(preset.drills[3].id, "throttle-rolling-start-35");
         assert_eq!(preset.drills[3].pedal, Pedal::Throttle);
-        assert!((preset.drills[3].tolerance_fraction() - 0.10).abs() < f32::EPSILON);
+        assert!((preset.drills[3].tolerance_fraction() - 0.02).abs() < f32::EPSILON);
+        assert_eq!(preset.drills[3].decimals, Some(1));
         match &preset.drills[3].kind {
             DrillKind::Hold { target, hold_ms } => {
                 assert!((target - 35.0).abs() < 1e-6);

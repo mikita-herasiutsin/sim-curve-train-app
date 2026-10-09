@@ -499,9 +499,8 @@ const bundledPresets = () =>
     .filter((f) => f.endsWith(".json"))
     .map((f) => JSON.parse(readFileSync(join(ROOT, "presets", f), "utf8")));
 
-/** Hold drills on the brake or throttle: what the drill screen offers. */
-const playableOf = (preset) =>
-  preset.drills.filter((d) => d.type === "hold" && d.pedal !== "clutch");
+/** Drills on the brake or throttle: what the drill screen offers. */
+const playableOf = (preset) => preset.drills.filter((d) => d.pedal !== "clutch");
 
 function findDrill(presetId, drillId) {
   const preset = bundledPresets().find((p) => p.id === presetId);
@@ -799,6 +798,52 @@ async function main() {
     );
   });
 
+  await step("trace-drill-runs", async () => {
+    await click("button", "Pick Another Drill");
+    await waitFor(() => hasText("Select a Drill"), { what: "the drill picker" });
+    await selectOption(0, "Sample");
+    await waitFor(async () => (await optionTexts(1)).some((t) => t.startsWith("Hairpin trace")), {
+      what: "the hairpin trace drill",
+    });
+    await selectOption(1, "Hairpin trace");
+    await waitFor(() => hasText("Duration:"), { what: "trace drill details" });
+    const drill = findDrill("sample", "hairpin");
+    await setPedals(0, 0, 0);
+    await click("button", "Start Drill");
+    // The last second of the lead-in shows GO before the rep starts.
+    await waitFor(
+      () => ev(`document.querySelector(".countdown-number")?.textContent.trim() === "GO"`),
+      { timeout: 15_000, interval: 50, what: "GO in the countdown overlay" },
+    );
+    await waitFor(
+      () =>
+        ev(`(() => {
+          const view = document.querySelector('[data-testid="trace-view"]');
+          const hud = document.querySelector('[data-testid="trace-hud"]');
+          return Boolean(view && hud && /Target\\s*\\d+%/.test(hud.textContent));
+        })()`),
+      { timeout: 15_000, what: "trace-view and trace-hud with target percentage" },
+    );
+    const grades = new Set();
+    const states = new Set();
+    let snap;
+    await waitFor(
+      async () => {
+        snap = await drillSnap();
+        if (snap.state) states.add(snap.state);
+        if (snap.grade) grades.add(snap.grade);
+        if (snap.error) throw new Fatal(`drill page error: ${snap.error}`);
+        return snap.finished && snap.pills.length > 0;
+      },
+      { timeout: 90_000, interval: 100, what: "the trace set to finish" },
+    );
+    log(`      grades seen ${[...grades].join(",")} pills ${snap.pills.join(" ")}`);
+    assert(
+      snap.pills.length === drill.reps,
+      `expected ${drill.reps} reps, summary has ${snap.pills.length}`,
+    );
+  });
+
   await step("abort-and-play-again", async () => {
     await click("button", "Pick Another Drill");
     await waitFor(() => hasText("Select a Drill"), { what: "the drill picker" });
@@ -895,7 +940,8 @@ async function main() {
           () =>
             ev(`(() => {
               const info = document.querySelector(".drill-info")?.innerText ?? "";
-              return info.includes("Target Pedal: ${d.pedal}") && info.includes("Target: ${d.target}%") && info.includes("Reps: ${d.reps}");
+              const kind = ${JSON.stringify(d.type === "trace" ? "Duration:" : `Target: ${d.target.toFixed(d.decimals ?? 0)}%`)};
+              return info.includes("Target Pedal: ${d.pedal}") && info.includes(kind) && info.includes("Reps: ${d.reps}");
             })()`),
           { what: `details of ${p.name} / ${d.name} (index ${i})` },
         );

@@ -11,7 +11,6 @@
     toleranceOf,
     IDLE_VIEW,
     type Preset,
-    type HoldDrill,
     type Drill,
     type DrillEvent,
     type RunView,
@@ -23,12 +22,19 @@
   import AudioControls from "$lib/components/AudioControls.svelte";
   import PedalBars from "$lib/components/PedalBars.svelte";
   import PedalGraph from "$lib/components/PedalGraph.svelte";
+  import TraceView from "$lib/components/TraceView.svelte";
+  import { traceDurationMs, TraceCurve, GO_LEAD_MS } from "$lib/pedals/traceDraw";
+  import { formatPercentValue } from "$lib/pedals/geometry";
   import type { TargetBand } from "$lib/pedals/graphDraw";
 
   let presets = $state<Preset[]>([]);
   let selectedPreset = $state<Preset | null>(null);
-  let selectedDrill = $state<HoldDrill | null>(null);
+  let selectedDrill = $state<Drill | null>(null);
   let presetsError = $state<string | null>(null);
+
+  const traceCurve = $derived<TraceCurve | null>(
+    selectedDrill?.type === "trace" ? new TraceCurve(selectedDrill.points) : null,
+  );
 
   let sourceStatus = $state<SourceStatus>({ kind: "connecting" });
   let stopSource: (() => void) | null = null;
@@ -37,20 +43,25 @@
   let countdownMs = $state(0);
   // Time left to hold in the active rep, in ms (0..holdMs), refreshed every frame.
   let holdRemainingMs = $state(0);
-  // "GO!" is shown briefly when a rep becomes active.
-  let showGo = $state(false);
-  let goTimer: ReturnType<typeof setTimeout> | undefined;
-  const GO_MS = 600;
-  // 3, 2, 1 for a 3000 ms lead-in; clamped so a late frame never flashes 0.
-  const countdownSeconds = $derived(Math.max(1, Math.ceil(countdownMs / 1000)));
+  // Time left in the active trace rep, in ms (0..durationMs), refreshed every frame.
+  let remainingMs = $state(0);
+  let currentTargetFrac = $state<number | null>(null);
+  let currentRangeFrac = $state<[number, number] | null>(null);
+  let currentFrac = $state(0);
+  // While remaining > GO_LEAD_MS show the number; while remaining <= GO_LEAD_MS show "GO".
+  const countdownText = $derived(
+    countdownMs > GO_LEAD_MS
+      ? String(Math.max(1, Math.ceil((countdownMs - GO_LEAD_MS) / 1000)))
+      : "GO",
+  );
   let errorMessage = $state<string | null>(null);
   // Set once the user aborts; the engine still ends the set with a final `setFinished`.
   let aborting = $state(false);
 
-  // The target band on the graph, while a hold rep is active.
-  // TODO(SCT-034): trace drills draw their target curve instead.
+  // The target band on the graph, while a hold rep is active or during the GO second.
   const graphBand = $derived<TargetBand | null>(
-    view.runState === "active" && selectedDrill?.type === "hold"
+    (view.runState === "active" || (view.runState === "countdown" && countdownMs <= GO_LEAD_MS)) &&
+      selectedDrill?.type === "hold"
       ? {
           pedal: selectedDrill.pedal,
           target: selectedDrill.target / 100,
@@ -83,22 +94,6 @@
     shakiness: "Small quick wobbles around your own average pedal position.",
   };
 
-  // Show "GO!" for a moment each time a rep becomes active.
-  let lastRunState = "idle";
-  $effect(() => {
-    const state = view.runState;
-    if (state === "active" && lastRunState !== "active") {
-      showGo = true;
-      holdRemainingMs = selectedDrill?.type === "hold" ? selectedDrill.holdMs : 0;
-      clearTimeout(goTimer);
-      goTimer = setTimeout(() => (showGo = false), GO_MS);
-    } else if (state !== "active") {
-      showGo = false;
-      clearTimeout(goTimer);
-    }
-    lastRunState = state;
-  });
-
   onMount(() => {
     if (isTauri()) {
       listPresets()
@@ -123,17 +118,44 @@
     }
 
     const loop = () => {
+      const nowUs = pedalStream.dataNowUs();
       if (view.runState === "countdown" && view.countdownEndsUs > 0) {
-        const remainingUs = view.countdownEndsUs - pedalStream.dataNowUs();
+        const remainingUs = view.countdownEndsUs - nowUs;
         const ms = Math.max(0, Math.ceil(remainingUs / 1000));
         countdownMs = Math.ceil(ms / 100) * 100;
       } else if (view.runState === "active" && selectedDrill?.type === "hold") {
         const endUs = view.repStartUs + selectedDrill.holdMs * 1000;
-        const ms = Math.min(
-          selectedDrill.holdMs,
-          Math.max(0, Math.ceil((endUs - pedalStream.dataNowUs()) / 1000)),
-        );
+        const ms = Math.min(selectedDrill.holdMs, Math.max(0, Math.ceil((endUs - nowUs) / 1000)));
         holdRemainingMs = Math.ceil(ms / 100) * 100;
+      }
+
+      if (selectedDrill?.type === "trace" && traceCurve) {
+        const durationMs = traceCurve.durationMs;
+        const isGo = view.runState === "countdown" && countdownMs <= GO_LEAD_MS;
+        if (view.runState === "active") {
+          const repMs = Math.max(0, Math.min(durationMs, (nowUs - view.repStartUs) / 1000));
+          currentTargetFrac = traceCurve.valueAt(repMs);
+          currentRangeFrac = traceCurve.envelopeAt(repMs);
+          const latest = pedalStream.history.latest();
+          currentFrac =
+            latest && selectedDrill.pedal !== "clutch" ? latest[selectedDrill.pedal] : 0;
+          const rem = durationMs - repMs;
+          remainingMs = Math.ceil(rem / 100) * 100;
+        } else if (isGo) {
+          const playheadMs =
+            view.countdownEndsUs > 0 ? (nowUs - view.countdownEndsUs) / 1000 : -GO_LEAD_MS;
+          currentTargetFrac = traceCurve.valueAt(playheadMs);
+          currentRangeFrac = traceCurve.envelopeAt(playheadMs);
+          const latest = pedalStream.history.latest();
+          currentFrac =
+            latest && selectedDrill.pedal !== "clutch" ? latest[selectedDrill.pedal] : 0;
+          remainingMs = durationMs;
+        } else {
+          currentTargetFrac = null;
+          currentRangeFrac = null;
+          currentFrac = 0;
+          remainingMs = durationMs;
+        }
       }
       rafId = requestAnimationFrame(loop);
     };
@@ -141,7 +163,6 @@
   });
 
   onDestroy(() => {
-    clearTimeout(goTimer);
     if (stopSource) stopSource();
     if (rafId !== null) cancelAnimationFrame(rafId);
     if (sourceStatus.kind === "live" && view.runState !== "idle" && view.runState !== "finished") {
@@ -293,16 +314,29 @@
             </label>
           {/if}
         </div>
-        <p class="note">Trace drills arrive with SCT-034.</p>
 
         {#if selectedDrill}
           <div class="drill-info">
             <p><strong>Type:</strong> {selectedDrill.type}</p>
             <p><strong>Target Pedal:</strong> {selectedDrill.pedal}</p>
             {#if selectedDrill.type === "hold"}
-              <p><strong>Target:</strong> {selectedDrill.target}%</p>
+              <p>
+                <strong>Target:</strong>
+                {selectedDrill.target.toFixed(selectedDrill.decimals ?? 0)}%
+              </p>
               <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
               <p><strong>Hold Time:</strong> {selectedDrill.holdMs} ms</p>
+            {:else if selectedDrill.type === "trace"}
+              {@const peak = selectedDrill.points.reduce((max, p) => Math.max(max, p[1]), 0)}
+              <p>
+                <strong>Duration:</strong>
+                {(traceDurationMs(selectedDrill.points) / 1000).toFixed(1)} s
+              </p>
+              <p>
+                <strong>Peak:</strong>
+                {formatPercentValue(peak / 100, selectedDrill.decimals ?? 0)}%
+              </p>
+              <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
             {/if}
             <p><strong>Reps:</strong> {selectedDrill.reps}</p>
           </div>
@@ -319,8 +353,8 @@
             {#if view.runState === "countdown"}
               <div class="overlay" aria-live="assertive">
                 <p class="countdown-label">Get ready</p>
-                {#key countdownSeconds}
-                  <p class="countdown-number">{countdownSeconds}</p>
+                {#key countdownText}
+                  <p class="countdown-number">{countdownText}</p>
                 {/key}
               </div>
             {:else if view.runState === "finished"}
@@ -339,27 +373,44 @@
                 targetPedal={selectedDrill.pedal}
                 targetVal={selectedDrill.target / 100}
                 targetTolerance={toleranceOf(selectedDrill) / 100}
+                decimals={selectedDrill.decimals ?? 0}
               />
             {:else if selectedDrill?.type === "trace"}
-              <!-- Trace not fully supported in PedalBars target yet -->
-              <PedalBars stream={pedalStream} />
+              <PedalBars
+                stream={pedalStream}
+                targetPedal={selectedDrill.pedal}
+                targetVal={currentTargetFrac}
+                targetRange={currentRangeFrac}
+                targetTolerance={toleranceOf(selectedDrill) / 100}
+                decimals={selectedDrill.decimals ?? 0}
+              />
             {/if}
           </div>
 
           <div class="graph-container">
-            <PedalGraph stream={pedalStream} band={graphBand} />
+            {#if selectedDrill?.type === "trace" && traceCurve}
+              <TraceView
+                drill={selectedDrill}
+                curve={traceCurve}
+                repStartUs={view.repStartUs}
+                active={view.runState === "active"}
+                countdownEndsUs={view.countdownEndsUs}
+                countingDown={view.runState === "countdown"}
+              />
+            {:else}
+              <PedalGraph stream={pedalStream} band={graphBand} />
+            {/if}
           </div>
         </div>
 
         <div class="side-panel">
           {#if view.runState === "active" && selectedDrill?.type === "hold"}
             <div class="hold-hud-card panel" data-testid="hold-hud">
-              {#if showGo}
-                <p class="go-label">GO!</p>
-              {/if}
               <p class="hold-time">Hold <span>{(holdRemainingMs / 1000).toFixed(1)}s</span></p>
               <p class="hold-target">
-                Target {selectedDrill.target}% &plusmn;{toleranceOf(selectedDrill)}%
+                Target {selectedDrill.target.toFixed(selectedDrill.decimals ?? 0)}% &plusmn;{toleranceOf(
+                  selectedDrill,
+                )}%
               </p>
               <div
                 class="hold-progress"
@@ -370,6 +421,34 @@
                 aria-valuenow={holdRemainingMs}
               >
                 <span style:width="{(holdRemainingMs / selectedDrill.holdMs) * 100}%"></span>
+              </div>
+            </div>
+          {:else if (view.runState === "active" || (view.runState === "countdown" && countdownMs <= GO_LEAD_MS)) && selectedDrill?.type === "trace"}
+            {@const durationMs = traceCurve ? traceCurve.durationMs : 0}
+            <div class="trace-hud-card panel" data-testid="trace-hud">
+              <div class="trace-numbers">
+                <p class="trace-target">
+                  Target <span
+                    >{formatPercentValue(
+                      currentTargetFrac ?? 0,
+                      selectedDrill.decimals ?? 0,
+                    )}%</span
+                  >
+                </p>
+                <p class="trace-current">
+                  You <span>{formatPercentValue(currentFrac, selectedDrill.decimals ?? 0)}%</span>
+                </p>
+              </div>
+              <p class="hold-time"><span>{(remainingMs / 1000).toFixed(1)}s</span></p>
+              <div
+                class="hold-progress"
+                role="progressbar"
+                aria-label="Trace time left"
+                aria-valuemin={0}
+                aria-valuemax={durationMs}
+                aria-valuenow={remainingMs}
+              >
+                <span style:width="{durationMs > 0 ? (remainingMs / durationMs) * 100 : 0}%"></span>
               </div>
             </div>
           {/if}
@@ -392,6 +471,23 @@
               <div class="score-grade">
                 <span class="total">{Math.round(view.lastScore.total)}</span>
                 <span class="grade grade-{view.lastScore.grade}">{view.lastScore.grade}</span>
+              </div>
+              <ul class="subscores">
+                <li>Accuracy: {Math.round(view.lastScore.accuracy)}</li>
+                <li>Timing: {Math.round(view.lastScore.timing)}</li>
+                <li>Smoothness: {Math.round(view.lastScore.smoothness)}</li>
+              </ul>
+              <div class="metrics">
+                <small
+                  title="How late (positive) or early (negative) you followed the curve, in ms."
+                  >Lag {Math.round(view.lastScore.lagMs)} ms</small
+                >
+                <small title="Share of the rep your pedal was inside the band."
+                  >In band {Math.round(view.lastScore.timeInBand * 100)}%</small
+                >
+                <small title="Average distance outside the band, as a share of full pedal travel."
+                  >Off band ±{(view.lastScore.rmse * 100).toFixed(1)}%</small
+                >
               </div>
             </div>
           {:else if view.lastScore}
@@ -646,15 +742,32 @@
     }
   }
 
-  .hold-hud-card {
+  .hold-hud-card,
+  .trace-hud-card {
     text-align: center;
   }
 
-  .go-label {
+  .trace-numbers {
+    display: flex;
+    justify-content: space-around;
+    align-items: baseline;
+    margin: 0.5rem 0;
+  }
+
+  .trace-target,
+  .trace-current {
     margin: 0;
-    font-size: 3rem;
-    font-weight: 800;
-    color: #22c55e;
+    font-size: 0.875rem;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .trace-target span,
+  .trace-current span {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
   }
 
   .hold-time {
@@ -840,7 +953,8 @@
 
   /* Let the canvases shrink with their panel instead of keeping their own 18rem floor. */
   .bars-container :global(.pedal-bars-container),
-  .graph-container :global(.pedal-graph-container) {
+  .graph-container :global(.pedal-graph-container),
+  .graph-container :global(.trace-view-container) {
     min-height: 0;
   }
 

@@ -442,9 +442,12 @@ impl Stream {
         }
         if let Some(audio) = &drill.audio {
             // Beeps only while a rep is active: silent in the countdown and the rest pause.
+            // The target is the nearest point of the band, so the tone measures the distance
+            // outside the timing-window envelope. `max`/`min` never panic, unlike `clamp`.
             let target = matches!(drill.run.phase(), Phase::Active { .. })
-                .then(|| drill.run.target_at(sample.t_us))
-                .flatten();
+                .then(|| drill.run.band_at(sample.t_us))
+                .flatten()
+                .map(|(lo, hi)| value.max(lo).min(hi));
             let rate = drill
                 .tone
                 .step(target, value, drill.run.drill().tolerance_fraction());
@@ -869,6 +872,7 @@ mod tests {
             reps: 2,
             lead_in_ms: 1000,
             tolerance: Some(5.0),
+            decimals: None,
             kind: DrillKind::Hold {
                 target: 70.0,
                 hold_ms: 1000,
@@ -1068,6 +1072,7 @@ mod tests {
             reps: 1,
             lead_in_ms: 1000,
             tolerance: Some(6.0),
+            decimals: None,
             kind: DrillKind::Trace {
                 points: vec![(0, 0.0), (150, 90.0), (600, 0.0)],
             },
@@ -1082,10 +1087,14 @@ mod tests {
             &reply,
         );
         assert_eq!(answer.recv().unwrap(), Ok(()));
-        // Off target during the active window: beeping.
-        assert!(feed(&mut stream, &audio, 1_001, 1_500, 0.5) > 0.0);
+        // At 80% in the first 100 ms of the ramp the pedal is 14 to 80 points above the
+        // instant target (tolerance 6) but inside the ±150 ms band, which reaches the 90%
+        // peak. Silent, so the cue follows the band and not the instant target.
+        assert_eq!(feed(&mut stream, &audio, 1_001, 1_100, 0.80), 0.0);
+        // Above the whole timing-window band during the active window: beeping.
+        assert!(feed(&mut stream, &audio, 1_100, 1_500, 1.0) > 0.0);
         // Off target in the scoring phase, where the target is no longer shown: silent.
-        assert_eq!(feed(&mut stream, &audio, 1_500, 1_700, 0.5), 0.0);
+        assert_eq!(feed(&mut stream, &audio, 1_500, 1_700, 1.0), 0.0);
         let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
         assert!(matches!(phase, Some(Phase::Scoring { .. })), "{phase:?}");
     }

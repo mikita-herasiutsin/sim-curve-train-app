@@ -8,10 +8,10 @@
 
 use serde::Serialize;
 
-use crate::preset::{Drill, DrillKind, TraceCurve};
+use crate::preset::{Drill, DrillKind, EnvelopeTable, TraceCurve};
 use crate::scoring::{Grade, HoldParams, HoldScore, ValueSample, score_hold};
 use crate::set_summary::{SetSummary, summarize_set};
-use crate::trace_scoring::{TraceParams, TraceScore, score_trace};
+use crate::trace_scoring::{RAMP_WINDOW_MS, TraceParams, TraceScore, score_trace};
 
 /// Default rest pause in milliseconds between repetitions.
 pub const DEFAULT_REST_MS: u32 = 2000;
@@ -131,6 +131,8 @@ pub enum DrillEvent {
 pub struct DrillRun {
     drill: Drill,
     curve: Option<TraceCurve>,
+    /// Envelope of `curve` within ±[`RAMP_WINDOW_MS`], so [`Self::band_at`] is a lookup.
+    band: Option<EnvelopeTable>,
     rest_ms: u32,
     phase: Phase,
     countdown_start_us: u64,
@@ -148,9 +150,11 @@ impl DrillRun {
     #[must_use]
     pub fn new(drill: Drill, rest_ms: u32) -> Self {
         let curve = drill.trace_curve();
+        let band = curve.as_ref().map(|c| c.envelope_table(RAMP_WINDOW_MS));
         Self {
             drill,
             curve,
+            band,
             rest_ms,
             phase: Phase::Idle,
             countdown_start_us: 0,
@@ -404,6 +408,31 @@ impl DrillRun {
         }
     }
 
+    /// Target band `(lo, hi)` as fractions at timestamp `t_us`, with the same phase rules as
+    /// [`Self::target_at`]. A hold drill gives `(target, target)`; a trace drill gives the
+    /// range of the curve within ±[`RAMP_WINDOW_MS`], looked up at the nearest millisecond in
+    /// a table built once per run (this runs on the input thread). The tolerance is not
+    /// included.
+    #[must_use]
+    pub fn band_at(&self, t_us: u64) -> Option<(f32, f32)> {
+        match self.phase {
+            Phase::Active { .. } | Phase::Scoring { .. } => match &self.drill.kind {
+                DrillKind::Hold { .. } => self.drill.target_fraction().map(|v| (v, v)),
+                DrillKind::Trace { .. } => {
+                    let band = self.band.as_ref()?;
+                    let elapsed_us = t_us.saturating_sub(self.current_rep_start_us);
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "elapsed time in microseconds fits within f64"
+                    )]
+                    let dt_ms = (elapsed_us as f64) / 1000.0;
+                    Some(band.at(dt_ms))
+                }
+            },
+            Phase::Idle | Phase::Countdown { .. } | Phase::Finished | Phase::Aborted => None,
+        }
+    }
+
     /// Normalized progress fraction in `0.0..=1.0` through the current countdown or active phase
     /// (`1.0` during scoring), or `None` during idle, finished, or aborted states.
     #[must_use]
@@ -464,6 +493,7 @@ mod tests {
             reps,
             lead_in_ms,
             tolerance: Some(5.0),
+            decimals: None,
             kind: DrillKind::Hold { target, hold_ms },
         }
     }
@@ -476,6 +506,7 @@ mod tests {
             reps,
             lead_in_ms,
             tolerance: Some(6.0),
+            decimals: None,
             kind: DrillKind::Trace { points },
         }
     }
@@ -806,6 +837,30 @@ mod tests {
 
         let target_at_mid = trace_run.target_at(1_075_000).unwrap();
         assert!((target_at_mid - 0.45).abs() < 1e-4);
+    }
+
+    #[test]
+    fn band_at_hold_and_trace() {
+        let mut hold_run = DrillRun::new(make_hold_drill(1, 1000, 500, 70.0), 300);
+        hold_run.start(0);
+        assert_eq!(hold_run.band_at(500_000), None);
+        hold_run.push(ValueSample::new(1_000_000, 0.70));
+        assert_eq!(hold_run.band_at(1_200_000), Some((0.70, 0.70)));
+
+        let points = vec![(0, 0.0), (150, 90.0), (600, 0.0)];
+        let curve = TraceCurve::from_points(&points);
+        let mut trace_run = DrillRun::new(make_trace_drill(1, 1000, points), 300);
+        trace_run.start(0);
+        assert_eq!(trace_run.band_at(500_000), None);
+        trace_run.push(ValueSample::new(1_000_000, 0.0));
+
+        // On the ramp the band spans the curve from t-150 to t+150 ms.
+        let (lo, hi) = trace_run.band_at(1_075_000).unwrap();
+        assert_eq!((lo, hi), curve.envelope_at(75.0, RAMP_WINDOW_MS));
+        assert!(lo.abs() < 1e-6, "lo was {lo}");
+        assert!((hi - 0.90).abs() < 1e-4, "hi was {hi}");
+        let target = trace_run.target_at(1_075_000).unwrap();
+        assert!(lo <= target && target <= hi);
     }
 
     #[test]

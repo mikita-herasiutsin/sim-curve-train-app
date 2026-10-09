@@ -13,7 +13,7 @@ use sct_core::preset::{DrillKind, parse_preset};
 
 use crate::csv::{LapTelemetry, parse_filename_metadata, parse_lap_time_str, read_csv_file};
 use crate::extract::{ExtractOptions, extract_preset_from_laps};
-use crate::simplify::{Point2D, rdp, simplify_adaptive};
+use crate::simplify::{Point2D, process_trace_segment, rdp, simplify_adaptive};
 use crate::stats::{MetricSummary, StatsCollector, analyze_throttle_exit};
 use crate::zones::{BrakeZone, detect_brake_zones, detect_lift_zones, detect_throttle_exit_zones};
 
@@ -144,6 +144,30 @@ fn test_zone_detection_with_filtering_and_merging() {
     let tz = &throttle_zones[0];
     assert!(tz.onset_idx >= 200);
     assert!(tz.full_idx >= 244);
+}
+
+#[test]
+fn test_trace_outside_preset_limits_is_dropped() {
+    // A ramp up and down; at 60 Hz each sample is 16.7 ms.
+    let ramp = |len: usize| -> Vec<f32> {
+        (0..len)
+            .map(|i| 1.0 - ((i as f32) / (len as f32) * 2.0 - 1.0).abs())
+            .collect()
+    };
+
+    // Cut off at both lap edges: 20 samples are 317 ms, under the 500 ms minimum.
+    assert_eq!(process_trace_segment(&ramp(20), 2, 17), []);
+
+    // 1000 samples are 16.7 s, over the 15 s maximum.
+    assert_eq!(process_trace_segment(&ramp(1000), 20, 980), []);
+
+    // A normal zone: 120 samples with the lead-in and lead-out are 2 s.
+    let points = process_trace_segment(&ramp(120), 20, 100);
+    let duration = points.last().unwrap().0;
+    assert!(
+        (500..=15000).contains(&duration) && (2..=64).contains(&points.len()),
+        "{points:?}"
+    );
 }
 
 #[test]

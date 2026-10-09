@@ -155,6 +155,7 @@ fn corner_drills(
         reps: 5,
         lead_in_ms: 2000,
         tolerance: options.tolerance,
+        decimals: None,
         kind,
     };
     let trace = |pedal: &[f32], start: usize, end: usize| {

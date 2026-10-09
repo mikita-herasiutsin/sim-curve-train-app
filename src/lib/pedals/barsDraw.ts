@@ -1,4 +1,4 @@
-import { getBarFillHeight, getPercentLabel } from "./geometry";
+import { formatPercentValue, getBarFillHeight } from "./geometry";
 import type { AppThemeColors } from "./theme";
 
 export interface BarColumnLayout {
@@ -89,6 +89,8 @@ export function drawPedalBars(
   targetPedal?: "brake" | "throttle" | "clutch",
   targetVal?: number | null,
   targetTolerance?: number | null,
+  decimals = 0,
+  targetRange?: [number, number] | null,
 ): void {
   ctx.clearRect(0, 0, width, height);
 
@@ -127,9 +129,11 @@ export function drawPedalBars(
 
     if (hasTarget) {
       // Draw two numbers side by side: Target -> Current
-      const tLabel = getPercentLabel(targetVal!);
-      const cLabel = getPercentLabel(val);
-      const inBand = targetTolerance != null && Math.abs(val - targetVal!) <= targetTolerance;
+      const tLabel = formatPercentValue(targetVal!, decimals);
+      const cLabel = formatPercentValue(val, decimals);
+      const [lo, hi] = targetRange != null ? targetRange : [targetVal!, targetVal!];
+      const inBand =
+        targetTolerance != null && lo - targetTolerance <= val && val <= hi + targetTolerance;
 
       const valColor = inBand ? theme.accent : color;
 
@@ -145,7 +149,7 @@ export function drawPedalBars(
       ctx.textAlign = "center"; // reset for label below
     } else {
       ctx.fillStyle = color;
-      ctx.fillText(`${getPercentLabel(val)}%`, centerX, col.percentY);
+      ctx.fillText(`${formatPercentValue(val, decimals)}%`, centerX, col.percentY);
     }
 
     // 2. Label
@@ -165,15 +169,16 @@ export function drawPedalBars(
     // Target Band (behind the fill)
     let inBandFill = false;
     if (hasTarget && targetTolerance != null) {
-      const bandTopVal = Math.min(1.0, targetVal! + targetTolerance!);
-      const bandBotVal = Math.max(0.0, targetVal! - targetTolerance!);
+      const [lo, hi] = targetRange != null ? targetRange : [targetVal!, targetVal!];
+      const bandTopVal = Math.min(1.0, hi + targetTolerance!);
+      const bandBotVal = Math.max(0.0, lo - targetTolerance!);
       const topH = getBarFillHeight(bandTopVal, col.barHeight);
       const botH = getBarFillHeight(bandBotVal, col.barHeight);
 
       const bandY = col.barY + col.barHeight - topH;
       const bandH = topH - botH;
 
-      inBandFill = Math.abs(val - targetVal!) <= targetTolerance!;
+      inBandFill = lo - targetTolerance! <= val && val <= hi + targetTolerance!;
 
       ctx.save();
       roundRect(ctx, col.x, col.barY, col.width, col.barHeight, 8);

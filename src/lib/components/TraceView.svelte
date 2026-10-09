@@ -3,25 +3,36 @@
   import { pedalStream, type PedalStream } from "$lib/pedals/stream";
   import { readThemeColors, type AppThemeColors } from "$lib/pedals/theme";
   import { onThemeChange } from "$lib/settings";
-  import { drawPedalBars } from "$lib/pedals/barsDraw";
+  import { toleranceOf, type TraceDrill } from "$lib/drill";
+  import {
+    drawTrace,
+    TraceCurve,
+    GO_LEAD_MS,
+    traceViewPhase,
+    type TraceViewState,
+  } from "$lib/pedals/traceDraw";
 
   interface Props {
     stream?: PedalStream;
-    targetPedal?: "brake" | "throttle" | "clutch";
-    targetVal?: number | null;
-    targetTolerance?: number | null;
-    decimals?: number;
-    targetRange?: [number, number] | null;
+    drill: TraceDrill;
+    curve: TraceCurve;
+    repStartUs: number;
+    active: boolean;
+    countdownEndsUs?: number;
+    countingDown?: boolean;
   }
 
   let {
     stream = pedalStream,
-    targetPedal,
-    targetVal = null,
-    targetTolerance = null,
-    decimals = 0,
-    targetRange = null,
+    drill,
+    curve,
+    repStartUs,
+    active,
+    countdownEndsUs = 0,
+    countingDown = false,
   }: Props = $props();
+
+  let lastShownStartUs = 0;
 
   let containerEl = $state<HTMLDivElement | null>(null);
   let canvasEl = $state<HTMLCanvasElement | null>(null);
@@ -44,30 +55,64 @@
   function render(): void {
     if (!canvasEl || width <= 0 || height <= 0) return;
     const ctx = canvasEl.getContext("2d");
-    if (!ctx) return;
-    // Colours are cached: read on mount and refreshed by onThemeChange, not per frame.
-    if (!theme) return;
+    if (!ctx || !theme) return;
 
     ctx.save();
     ctx.scale(dpr, dpr);
 
-    const latest = stream.history.latest();
-    const brake = latest?.brake ?? 0;
-    const throttle = latest?.throttle ?? 0;
+    const durationMs = curve.durationMs;
+    const tolerance = toleranceOf(drill) / 100;
+    const pedal = drill.pedal === "throttle" ? "throttle" : "brake";
 
-    drawPedalBars(
-      ctx,
-      width,
-      height,
-      brake,
-      throttle,
-      theme,
-      targetPedal,
-      targetVal,
-      targetTolerance,
-      decimals,
-      targetRange,
-    );
+    const now = stream.dataNowUs();
+    if (countingDown && (countdownEndsUs <= 0 || countdownEndsUs - now > GO_LEAD_MS * 1000)) {
+      lastShownStartUs = 0;
+    }
+    const phase = traceViewPhase({
+      nowUs: now,
+      countingDown,
+      countdownEndsUs,
+      active,
+      repStartUs,
+      lastShownStartUs,
+      durationMs,
+    });
+    if (phase.playheadMs !== null) {
+      lastShownStartUs = phase.shownStartUs;
+    }
+    const shownStartUs = phase.shownStartUs;
+    const playheadMs = phase.playheadMs;
+
+    const user: [number, number][] = [];
+    if (shownStartUs > 0) {
+      const windowStartUs = shownStartUs - GO_LEAD_MS * 1000;
+      const windowEndUs = shownStartUs + durationMs * 1000;
+      stream.history.forEachSince(windowStartUs, (frame) => {
+        if (frame.t <= windowEndUs) {
+          const val = pedal === "brake" ? frame.brake : frame.throttle;
+          user.push([(frame.t - shownStartUs) / 1000, val]);
+        }
+      });
+    }
+
+    let inBand = false;
+    if (playheadMs !== null) {
+      const latest = stream.history.latest();
+      const val = latest ? (pedal === "brake" ? latest.brake : latest.throttle) : 0;
+      const [lo, hi] = curve.envelopeAt(playheadMs);
+      inBand = val >= lo - tolerance && val <= hi + tolerance;
+    }
+
+    const state: TraceViewState = {
+      curve,
+      pedal,
+      tolerance,
+      playheadMs,
+      user,
+      inBand,
+    };
+
+    drawTrace(ctx, width, height, state, theme, 18, 26);
     ctx.restore();
   }
 
@@ -76,15 +121,15 @@
 
     theme = readThemeColors(containerEl);
 
-    // Initial size
-    width = containerEl.clientWidth || 180;
+    width = containerEl.clientWidth || 600;
     height = containerEl.clientHeight || 360;
     updateResolution();
 
-    // Redraw immediately when theme changes
     unsubTheme = onThemeChange(() => {
-      theme = readThemeColors(containerEl);
-      render();
+      if (containerEl) {
+        theme = readThemeColors(containerEl);
+        render();
+      }
     });
 
     if (typeof ResizeObserver !== "undefined") {
@@ -101,7 +146,6 @@
       resizeObserver.observe(containerEl);
     }
 
-    // Initial render
     render();
 
     const loop = () => {
@@ -127,16 +171,16 @@
   });
 </script>
 
-<div class="pedal-bars-container" bind:this={containerEl}>
+<div class="trace-view-container" data-testid="trace-view" bind:this={containerEl}>
   <canvas
     bind:this={canvasEl}
-    aria-label="Live brake and throttle pedal bars"
+    aria-label="Trace drill target curve"
     style="width: 100%; height: 100%;"
   ></canvas>
 </div>
 
 <style>
-  .pedal-bars-container {
+  .trace-view-container {
     width: 100%;
     height: 100%;
     min-height: 18rem;

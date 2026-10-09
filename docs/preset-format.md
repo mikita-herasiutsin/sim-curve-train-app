@@ -27,8 +27,9 @@ Every drill shares a set of common fields, plus specific fields determined by th
 | `type` | string | Required | `"hold"` or `"trace"` | Kind of practice drill. |
 | `pedal` | string | Required | `"throttle"`, `"brake"`, `"clutch"` | Target pedal hardware axis to monitor. |
 | `reps` | integer | Optional (default: `5`) | `1` to `50` | Number of repetitions to complete the drill. |
-| `leadInMs` | integer | Optional (default: `3000`) | `0` to `10000` | Lead-in preparation countdown before each repetition in milliseconds. |
+| `leadInMs` | integer | Optional (default: `3000`) | `1000` to `10000` | Lead-in preparation countdown before each repetition in milliseconds. GO shows for its last 1000 ms. |
 | `tolerance` | number | Optional (default: `10`, D-17) | `0.5` to `50.0` | Half-width of the tolerance band in percentage points: `5` means the target ±5%. |
+| `decimals` | integer | Optional (default: `0`) | `0` or `1` | Digits after the decimal point when the UI shows percentages for this drill. |
 
 ### Hold Drill Fields (`"type": "hold"`)
 
@@ -45,7 +46,7 @@ Trace drills require following a dynamic target curve over time (for example, th
 
 | Field | Type | Required / Default | Allowed Range | Meaning |
 |---|---|---|---|---|
-| `points` | array of `[t, value]` pairs | Required | At least 2 points | Control points defining the pedal curve over time. |
+| `points` | array of `[t, value]` pairs | Required | 2 to 64 points, last `t` from `500` to `15000` | Control points defining the pedal curve over time. |
 
 ## How Trace Points Work
 
@@ -55,10 +56,8 @@ A trace drill specifies an array of two-element arrays `[t, value]`, where:
 
 ### Interpolation and Clamping
 
-- **Linear interpolation:** Between adjacent points `(t0, v0)` and `(t1, v1)`, the target value at time `t` is calculated linearly:
-  ```text
-  target = v0 + ((t - t0) / (t1 - t0)) * (v1 - v0)
-  ```
+- **Rounded curve:** Between adjacent points the target follows a monotone cubic (Fritsch-Carlson) curve with zero slope at the first and last point ([D-21](decisions/README.md)). The curve passes through every point and never goes above or below the two points around it, so it has no overshoot. The screen, the audio cue and scoring all use this curve.
+- **Band:** A sample counts as in the band when it is within the tolerance of any target value within ±150 ms of that moment (D-21). On a ramp the band is wider than ±tolerance; on a flat part it is exactly ±tolerance.
 - **Before the first point:** Timestamps before `0 ms` clamp to the first point value.
 - **After the final point:** Timestamps beyond the final timestamp clamp to the final point value.
 - **Normalization:** In internal scoring and evaluation, percentage values `0.0..=100.0` are converted into normalized fractions `0.0..=1.0`.
@@ -72,15 +71,15 @@ The parser validates all presets strictly upon loading:
 4. Names (`name`) for both presets and drills must be non-empty.
 5. Presets must contain at least one drill.
 6. `reps` must be between `1` and `50`.
-7. `leadInMs` must be between `0` and `10000`.
-8. `tolerance` (if present) must be finite and between `0.5` and `50.0`. Omitted tolerances default to `10.0` (D-17).
+7. `leadInMs` must be between `1000` and `10000`.
+8. `tolerance` (if present) must be finite and between `0.5` and `50.0`. Omitted tolerances default to `10.0` (D-17). `decimals` (if present) must be `0` or `1`.
 9. Hold drills: `target` must be finite and between `0.0` and `100.0`; `holdMs` must be between `200` and `60000`.
 10. Trace drills:
-    - Must contain at least `2` points.
+    - Must contain at least `2` and at most `64` points.
     - The first point timestamp must be `0`.
     - Timestamps must be strictly increasing (`t[n] > t[n - 1]`).
     - Every value must be finite and between `0.0` and `100.0`.
-    - The total duration (the final point timestamp) must not exceed `60000` ms (60 seconds).
+    - The total duration (the final point timestamp) must be between `500` and `15000` ms. The ±150 ms band needs a trace well over 300 ms, and 15 s plus the 1 s GO fits the UI's 20 s pedal history.
 11. Unknown fields are rejected at both the preset and drill level.
 12. Directories loaded via the directory loader must not contain duplicate preset IDs across different files.
 

@@ -11,7 +11,7 @@ Status: ⬜ todo · 🟨 in progress · ✅ done
 | **M0 Foundation** | SCT-001 – SCT-003 | Empty app builds locally, CI is green, and a tag produces an `.exe` |
 | **M1 See my pedals** (risk spike) | SCT-010 – SCT-015, SCT-020 – SCT-022 | VNM pedals detected and calibrated; live bars and graph; latency measured |
 | **M2 First drill** | SCT-030 – SCT-033, SCT-038 | Hold drill with reps, scoring, results and audio |
-| **M3 Traces** | SCT-034 – SCT-036 | Trace drills in both views with scoring |
+| **M3 Traces** | SCT-034 – SCT-037 | Trace drills in both views with scoring |
 | **M4 Content** | SCT-040 – SCT-045 | GT3, NASCAR and MX-5 presets and the pre-race warm-up |
 | **M5 Progress & release** | SCT-023, SCT-050 – SCT-051, SCT-060 – SCT-062 | Personal bests and leaderboard, theme, onboarding, v0.1.0 release |
 
@@ -146,10 +146,11 @@ Settings: on/off and volume. Defaults follow [D-20](../decisions/README.md): on,
 
 ## M3: Traces
 
-### SCT-034 · Trace drill: fixed curve + playhead view ⬜ · M
+### SCT-034 · Trace drill: fixed curve + playhead view 🟨 · M
 The whole target curve is drawn with its tolerance band. A playhead sweeps across it and the user's trace is drawn on top. The **current target % is shown as a number** next to the current %.
-- **AC:** curve interpolation is linear between points; works for brake and throttle; there is a lead-in countdown.
+- **AC:** the curve is rounded (monotone cubic between points, changed from linear by [D-21](../decisions/README.md)); the band widens on ramps through a ±150 ms timing window (D-21); works for brake and throttle; there is a lead-in countdown that shows GO one second before the rep starts.
 - **Deps:** SCT-031
+- **Status:** in progress (playhead view, rounded curves, ramp band, GO second). The per-drill `decimals` field and the tighter rolling-start band came from the same feedback round.
 
 ### SCT-035 · Trace drill: scrolling ghost view + toggle ⬜ · M
 The target curve scrolls right to left towards a fixed "now" line, so you see what's coming next. The numeric target % is shown at the now-line. A toggle switches between ghost and playhead view, and the choice is persisted.
@@ -164,6 +165,11 @@ The target curve scrolls right to left towards a fixed "now" line, so you see wh
 These give the total and grade; reps and consistency reuse SCT-033.
 - **AC:** unit tests on synthetic traces (exact copy, 100 ms delay, noisy, overshoot) give the expected order of scores.
 - **Deps:** SCT-034, SCT-033
+
+### SCT-037 · Brake drills start from the throttle ⬜ · M
+A brake drill starts with the throttle pressed, as on track: the user holds the throttle, the cue releases it, and the brake trace or hold follows. The drill reports any overlap where both pedals are pressed at once, because that slows the car and is a habit worth breaking.
+- **AC:** an optional throttle lead-in in the preset (level and duration); overlap time and peak overlap are shown after each rep; drills without the lead-in behave as before.
+- **Deps:** SCT-034
 
 ---
 

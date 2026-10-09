@@ -1,5 +1,7 @@
 //! Curve resampling, RDP simplification, and drill generation.
 
+use sct_core::preset::{MAX_TRACE_MS, MAX_TRACE_POINTS, MIN_TRACE_MS};
+
 use crate::csv::TELEMETRY_HZ;
 
 /// Number of samples prepended for lead-in padding (300 ms at 60 Hz).
@@ -216,6 +218,7 @@ pub fn pchip_resample(raw_samples: &[f32], total_duration_ms: f64) -> Vec<(f64, 
 ///
 /// Anchors `t=0` at the lead-in start, resamples with monotonic PCHIP, normalizes coordinates,
 /// runs RDP simplification to 5–15 points, and verifies strict monotonicity of timestamps.
+/// Returns no points when the trace breaks the preset limits on duration or point count.
 #[must_use]
 pub fn process_trace_segment(
     samples: &[f32],
@@ -286,9 +289,17 @@ pub fn process_trace_segment(
         points.push((t_ms, val_pct));
     }
 
-    // Ensure at least 2 points and duration <= 60000 ms
+    // Ensure at least 2 points
     if points.len() == 1 {
         points.push((last_t + 10, points[0].1));
+    }
+
+    // A zone cut short at the lap edges can give a trace under MIN_TRACE_MS, and a long one
+    // can pass MAX_TRACE_MS. Validation would reject such a drill, so drop the zone here,
+    // before it counts against the drill budget.
+    let duration = points.last().map_or(0, |p| p.0);
+    if !(MIN_TRACE_MS..=MAX_TRACE_MS).contains(&duration) || points.len() > MAX_TRACE_POINTS {
+        return Vec::new();
     }
 
     points

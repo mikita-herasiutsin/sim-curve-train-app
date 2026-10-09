@@ -83,7 +83,9 @@ To run in debug mode with a virtual 3-axis pedal device ("SCT Simulated Pedals")
 - one PASS/FAIL line and one screenshot per step, in `smoke-out/` (gitignored);
 - free ports and a throwaway data directory (`SCT_DATA_DIR`), so it runs next to an open dev app and never touches your saved profiles or attempts.
 
-Options: `--keep-open`, `--out <dir>`, and `--no-launch --cdp <port>` to attach to an app that is already running. Windows only for now; it is not part of CI.
+Run it from a checkout other than the one with an open `tauri dev`: if Rust code changed, both would relink the same `target/debug` exe, which the running app locks, and the build fails.
+
+Options: `--keep-open`, `--out <dir>`, and `--no-launch --cdp <port>` (the port is required) to attach to an app that is already running; start that app with `SCT_SIM_PEDALS=1` and a fresh `SCT_DATA_DIR`, as the run aborts if the simulated device already has a profile or attempts. Windows only for now; it is not part of CI.
 
 ### Layout
 

@@ -1,13 +1,24 @@
 // End-to-end smoke test: launches the real Tauri app with the simulated pedals and drives its
 // WebView2 over the Chrome DevTools Protocol. Run with `npm run smoke`.
 //
-//   --keep-open        leave the app running afterwards
+//   --keep-open        leave the app running afterwards (stays alive until Ctrl-C)
 //   --out <dir>        screenshot directory (default: smoke-out/)
 //   --no-launch --cdp <port>   attach to an app that is already running (it must have been
-//                      started with SCT_SIM_PEDALS=1 and a fresh SCT_DATA_DIR)
+//                      started with SCT_SIM_PEDALS=1 and a fresh SCT_DATA_DIR). The port is
+//                      required so the normal dev app on 9222 is never hit by accident.
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,27 +32,47 @@ const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
 const option = (name, fallback) => {
   const i = argv.indexOf(name);
-  return i >= 0 ? argv[i + 1] : fallback;
+  if (i < 0) return fallback;
+  const value = argv[i + 1];
+  if (value === undefined || value.startsWith("--")) {
+    throw new Error(`usage: ${name} needs a value`);
+  }
+  return value;
 };
 const KEEP_OPEN = flag("--keep-open");
 const NO_LAUNCH = flag("--no-launch");
 const OUT_DIR = resolve(ROOT, option("--out", "smoke-out"));
 const BUILD_TIMEOUT_MS = 20 * 60_000;
+// Whole run, build included. Then the summary is printed and the run fails.
+const WATCHDOG_MS = 25 * 60_000;
+const CDP_CALL_TIMEOUT_MS = 20_000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...args) => console.log(...args);
+
+/** An error that ends the run: waitFor rethrows it at once instead of polling on. */
+class Fatal extends Error {}
+
+/** Set when the app process dies; every wait and CDP call then fails with it. */
+let appDied = null;
+const checkAlive = () => {
+  if (appDied) throw new Fatal(appDied);
+};
 
 /** Polls `predicate` until it returns a truthy value; throws with `what` on timeout. */
 async function waitFor(predicate, { timeout = 10_000, interval = 100, what = "condition" } = {}) {
   const deadline = Date.now() + timeout;
   let lastError;
   for (;;) {
+    checkAlive();
     try {
       const value = await predicate();
       if (value) return value;
     } catch (e) {
+      if (e instanceof Fatal) throw e;
       lastError = e;
     }
+    checkAlive();
     if (Date.now() > deadline) {
       throw new Error(
         `timed out after ${timeout} ms waiting for ${what}` +
@@ -56,24 +87,50 @@ async function waitFor(predicate, { timeout = 10_000, interval = 100, what = "co
 
 let appProc = null;
 let tempDir = null;
+let dataDir = null;
+// Substrings of the command lines of everything the launch started; see reapLeftovers.
+const markers = [];
 
-function killAppTree() {
-  if (appProc?.pid) {
-    // Only the process tree this script started; never anything else.
+const appRunning = () =>
+  appProc !== null && appProc.exitCode === null && appProc.signalCode === null;
+
+/** Kills what this run started: the process tree, then leftovers found by a unique marker. */
+function killApp() {
+  if (appRunning()) {
+    // Only while the child is alive: its PID could belong to someone else once it has exited.
     spawnSync("taskkill", ["/PID", String(appProc.pid), "/T", "/F"], { stdio: "ignore" });
-    appProc = null;
   }
+  appProc = null;
+  if (markers.length > 0) reapLeftovers();
+}
+
+/**
+ * Kills processes whose command line contains one of our markers: the temp config of the tauri
+ * CLI, vite's `--port <n> --strictPort`, the temp WebView2 profile. Never matches by name alone.
+ * The markers travel in an environment variable, so this PowerShell's own command line is no match.
+ */
+function reapLeftovers() {
+  const script = `
+    $m = $env:SMOKE_MARKERS -split '\\|'
+    Get-CimInstance Win32_Process | Where-Object {
+      $cl = $_.CommandLine
+      $_.ProcessId -ne $PID -and $cl -and ($m | Where-Object { $cl.Contains($_) })
+    } | ForEach-Object { & taskkill /PID $_.ProcessId /T /F | Out-Null }
+  `;
+  spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    stdio: "ignore",
+    env: { ...process.env, SMOKE_MARKERS: markers.join("|") },
+    timeout: 30_000,
+  });
 }
 
 function cleanup() {
-  if (!KEEP_OPEN) {
-    killAppTree();
-    if (tempDir) {
-      try {
-        rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
-      } catch {
-        // WebView2 may still hold files for a moment; the OS temp cleaner gets them.
-      }
+  killApp();
+  if (tempDir) {
+    try {
+      rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
+    } catch {
+      // WebView2 may still hold files for a moment; the OS temp cleaner gets them.
     }
   }
 }
@@ -91,59 +148,61 @@ function freePort(start) {
 }
 
 async function launchApp() {
-  // Two ports: ports in use by another instance (1420/9222) are never touched.
-  const devPort = await freePort(1421);
-  const cdpPort = await freePort(9223);
+  // Random start ports, so parallel runs rarely collide; 1420 and 9222 belong to the normal dev app.
+  const devPort = await freePort(1421 + Math.floor(Math.random() * 200));
+  const cdpPort = await freePort(9223 + Math.floor(Math.random() * 200));
   tempDir = mkdtempSync(join(tmpdir(), "sct-smoke-"));
-  const dataDir = join(tempDir, "data");
+  dataDir = join(tempDir, "data");
   const webviewDir = join(tempDir, "webview2");
   mkdirSync(dataDir);
   mkdirSync(webviewDir);
-  const devUrl = `http://localhost:${devPort}`;
+  // vite.config.js binds 127.0.0.1 (unless TAURI_DEV_HOST is set, which is removed below).
+  const url = `http://127.0.0.1:${devPort}`;
   const configPath = join(tempDir, "tauri.smoke.json");
   writeFileSync(
     configPath,
     JSON.stringify({
-      build: { devUrl, beforeDevCommand: `npm run dev -- --port ${devPort} --strictPort` },
+      build: { devUrl: url, beforeDevCommand: `npm run dev -- --port ${devPort} --strictPort` },
     }),
   );
+  markers.push(configPath, `--port ${devPort} --strictPort`, tempDir);
 
   mkdirSync(OUT_DIR, { recursive: true });
   const appLog = join(OUT_DIR, "app.log");
-  writeFileSync(appLog, "");
+  // A file descriptor, not pipes: with pipes into this process, --keep-open children would die
+  // of EPIPE when it exits.
+  const logFd = openSync(appLog, "w");
   log(
     `launching app (dev ${devPort}, cdp ${cdpPort}, data ${dataDir}); first build can take minutes`,
   );
+  const env = {
+    ...process.env,
+    SCT_SIM_PEDALS: "1",
+    SCT_DATA_DIR: dataDir,
+    WEBVIEW2_USER_DATA_FOLDER: webviewDir,
+    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
+  };
+  delete env.TAURI_DEV_HOST;
   appProc = spawn(`npm run tauri dev -- --config "${configPath}"`, {
     cwd: ROOT,
     shell: true,
-    windowsHide: false,
-    env: {
-      ...process.env,
-      SCT_SIM_PEDALS: "1",
-      SCT_DATA_DIR: dataDir,
-      WEBVIEW2_USER_DATA_FOLDER: webviewDir,
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}`,
-    },
+    env,
+    stdio: ["ignore", logFd, logFd],
   });
-  let exited = null;
-  appProc.on("exit", (code) => (exited = code ?? "signal"));
-  const append = (chunk) => writeFileSync(appLog, chunk, { flag: "a" });
-  appProc.stdout.on("data", append);
-  appProc.stderr.on("data", append);
+  closeSync(logFd);
+  appProc.on("exit", (code, signal) => {
+    appDied = `tauri dev exited early (${code ?? signal}); see ${appLog}`;
+    rejectAllPending(new Fatal(appDied));
+  });
 
   const target = await waitFor(
     async () => {
-      if (exited !== null) throw new Error(`tauri dev exited early with ${exited}; see ${appLog}`);
       const list = await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json();
-      return list.find((t) => t.type === "page" && t.url.startsWith(devUrl));
+      return list.find((t) => t.type === "page" && new URL(t.url).origin === url);
     },
     { timeout: BUILD_TIMEOUT_MS, interval: 1000, what: "the app window (CDP page)" },
-  ).catch((e) => {
-    if (exited !== null) throw new Error(`tauri dev exited early with ${exited}; see ${appLog}`);
-    throw e;
-  });
-  return { target, devUrl };
+  );
+  return { target, url };
 }
 
 // ---------------------------------------------------------------- CDP
@@ -153,6 +212,14 @@ let msgId = 0;
 const pending = new Map();
 let devUrl;
 
+function rejectAllPending(error) {
+  for (const { rej, timer } of pending.values()) {
+    clearTimeout(timer);
+    rej(error);
+  }
+  pending.clear();
+}
+
 async function connect(target) {
   ws = new WebSocket(target.webSocketDebuggerUrl);
   await new Promise((res, rej) => {
@@ -161,21 +228,40 @@ async function connect(target) {
   });
   ws.addEventListener("message", (e) => {
     const m = JSON.parse(e.data);
-    if (m.id && pending.has(m.id)) {
-      pending.get(m.id)(m);
-      pending.delete(m.id);
-    }
+    const call = pending.get(m.id);
+    if (!call) return;
+    pending.delete(m.id);
+    clearTimeout(call.timer);
+    if (m.error) call.rej(new Error(`${call.method}: ${m.error.message}`));
+    else call.res(m.result);
   });
+  const lost = () => rejectAllPending(new Fatal("lost the CDP connection to the app"));
+  ws.addEventListener("close", lost);
+  ws.addEventListener("error", lost);
   await send("Page.enable");
 }
 
 function send(method, params = {}) {
   return new Promise((res, rej) => {
+    try {
+      checkAlive();
+    } catch (e) {
+      rej(e);
+      return;
+    }
     const id = ++msgId;
-    pending.set(id, (m) =>
-      m.error ? rej(new Error(`${method}: ${m.error.message}`)) : res(m.result),
-    );
-    ws.send(JSON.stringify({ id, method, params }));
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      rej(new Error(`${method}: no answer after ${CDP_CALL_TIMEOUT_MS} ms`));
+    }, CDP_CALL_TIMEOUT_MS);
+    pending.set(id, { res, rej, timer, method });
+    try {
+      ws.send(JSON.stringify({ id, method, params }));
+    } catch (e) {
+      pending.delete(id);
+      clearTimeout(timer);
+      rej(new Fatal(`CDP send failed: ${e.message}`));
+    }
   });
 }
 
@@ -197,35 +283,47 @@ const setPedals = (throttle, brake, clutch) =>
 
 /** Full page load of an app route, resolved once the page has rendered something. */
 async function go(path) {
+  // A marker on the old document: it is gone once the new one has replaced it.
+  await ev(`window.__smokeNav = true`);
   await send("Page.navigate", { url: devUrl + path });
   await waitFor(
-    () => ev(`document.readyState === "complete" && document.body.innerText.length > 0`),
-    {
-      timeout: 20_000,
-      what: `page ${path} to load`,
-    },
+    () => ev(`window.__smokeNav === undefined && location.pathname === ${JSON.stringify(path)}`),
+    { timeout: 20_000, what: `the browser to arrive on ${path}` },
   );
-  // The simulated-pedals panel resends its own sliders (all 0) once it sees the device after a
-  // load. Wait for it, or that write lands after, and overrides, the pedal values set by a step.
+  await waitFor(
+    () => ev(`document.readyState === "complete" && document.body.innerText.length > 0`),
+    { timeout: 20_000, what: `page ${path} to load` },
+  );
+  // After a load, the simulated-pedals panel writes its own sliders (all 0) once it sees the
+  // device: via requestAnimationFrame, then IPC. Wait until that write has been sent. Steps that
+  // need exact pedal values also read them back (setPedalsVerified), in case it lands later.
   await waitFor(() => ev(`Boolean(document.querySelector("aside.sim-panel"))`), {
     timeout: 15_000,
     what: "the simulated pedals panel",
   });
-  await sleep(400);
+  await ev(`new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))`);
+  await invoke("app_info");
 }
 
 const hasText = (needle) => ev(`document.body.innerText.includes(${JSON.stringify(needle)})`);
 
 /** Clicks the first element matching `selector` whose text is exactly `text` (or any, if null). */
 async function click(selector, text = null, scope = "document") {
-  const ok = await ev(`(() => {
-    const els = [...${scope}.querySelectorAll(${JSON.stringify(selector)})];
-    const el = els.find((e) => ${text === null} || e.textContent.trim() === ${JSON.stringify(text)});
-    if (!el || el.disabled) return false;
-    el.click();
-    return true;
-  })()`);
-  if (!ok) throw new Error(`no enabled ${selector} with text ${JSON.stringify(text)}`);
+  await waitFor(
+    async () => {
+      const r = await ev(`(() => {
+        const root = ${scope};
+        if (!root) return "scope";
+        const els = [...root.querySelectorAll(${JSON.stringify(selector)})];
+        const el = els.find((e) => ${text === null} || e.textContent.trim() === ${JSON.stringify(text)});
+        if (!el || el.disabled) return "none";
+        el.click();
+        return "ok";
+      })()`);
+      return r === "ok";
+    },
+    { timeout: 5000, what: `an enabled ${selector} with text ${JSON.stringify(text)} in ${scope}` },
+  );
 }
 
 /** Svelte selects bound to objects need selectedIndex plus a bubbling change event. */
@@ -255,6 +353,35 @@ const livePedal = (pedal) =>
   ev(
     `import("/src/lib/pedals/stream.ts").then((m) => m.pedalStream.history.latest()?.${pedal} ?? null)`,
   );
+
+/**
+ * Sets the pedals (raw fractions) and polls the live stream until the calibrated values read
+ * back within `tol` percentage points of `expected` ({ brake: 60, throttle: 25 }), twice with
+ * a pause between, writing again whenever they don't. Needs a page that feeds the pedal stream.
+ */
+async function setPedalsVerified(values, expected, tol) {
+  const matches = async () => {
+    for (const [pedal, pct] of Object.entries(expected)) {
+      const v = await livePedal(pedal);
+      if (v === null || Math.abs(v * 100 - pct) > tol) return false;
+    }
+    return true;
+  };
+  await waitFor(
+    async () => {
+      await setPedals(...values);
+      try {
+        await waitFor(matches, { timeout: 1500, what: "pedal readback" });
+      } catch (e) {
+        if (e instanceof Fatal) throw e;
+        return false;
+      }
+      await sleep(300);
+      return matches();
+    },
+    { timeout: 15_000, interval: 50, what: `pedals reading ${JSON.stringify(expected)} (±${tol})` },
+  );
+}
 
 // ---------------------------------------------------------------- steps
 
@@ -287,6 +414,8 @@ async function step(name, fn) {
   results.push({ name, ok: !error, secs, detail: error ? error.message.split("\n")[0] : "" });
   log(`${error ? "FAIL" : "PASS"}  ${String(stepNo).padStart(2, "0")} ${name} (${secs}s)`);
   if (error) log(`      ${error.message}\n      screenshot: ${file}`);
+  // A fatal error ends the run here; the later steps would only fail the same way.
+  if (error instanceof Fatal) throw error;
   // Leave the pedals released for the next step, whatever happened.
   await setPedals(0, 0, 0).catch(() => {});
 }
@@ -299,10 +428,17 @@ function assert(cond, message) {
 let simDevice = null;
 let profile = null;
 
-/** Raw sim fraction that the profile calibrates to `calibrated` (0..1) for `pedal`. */
-function rawFractionFor(pedal, calibrated) {
-  const { deadzoneLow: lo, deadzoneHigh: hi } = profile[pedal].calibration;
-  return lo + calibrated * (1 - lo - hi);
+/**
+ * Raw sim fraction (0..1 of the axis) that the profile calibrates to `calibrated` (0..1): undoes
+ * the deadzones, then the min..max range.
+ */
+function raw(pedal, calibrated) {
+  const lo = profile?.[pedal]?.calibration.deadzoneLow ?? 0.02;
+  const hi = profile?.[pedal]?.calibration.deadzoneHigh ?? 0.02;
+  const min = profile?.[pedal]?.calibration.min ?? -32768;
+  const max = profile?.[pedal]?.calibration.max ?? 32767;
+  const rawValue = min + (lo + calibrated * (1 - lo - hi)) * (max - min);
+  return (rawValue + 32768) / 65535;
 }
 
 const SIM_AXIS = { throttle: 0, brake: 1, clutch: 2 };
@@ -344,7 +480,7 @@ async function runSet({ timeout = 90_000 } = {}) {
       snap = await drillSnap();
       if (snap.state) states.add(snap.state);
       if (snap.grade) grades.add(snap.grade);
-      if (snap.error) throw new Error(`drill page error: ${snap.error}`);
+      if (snap.error) throw new Fatal(`drill page error: ${snap.error}`);
       return snap.finished && snap.pills.length > 0;
     },
     { timeout, interval: 100, what: "the set to finish (FINISHED + Set Summary)" },
@@ -355,19 +491,78 @@ async function runSet({ timeout = 90_000 } = {}) {
 const pillTotals = (pills) => pills.map((p) => Number(p.match(/:\s*(\d+)/)?.[1] ?? NaN));
 
 // Grade thresholds (crates/core/src/scoring.rs): S >= 95, A >= 85, B >= 70, C >= 55, else D.
-const GOOD_GRADES = ["S", "A"];
+
+const loadProfileOf = (deviceId) => invoke("load_profile", { deviceId });
+
+const bundledPresets = () =>
+  readdirSync(join(ROOT, "presets"))
+    .filter((f) => f.endsWith(".json"))
+    .map((f) => JSON.parse(readFileSync(join(ROOT, "presets", f), "utf8")));
+
+/** Hold drills on the brake or throttle: what the drill screen offers. */
+const playableOf = (preset) =>
+  preset.drills.filter((d) => d.type === "hold" && d.pedal !== "clutch");
+
+function findDrill(presetId, drillId) {
+  const preset = bundledPresets().find((p) => p.id === presetId);
+  const drill = preset?.drills.find((d) => d.id === drillId);
+  assert(drill, `preset ${presetId} / drill ${drillId} not found in presets/`);
+  return drill;
+}
+
+/** Presses one pedal fully and releases it; true once the wizard has moved on from it. */
+async function pressAndRelease(pedal) {
+  const values = [0, 0, 0];
+  values[SIM_AXIS[pedal]] = 1;
+  // Let the detector take its resting baseline first.
+  await sleep(600);
+  await setPedals(...values);
+  await sleep(700);
+  await setPedals(0, 0, 0);
+  try {
+    await waitFor(
+      () =>
+        ev(`(() => {
+          const strong = document.querySelector(".wizard .prompt strong");
+          return !strong || strong.textContent.trim() !== ${JSON.stringify(pedal)};
+        })()`),
+      { timeout: 6000, what: `the wizard to accept the ${pedal}` },
+    );
+    return true;
+  } catch (e) {
+    if (e instanceof Fatal) throw e;
+    return false;
+  }
+}
+
+/** Sweeps the brake from the calibration panel, up to `peak` (raw fraction) and back. */
+async function resweepBrake(peak) {
+  const panel = `document.querySelector('[data-testid="calibration-brake"]')`;
+  await click("button", "Recalibrate range", panel);
+  await sleep(300);
+  await setPedals(0, peak, 0);
+  await sleep(500);
+  await setPedals(0, 0, 0);
+  await sleep(300);
+  await click("button", "Done sweeping", panel);
+}
 
 async function main() {
   mkdirSync(OUT_DIR, { recursive: true });
   let target;
   if (NO_LAUNCH) {
-    const cdp = option("--cdp", "9222");
-    const list = await (await fetch(`http://127.0.0.1:${cdp}/json`)).json();
-    target = list.find((t) => t.type === "page");
-    assert(target, `no page target on CDP port ${cdp}`);
+    const cdp = option("--cdp", null);
+    if (!cdp) throw new Fatal("--no-launch needs an explicit --cdp <port>");
+    target = await waitFor(
+      async () => {
+        const list = await (await fetch(`http://127.0.0.1:${cdp}/json`)).json();
+        return list.find((t) => t.type === "page");
+      },
+      { timeout: 15_000, interval: 500, what: `a page target on CDP port ${cdp}` },
+    );
     devUrl = new URL(target.url).origin;
   } else {
-    ({ target, devUrl } = await launchApp());
+    ({ target, url: devUrl } = await launchApp());
   }
   await connect(target);
   log(`attached to ${target.url}`);
@@ -375,6 +570,14 @@ async function main() {
     timeout: 30_000,
     what: "the page to run inside Tauri",
   });
+  if (!NO_LAUNCH) {
+    // Proves the SCT_DATA_DIR override took effect: otherwise the user's real database is in use.
+    await waitFor(() => existsSync(join(dataDir, "profiles.db")), {
+      what: `${join(dataDir, "profiles.db")} (SCT_DATA_DIR override)`,
+    }).catch((e) => {
+      throw new Fatal(e.message);
+    });
+  }
   // Pedals released before anything starts.
   await setPedals(0, 0, 0);
 
@@ -397,10 +600,20 @@ async function main() {
     simDevice = snapshot.devices.find((d) => d.name === SIM_NAME);
     assert(simDevice?.simulated === true, "list_devices does not report the device as simulated");
     assert(simDevice.axisCount >= 3, `expected at least 3 axes, got ${simDevice.axisCount}`);
-    assert(
-      (await loadProfileOf(simDevice.id)) === null,
-      "simulated device already has a profile; SCT_DATA_DIR should be fresh",
-    );
+
+    // The run writes a profile and attempts, so it must start from empty data. Fatal: stop
+    // before touching anything.
+    if ((await loadProfileOf(simDevice.id)) !== null) {
+      throw new Fatal("the simulated device already has a profile: not a fresh SCT_DATA_DIR");
+    }
+    for (const preset of bundledPresets()) {
+      for (const d of preset.drills) {
+        const found = await invoke("list_attempts", { drillId: d.id, limit: 1 }).catch((e) => {
+          throw new Fatal(`cannot check attempts are empty: ${e.message}`);
+        });
+        if (found.length > 0) throw new Fatal(`attempts already exist for ${d.id}: not fresh data`);
+      }
+    }
   });
 
   await step("wizard-detect-and-calibrate", async () => {
@@ -422,21 +635,11 @@ async function main() {
           ),
         { what: `the wizard to ask for the ${pedal}` },
       );
-      // Let the detector take its resting baseline, then press fully and release.
-      await sleep(600);
-      const values = [0, 0, 0];
-      values[SIM_AXIS[pedal]] = 1;
-      await setPedals(...values);
-      await sleep(700);
-      await setPedals(0, 0, 0);
-      await waitFor(
-        () =>
-          ev(`(() => {
-            const strong = document.querySelector(".wizard .prompt strong");
-            return !strong || strong.textContent.trim() !== ${JSON.stringify(pedal)};
-          })()`),
-        { timeout: 10_000, what: `the wizard to accept the ${pedal}` },
-      );
+      let accepted = false;
+      for (let attempt = 0; attempt < 3 && !accepted; attempt++) {
+        accepted = await pressAndRelease(pedal);
+      }
+      assert(accepted, `the wizard did not accept the ${pedal} after 3 presses`);
     }
     await waitFor(() => hasText("Done. Check the assignments below."), {
       what: "the wizard to finish",
@@ -454,34 +657,40 @@ async function main() {
       assert(min <= -32000 && max >= 32000, `${pedal} range ${min}..${max} is not the full sweep`);
     }
 
-    // Re-sweep the brake range from the calibration panel.
+    // Re-sweep the brake to 80% of its travel: the stored range must follow, and a sweep that
+    // did nothing would leave the full range behind.
     await waitFor(
       () => ev(`Boolean(document.querySelector('[data-testid="calibration-brake"]'))`),
       { what: "the calibration panel" },
     );
-    await click(
-      "button",
-      "Recalibrate range",
-      `document.querySelector('[data-testid="calibration-brake"]')`,
+    await resweepBrake(0.8);
+    const wantMax = -32768 + 0.8 * 65535;
+    const partial = await waitFor(
+      async () => {
+        const p = await loadProfileOf(simDevice.id);
+        return Math.abs(p.brake.calibration.max - wantMax) <= 1500 ? p : null;
+      },
+      { what: `the brake range to follow the sweep (max about ${Math.round(wantMax)})` },
     );
-    await sleep(300);
-    await setPedals(0, 1, 0);
-    await sleep(500);
-    await setPedals(0, 0, 0);
-    await sleep(300);
-    await click(
-      "button",
-      "Done sweeping",
-      `document.querySelector('[data-testid="calibration-brake"]')`,
-    );
-    await waitFor(() => hasText("Recalibrate range"), { what: "the sweep to end" });
+    assert(partial.brake.calibration.min <= -32000, "brake min moved after the partial sweep");
     assert(
       !(await ev(`Boolean(document.querySelector(".calibration .error"))`)),
       "calibration panel shows an error",
     );
-    profile = await loadProfileOf(simDevice.id);
-    const { min, max } = profile.brake.calibration;
-    assert(min <= -32000 && max >= 32000, `brake range after re-sweep ${min}..${max}`);
+    // And back to the full range, which the later steps rely on.
+    await waitFor(() => hasText("Recalibrate range"), { what: "the sweep to end" });
+    await resweepBrake(1);
+    profile = await waitFor(
+      async () => {
+        const p = await loadProfileOf(simDevice.id);
+        return p.brake.calibration.max >= 32000 ? p : null;
+      },
+      { what: "the brake range to be full again" },
+    );
+    assert(
+      !(await ev(`Boolean(document.querySelector(".calibration .error"))`)),
+      "calibration panel shows an error",
+    );
     assert(
       (await invoke("profiled_devices")).includes(simDevice.id),
       "device is not in profiled_devices",
@@ -503,16 +712,10 @@ async function main() {
     );
     assert(!(await hasText("No pedals set up")), "live view shows the no-profile overlay");
     // The bars are drawn on a canvas, so the numbers come from the stream the canvas draws.
-    const want = { throttle: raw("throttle", 0.25), brake: raw("brake", 0.6) };
-    await setPedals(want.throttle, want.brake, 0);
-    await waitFor(
-      async () => {
-        const [t, b] = [await livePedal("throttle"), await livePedal("brake")];
-        return (
-          t !== null && b !== null && Math.abs(t * 100 - 25) <= 3 && Math.abs(b * 100 - 60) <= 3
-        );
-      },
-      { what: "throttle ~25% and brake ~60% in the live stream" },
+    await setPedalsVerified(
+      [raw("throttle", 0.25), raw("brake", 0.6), 0],
+      { throttle: 25, brake: 60 },
+      3,
     );
   });
 
@@ -524,11 +727,8 @@ async function main() {
     });
     await selectOption(1, "Brake hold 70%");
     await waitFor(() => hasText("Target:"), { what: "drill details" });
-    const drill = await findDrill("sample", "brake-hold-70");
-    await setPedals(0, raw("brake", drill.target / 100), 0);
-    await waitFor(async () => Math.abs((await livePedal("brake")) * 100 - drill.target) <= 1, {
-      what: "the brake sitting on the target",
-    });
+    const drill = findDrill("sample", "brake-hold-70");
+    await setPedalsVerified([0, raw("brake", drill.target / 100), 0], { brake: drill.target }, 0.5);
     const { snap, grades, states } = await runSet();
     log(
       `      states ${states.join(",")} grades seen ${grades.join(",")} pills ${snap.pills.join(" ")}`,
@@ -539,27 +739,34 @@ async function main() {
     );
     assert(snap.summary.includes("Set Summary"), "no Set Summary");
     assert(
-      grades.length > 0 && grades.every((g) => GOOD_GRADES.includes(g)),
-      `rep grades ${grades.join(",")} are not all S/A`,
+      grades.length > 0 && grades.every((g) => g === "S"),
+      `rep grades ${grades.join(",")} are not all S`,
     );
     const totals = pillTotals(snap.pills);
     assert(
-      totals.every((t) => t >= 85),
-      `rep totals ${totals.join(",")} are not all >= 85`,
+      totals.every((t) => t >= 95),
+      `rep totals ${totals.join(",")} are not all >= 95`,
     );
     const summaryGrade = snap.summary.match(/Average:\s*\d+\s*\((\w)\)/)?.[1];
-    assert(GOOD_GRADES.includes(summaryGrade), `set grade ${summaryGrade}`);
+    assert(summaryGrade === "S", `set grade ${summaryGrade}, expected S`);
+
+    // The finished set should be in the attempts database. The drill screen does not save
+    // attempts yet (nothing calls saveAttempt), so this is reported, not failed.
+    const attempts = await invoke("list_attempts", { drillId: drill.id, limit: 5 });
+    const saved = attempts.find((a) => a.presetId === "sample" && a.reps.length === drill.reps);
+    log(
+      saved
+        ? `      attempt saved: id ${saved.id}, ${saved.reps.length} reps`
+        : `      WARN known gap: no attempt saved for ${drill.id} (list_attempts returned ${attempts.length}); the drill page never calls save_attempt`,
+    );
   });
 
   await step("hold-drill-out-of-band", async () => {
     await click("button", "Pick Another Drill");
     await waitFor(() => hasText("Select a Drill"), { what: "the drill picker" });
-    const drill = await findDrill("sample", "brake-hold-70");
-    await setPedals(0, raw("brake", (drill.target - 30) / 100), 0);
-    await waitFor(
-      async () => Math.abs((await livePedal("brake")) * 100 - (drill.target - 30)) <= 1,
-      { what: "the brake 30 points below target" },
-    );
+    const drill = findDrill("sample", "brake-hold-70");
+    const off = drill.target - 30;
+    await setPedalsVerified([0, raw("brake", off / 100), 0], { brake: off }, 0.5);
     const { snap, grades } = await runSet();
     log(`      grades seen ${grades.join(",")} pills ${snap.pills.join(" ")}`);
     assert(
@@ -580,8 +787,9 @@ async function main() {
   await step("abort-and-play-again", async () => {
     await click("button", "Pick Another Drill");
     await waitFor(() => hasText("Select a Drill"), { what: "the drill picker" });
+    const drill = findDrill("sample", "brake-hold-70");
     await setPedals(0, 0, 0);
-    // Abort during the countdown.
+    // Abort during the countdown: nothing was scored.
     await click("button", "Start Drill");
     await waitFor(async () => (await drillSnap()).state === "COUNTDOWN", { what: "COUNTDOWN" });
     await click("button", "Abort Set");
@@ -589,13 +797,12 @@ async function main() {
       timeout: 15_000,
       what: "the aborted set to finish",
     });
+    const afterCountdown = await drillSnap();
+    assert(afterCountdown.state === "FINISHED", "state is not FINISHED after abort");
     assert(
-      !(await ev(
-        `[...document.querySelectorAll("button")].some((b) => b.textContent.trim() === "Abort Set")`,
-      )),
-      "Abort Set is still offered",
+      afterCountdown.summary?.includes("No scored reps."),
+      `expected "No scored reps." after a countdown abort, got ${JSON.stringify(afterCountdown.summary)}`,
     );
-    assert((await drillSnap()).state === "FINISHED", "state is not FINISHED after abort");
     // Play Again starts a fresh run, which is then aborted while ACTIVE.
     await click("button", "Play Again");
     await waitFor(async () => (await drillSnap()).state === "COUNTDOWN", {
@@ -610,6 +817,11 @@ async function main() {
       timeout: 15_000,
       what: "the second aborted set to finish",
     });
+    const afterActive = await drillSnap();
+    assert(
+      afterActive.pills.length < drill.reps,
+      `an abort in the first rep left ${afterActive.pills.length} of ${drill.reps} reps scored`,
+    );
     await click("button", "Pick Another Drill");
     await waitFor(() => hasText("Select a Drill"), { what: "the drill picker again" });
     assert(
@@ -635,9 +847,11 @@ async function main() {
     for (const p of playable) {
       await selectOption(0, p.name);
       const drills = playableOf(p);
-      await waitFor(async () => (await optionTexts(1)).length === drills.length, {
-        what: `drill list of ${p.name}`,
-      });
+      const expectedNames = drills.map((d) => `${d.name} (${d.reps} reps)`);
+      await waitFor(
+        async () => JSON.stringify(await optionTexts(1)) === JSON.stringify(expectedNames),
+        { what: `drill list of ${p.name}: ${expectedNames.join(" | ")}` },
+      );
       for (const [i, d] of drills.entries()) {
         await selectOption(1, d.name);
         await waitFor(
@@ -661,52 +875,39 @@ async function main() {
   });
 }
 
-// ---------------------------------------------------------------- helpers that need the profile
-
-/** Raw sim fraction for a calibrated value; falls back to the default 2% deadzones. */
-function raw(pedal, calibrated) {
-  if (!profile) return 0.02 + calibrated * 0.96;
-  return rawFractionFor(pedal, calibrated);
-}
-
-const loadProfileOf = (deviceId) => invoke("load_profile", { deviceId });
-
-const bundledPresets = () =>
-  readdirSync(join(ROOT, "presets"))
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => JSON.parse(readFileSync(join(ROOT, "presets", f), "utf8")));
-
-/** Hold drills on the brake or throttle: what the drill screen offers. */
-const playableOf = (preset) =>
-  preset.drills.filter((d) => d.type === "hold" && d.pedal !== "clutch");
-
-async function findDrill(presetId, drillId) {
-  const preset = bundledPresets().find((p) => p.id === presetId);
-  const drill = preset?.drills.find((d) => d.id === drillId);
-  assert(drill, `preset ${presetId} / drill ${drillId} not found in presets/`);
-  return drill;
-}
-
 // ---------------------------------------------------------------- run
+
+function printSummaryAndExit(code) {
+  log("\nSummary");
+  for (const [i, r] of results.entries()) {
+    log(
+      `${r.ok ? "PASS" : "FAIL"}  ${String(i + 1).padStart(2, "0")}  ${r.name.padEnd(36)} ${r.secs.padStart(6)}s  ${r.detail}`,
+    );
+  }
+  const failed = results.filter((r) => !r.ok).length;
+  log(`\n${results.length - failed}/${results.length} passed. Screenshots: ${OUT_DIR}`);
+  process.exit(code ?? (failed === 0 ? 0 : 1));
+}
+
+const watchdog = setTimeout(() => {
+  results.push({ name: "watchdog", ok: false, secs: "0", detail: "run exceeded 25 minutes" });
+  log("FAIL  watchdog: the run exceeded 25 minutes");
+  printSummaryAndExit(1);
+}, WATCHDOG_MS);
 
 try {
   await main();
 } catch (e) {
-  results.push({ name: "setup", ok: false, secs: "0", detail: e.message });
-  log(`FAIL  setup: ${e.stack ?? e.message}`);
+  results.push({ name: "run-aborted", ok: false, secs: "0", detail: e.message });
+  log(`FAIL  run aborted: ${e instanceof Fatal ? e.message : (e.stack ?? e.message)}`);
 }
+clearTimeout(watchdog);
 
-log("\nSummary");
-for (const [i, r] of results.entries()) {
-  log(
-    `${r.ok ? "PASS" : "FAIL"}  ${String(i + 1).padStart(2, "0")}  ${r.name.padEnd(36)} ${r.secs.padStart(6)}s  ${r.detail}`,
-  );
+if (KEEP_OPEN && !NO_LAUNCH && appRunning()) {
+  const failed = results.filter((r) => !r.ok).length;
+  log(`\n${results.length - failed}/${results.length} passed. Screenshots: ${OUT_DIR}`);
+  log(`app left running (temp dir ${tempDir}); press Ctrl-C to stop it and clean up`);
+  setInterval(() => {}, 1 << 30);
+  await new Promise(() => {});
 }
-const failed = results.filter((r) => !r.ok).length;
-log(`\n${results.length - failed}/${results.length} passed. Screenshots: ${OUT_DIR}`);
-try {
-  ws?.close();
-} catch {
-  // already closed
-}
-process.exit(failed === 0 ? 0 : 1);
+printSummaryAndExit();

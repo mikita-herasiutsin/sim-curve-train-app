@@ -92,7 +92,7 @@ pub struct NewAttempt {
     pub pedal: Pedal,
     /// UTC timestamp when the set started (formatted as an ISO 8601 string).
     pub started_at: String,
-    /// Whether the user aborted the set before finishing all scheduled reps.
+    /// Whether the set ended before all scheduled reps did (aborted, or the pedals stopped).
     pub aborted: bool,
     /// Highest rep total score achieved in this set.
     pub best: Option<f32>,
@@ -144,7 +144,7 @@ pub struct Attempt {
     pub pedal: Pedal,
     /// UTC timestamp when the set started (formatted as an ISO 8601 string).
     pub started_at: String,
-    /// Whether the user aborted the set before finishing all scheduled reps.
+    /// Whether the set ended before all scheduled reps did (aborted, or the pedals stopped).
     pub aborted: bool,
     /// Highest rep total score achieved in this set.
     pub best: Option<f32>,

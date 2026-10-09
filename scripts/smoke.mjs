@@ -749,14 +749,29 @@ async function main() {
     const summaryGrade = snap.summary.match(/Average:\s*\d+\s*\((\w)\)/)?.[1];
     assert(summaryGrade === "S", `set grade ${summaryGrade}, expected S`);
 
-    // The finished set should be in the attempts database. The drill screen does not save
-    // attempts yet (nothing calls saveAttempt), so this is reported, not failed.
-    const attempts = await invoke("list_attempts", { drillId: drill.id, limit: 5 });
-    const saved = attempts.find((a) => a.presetId === "sample" && a.reps.length === drill.reps);
+    // The drill page saves the finished set. The save is async, so poll for it.
+    const saved = await waitFor(
+      async () => {
+        const attempts = await invoke("list_attempts", { drillId: drill.id, limit: 5 });
+        return attempts.length > 0 ? attempts : null;
+      },
+      { what: `the attempt for ${drill.id} to be saved` },
+    ).then((attempts) => {
+      assert(attempts.length === 1, `expected 1 saved attempt, found ${attempts.length}`);
+      return attempts[0];
+    });
+    assert(saved.presetId === "sample", `saved attempt is for preset ${saved.presetId}`);
+    assert(!saved.aborted, "saved attempt is marked aborted");
+    assert(
+      saved.reps.length === drill.reps,
+      `saved attempt has ${saved.reps.length} reps, expected ${drill.reps}`,
+    );
+    assert(
+      saved.best !== null && saved.best >= 95,
+      `saved attempt best ${saved.best}, expected >= 95`,
+    );
     log(
-      saved
-        ? `      attempt saved: id ${saved.id}, ${saved.reps.length} reps`
-        : `      WARN known gap: no attempt saved for ${drill.id} (list_attempts returned ${attempts.length}); the drill page never calls save_attempt`,
+      `      attempt saved: id ${saved.id}, ${saved.reps.length} reps, best ${saved.best.toFixed(1)}`,
     );
   });
 
@@ -862,6 +877,28 @@ async function main() {
       afterActive.pills.length < drill.reps,
       `an abort in the first rep left ${afterActive.pills.length} of ${drill.reps} reps scored`,
     );
+    // The countdown abort saved nothing. The second abort saved a set only if a rep ended
+    // first; with the in-band and out-of-band sets that makes 2 or 3 attempts.
+    const expected = 2 + (afterActive.pills.length > 0 ? 1 : 0);
+    await waitFor(
+      async () => {
+        const list = await invoke("list_attempts", { drillId: drill.id, limit: 10 });
+        return list.length >= expected ? list : null;
+      },
+      { what: `${expected} saved attempts` },
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    const settled = await invoke("list_attempts", { drillId: drill.id, limit: 10 });
+    assert(
+      settled.length === expected,
+      `expected ${expected} saved attempts after the aborts, found ${settled.length}`,
+    );
+    const abortedCount = settled.filter((a) => a.aborted).length;
+    assert(
+      abortedCount === expected - 2,
+      `${abortedCount} saved attempts are aborted, expected ${expected - 2}`,
+    );
+    log(`      attempts saved: ${settled.length}, aborted: ${abortedCount}`);
     await click("button", "Pick Another Drill");
     await waitFor(() => hasText("Select a Drill"), { what: "the drill picker again" });
     assert(

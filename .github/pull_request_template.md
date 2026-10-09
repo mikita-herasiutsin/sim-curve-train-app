@@ -4,7 +4,7 @@
 
 ## Screenshots
 
-<!-- Required for UI changes. Drag images here or link to docs/screenshots/. -->
+<!-- Required for every PR: the changed app screens for UI changes, otherwise the relevant output (CLI, test or smoke run). Drag images here or link to docs/screenshots/. -->
 
 ## Acceptance criteria
 

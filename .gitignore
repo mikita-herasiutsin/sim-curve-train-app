@@ -35,3 +35,6 @@ CLAUDE.local.md
 .agents/
 .claude/agents/
 .claude/settings.local.json
+
+# Smoke test output
+smoke-out/

@@ -325,9 +325,28 @@ fn audio_set_volume(volume: f32, audio: tauri::State<'_, AudioFeedback>) {
     audio.set_volume(volume);
 }
 
-/// Opens the profile database in the app data directory. The app still runs without it.
+/// The directory for the profile and attempts database. Debug builds honour an absolute
+/// `SCT_DATA_DIR`, so automated runs (`npm run smoke`) use a throwaway directory instead of the
+/// user's real data. An empty or relative value is ignored.
+fn data_dir(app: &tauri::App) -> tauri::Result<std::path::PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Some(dir) = std::env::var_os("SCT_DATA_DIR") {
+        let dir = std::path::PathBuf::from(dir);
+        if dir.is_absolute() {
+            eprintln!(
+                "SCT_DATA_DIR is set: using {} for saved data",
+                dir.display()
+            );
+            return Ok(dir);
+        }
+        eprintln!("ignoring SCT_DATA_DIR: it must be an absolute path");
+    }
+    app.path().app_data_dir()
+}
+
+/// Opens the profile database in [`data_dir`]. The app still runs without it.
 fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
-    let path = match app.path().app_data_dir() {
+    let path = match data_dir(app) {
         Ok(dir) => dir.join("profiles.db"),
         Err(error) => {
             eprintln!("no app data directory, profiles won't be saved: {error}");
@@ -339,9 +358,9 @@ fn open_profile_store(app: &tauri::App) -> Option<ProfileStore> {
         .ok()
 }
 
-/// Opens the attempts database in the app data directory. The app still runs without it.
+/// Opens the attempts database in [`data_dir`]. The app still runs without it.
 fn open_attempt_store(app: &tauri::App) -> Option<AttemptStore> {
-    let path = match app.path().app_data_dir() {
+    let path = match data_dir(app) {
         Ok(dir) => dir.join("profiles.db"),
         Err(error) => {
             eprintln!("no app data directory, attempts won't be saved: {error}");

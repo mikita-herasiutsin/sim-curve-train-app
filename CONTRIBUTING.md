@@ -51,8 +51,10 @@ Formatting and linting are automated. Don't hand-tune style; run the tools.
 - Commit subjects: imperative mood, ≤ 72 characters, starting with the ticket ID when there is
   one (e.g. `SCT-012: add 1 kHz input thread`).
 - Fill in the pull request template. Every pull request needs screenshots: the changed app
-  screens for UI changes, otherwise the relevant output (CLI, test or smoke run). Mark the ticket
-  ✅ in the backlog when its acceptance criteria are met.
+  screens for UI changes, terminal output (test, smoke or command run) for other code changes, and
+  the rendered diff for docs-only changes. Bot pull requests, such as Dependabot updates, are
+  exempt; their CI run is the evidence. Mark the ticket ✅ in the backlog when its acceptance
+  criteria are met.
 - Pull requests are squash-merged.
 
 ## Reporting bugs and requesting features

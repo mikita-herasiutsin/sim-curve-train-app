@@ -214,7 +214,8 @@ One button on each preset card runs a 3–5 minute routine: a chain of the prese
 ### SCT-050 · Persist attempts ✅ · S
 Save every finished rep and set to SQLite: drill, preset, time, total score, sub-scores, and the compressed sample blob for replay later.
 - **AC:** data survives a restart; schema migrations are in place (`refinery` or a simple versioned SQL).
-- **Status:** the store and the `save_attempt` command shipped in #28. The drill screen saves each set when it ends, aborted sets included (marked `aborted`); a set aborted before any rep ended is not saved. Failed reps have no scores and are not stored as reps. The compressed sample blob is not stored yet; it comes with replay.
+- **Status:** the store and the `save_attempt` command shipped in #28; the drill screen saves sets since #34. A set is saved when the engine ends it. If it ended before all its reps (Abort, leaving the page, pedals unplugged), it is saved as `aborted`. A set that ended before any rep is not saved. A failed save is logged and shown on the drill screen, or only logged if the page is already closed.
+- **Open:** failed reps have no scores and are not stored, so an attempt doesn't record how many reps ended; that needs a schema change (a failed flag or a nullable total). The compressed sample blob is not stored yet; it comes with replay.
 - **Deps:** SCT-033
 
 ### SCT-051 · Personal bests + leaderboard ⬜ · S

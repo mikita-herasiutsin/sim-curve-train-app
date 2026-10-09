@@ -42,7 +42,7 @@ export interface NewAttempt {
   pedal: PedalName;
   /** UTC timestamp when the set started (formatted as an ISO 8601 string). */
   startedAt: string;
-  /** Whether the user aborted the set before finishing all scheduled reps. */
+  /** Whether the set ended before all scheduled reps did (aborted, or the pedals stopped). */
   aborted: boolean;
   /** Highest rep total score achieved in this set. */
   best?: number | null;

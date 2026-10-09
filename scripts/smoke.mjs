@@ -754,11 +754,14 @@ async function main() {
     const saved = await waitFor(
       async () => {
         const attempts = await invoke("list_attempts", { drillId: drill.id, limit: 5 });
-        return attempts.find((a) => a.presetId === "sample") ?? null;
+        return attempts.length > 0 ? attempts : null;
       },
       { what: `the attempt for ${drill.id} to be saved` },
-    );
-    assert(saved.drillId === drill.id, `saved attempt is for ${saved.drillId}`);
+    ).then((attempts) => {
+      assert(attempts.length === 1, `expected 1 saved attempt, found ${attempts.length}`);
+      return attempts[0];
+    });
+    assert(saved.presetId === "sample", `saved attempt is for preset ${saved.presetId}`);
     assert(!saved.aborted, "saved attempt is marked aborted");
     assert(
       saved.reps.length === drill.reps,
@@ -834,6 +837,28 @@ async function main() {
       afterActive.pills.length < drill.reps,
       `an abort in the first rep left ${afterActive.pills.length} of ${drill.reps} reps scored`,
     );
+    // The countdown abort saved nothing. The second abort saved a set only if a rep ended
+    // first; with the in-band and out-of-band sets that makes 2 or 3 attempts.
+    const expected = 2 + (afterActive.pills.length > 0 ? 1 : 0);
+    await waitFor(
+      async () => {
+        const list = await invoke("list_attempts", { drillId: drill.id, limit: 10 });
+        return list.length >= expected ? list : null;
+      },
+      { what: `${expected} saved attempts` },
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    const settled = await invoke("list_attempts", { drillId: drill.id, limit: 10 });
+    assert(
+      settled.length === expected,
+      `expected ${expected} saved attempts after the aborts, found ${settled.length}`,
+    );
+    const abortedCount = settled.filter((a) => a.aborted).length;
+    assert(
+      abortedCount === expected - 2,
+      `${abortedCount} saved attempts are aborted, expected ${expected - 2}`,
+    );
+    log(`      attempts saved: ${settled.length}, aborted: ${abortedCount}`);
     await click("button", "Pick Another Drill");
     await waitFor(() => hasText("Select a Drill"), { what: "the drill picker again" });
     assert(

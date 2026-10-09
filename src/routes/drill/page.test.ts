@@ -249,19 +249,21 @@ describe("Drill page", () => {
     await startDrill();
     await waitFor(() => expect(drillChannel).not.toBeNull());
     const oldChannel = drillChannel!;
+    oldChannel.onmessage({ event: "repScored", rep: 0, score: holdScore });
     oldChannel.onmessage({ event: "setFinished", summary: null });
     drillChannel = null;
     await fireEvent.click(await screen.findByRole("button", { name: "Play Again" }));
     await waitFor(() => expect(drillChannel).not.toBeNull());
     expect(drillChannel).not.toBe(oldChannel);
 
-    oldChannel.onmessage({ event: "repScored", rep: 0, score: holdScore });
+    oldChannel.onmessage({ event: "repScored", rep: 1, score: holdScore });
     oldChannel.onmessage({ event: "setFinished", summary: null });
     expect(screen.queryByText("Rep Result")).not.toBeInTheDocument();
     expect(screen.queryByText("Set Finished!")).not.toBeInTheDocument();
     expect(screen.getByText("COUNTDOWN")).toBeInTheDocument();
-    // Only the first run's own setFinished saved a set.
+    // The first run was saved once, by its own first setFinished.
     expect(saved).toHaveLength(1);
+    expect(saved[0].reps).toHaveLength(1);
   });
 
   const summary = {
@@ -319,6 +321,54 @@ describe("Drill page", () => {
     await waitFor(() => expect(saved).toHaveLength(1));
     expect(saved[0].aborted).toBe(true);
     expect(saved[0].reps).toHaveLength(1);
+  });
+
+  it("saves a set the engine ended early as aborted, without an Abort click", async () => {
+    // The pedals were unplugged after the first rep: the engine ends the set on its own.
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
+    drillChannel!.onmessage({ event: "setFinished", summary: { ...summary, repTotals: [82.4] } });
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0].aborted).toBe(true);
+    expect(aborts).toBe(0);
+  });
+
+  it("saves a set as complete when Abort lands after the last rep ended", async () => {
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
+    drillChannel!.onmessage({ event: "repScored", rep: 1, score: holdScore });
+    drillChannel!.onmessage({ event: "repFailed", rep: 2 });
+    await fireEvent.click(await screen.findByRole("button", { name: "Abort Set" }));
+    drillChannel!.onmessage({ event: "setFinished", summary });
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0].aborted).toBe(false);
+  });
+
+  it("saves the set as aborted when the page is left mid-set", async () => {
+    const { unmount } = render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
+    unmount();
+    await waitFor(() => expect(aborts).toBe(1));
+    // The engine answers the abort after the page is gone.
+    drillChannel!.onmessage({ event: "setFinished", summary: { ...summary, repTotals: [82.4] } });
+    await waitFor(() => expect(saved).toHaveLength(1));
+    expect(saved[0]).toMatchObject({ drillId: "brake-hold-70", aborted: true });
+  });
+
+  it("does not save a set the engine ended before any rep", async () => {
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "setFinished", summary: null });
+    expect(await screen.findByText("No scored reps.")).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(saved).toHaveLength(0);
   });
 
   it("does not save a set aborted before any rep ended", async () => {

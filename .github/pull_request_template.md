@@ -4,7 +4,7 @@
 
 ## Screenshots
 
-<!-- Required for UI changes. Drag images here or link to docs/screenshots/. -->
+<!-- Required for every pull request: the changed app screens for UI changes, terminal output (test, smoke or command run) for other code changes, the rendered diff for docs-only changes. Bot pull requests (Dependabot) are exempt. Drag images here or link to docs/screenshots/. -->
 
 ## Acceptance criteria
 

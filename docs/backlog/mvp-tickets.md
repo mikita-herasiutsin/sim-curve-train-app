@@ -146,10 +146,11 @@ Settings: on/off and volume. Defaults follow [D-20](../decisions/README.md): on,
 
 ## M3: Traces
 
-### SCT-034 · Trace drill: fixed curve + playhead view ⬜ · M
+### SCT-034 · Trace drill: fixed curve + playhead view 🟡 · M
 The whole target curve is drawn with its tolerance band. A playhead sweeps across it and the user's trace is drawn on top. The **current target % is shown as a number** next to the current %.
 - **AC:** curve interpolation is linear between points; works for brake and throttle; there is a lead-in countdown.
 - **Deps:** SCT-031
+- **Status:** in review (playhead view; SCT-035 ghost view and the SCT-036 score breakdown wording come later).
 
 ### SCT-035 · Trace drill: scrolling ghost view + toggle ⬜ · M
 The target curve scrolls right to left towards a fixed "now" line, so you see what's coming next. The numeric target % is shown at the now-line. A toggle switches between ghost and playhead view, and the choice is persisted.

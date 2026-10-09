@@ -25,6 +25,29 @@ const preset: Preset = {
   ],
 };
 
+const tracePreset: Preset = {
+  schemaVersion: 1,
+  id: "trace-only",
+  name: "Trace Drills",
+  description: "",
+  drills: [
+    {
+      id: "brake-trace",
+      name: "Brake trace 1.5s",
+      type: "trace",
+      pedal: "brake",
+      reps: 3,
+      leadInMs: 1000,
+      tolerance: 6,
+      points: [
+        [0, 0],
+        [150, 100],
+        [1500, 0],
+      ],
+    },
+  ],
+};
+
 const device = {
   id: 1,
   name: "Test Pedals",
@@ -45,11 +68,13 @@ describe("Drill page", () => {
   let startError: string | null = null;
   let drillChannel: Channelish | null = null;
   let aborts = 0;
+  let presetsList: Preset[] = [preset];
 
   beforeEach(() => {
     startError = null;
     drillChannel = null;
     aborts = 0;
+    presetsList = [preset];
     (globalThis as { isTauri?: boolean }).isTauri = true;
     globalThis.ResizeObserver = class {
       observe() {}
@@ -62,7 +87,7 @@ describe("Drill page", () => {
       (cmd, args) => {
         switch (cmd) {
           case "list_presets":
-            return [preset];
+            return presetsList;
           case "profiled_devices":
             return [device.id];
           case "list_devices":
@@ -251,5 +276,55 @@ describe("Drill page", () => {
     expect(screen.queryByText("Rep Result")).not.toBeInTheDocument();
     expect(screen.queryByText("Set Finished!")).not.toBeInTheDocument();
     expect(screen.getByText("COUNTDOWN")).toBeInTheDocument();
+  });
+
+  const traceScore = {
+    kind: "trace",
+    total: 88.5,
+    grade: "B",
+    accuracy: 90.0,
+    timing: 85.0,
+    smoothness: 90.0,
+    lagMs: 42.0,
+    timeInBand: 0.85,
+    rmse: 0.035,
+    overshoot: 0.01,
+    ldljUser: -12.5,
+    ldljTarget: -10.2,
+  };
+
+  it("lists a preset with only a trace drill and shows Duration", async () => {
+    presetsList = [tracePreset];
+    render(DrillPage);
+    expect(await screen.findByRole("option", { name: "Trace Drills" })).toBeInTheDocument();
+    expect(await screen.findByRole("option", { name: /Brake trace 1.5s/ })).toBeInTheDocument();
+    const info = (await screen.findByText("Type:")).closest(".drill-info")!;
+    expect(info).toHaveTextContent("Duration: 1.5 s");
+    expect(info).toHaveTextContent("Peak: 100%");
+    expect(info).toHaveTextContent("Tolerance: ±6%");
+  });
+
+  it("renders trace-view and trace-hud showing Target after repStarted for a trace drill", async () => {
+    presetsList = [tracePreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repStarted", rep: 0, startUs: 1_000_000 });
+    expect(await screen.findByTestId("trace-view")).toBeInTheDocument();
+    const hud = await screen.findByTestId("trace-hud");
+    expect(hud).toHaveTextContent("Target");
+  });
+
+  it("shows the Lag metric for a trace score", async () => {
+    presetsList = [tracePreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repStarted", rep: 0, startUs: 1_000_000 });
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: traceScore });
+    const card = (await screen.findByText("Rep Result")).closest("div")!;
+    expect(card).toHaveTextContent("Lag 42 ms");
+    expect(card).toHaveTextContent("In band 85%");
+    expect(card).toHaveTextContent("Avg error ±3.5%");
   });
 });

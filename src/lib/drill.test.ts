@@ -3,9 +3,13 @@ import {
   applyDrillEvent,
   DEFAULT_TOLERANCE,
   IDLE_VIEW,
+  isPlayable,
+  playableDrills,
   toleranceOf,
   type HoldDrill,
+  type Preset,
   type SetSummary,
+  type TraceDrill,
   type TraceScore,
 } from "./drill";
 
@@ -131,5 +135,73 @@ describe("toleranceOf", () => {
   it("falls back to the D-17 default when omitted", () => {
     expect(DEFAULT_TOLERANCE).toBe(10);
     expect(toleranceOf(base)).toBe(10);
+  });
+});
+
+describe("isPlayable and playableDrills", () => {
+  const holdBrake: HoldDrill = {
+    id: "hb",
+    name: "Hold Brake",
+    pedal: "brake",
+    reps: 3,
+    leadInMs: 1000,
+    type: "hold",
+    target: 50,
+    holdMs: 1000,
+  };
+  const traceThrottle: TraceDrill = {
+    id: "tt",
+    name: "Trace Throttle",
+    pedal: "throttle",
+    reps: 3,
+    leadInMs: 1000,
+    type: "trace",
+    points: [
+      [0, 0],
+      [1000, 100],
+    ],
+  };
+  const traceClutch: TraceDrill = {
+    id: "tc",
+    name: "Trace Clutch",
+    pedal: "clutch",
+    reps: 3,
+    leadInMs: 1000,
+    type: "trace",
+    points: [
+      [0, 0],
+      [1000, 100],
+    ],
+  };
+  const holdClutch: HoldDrill = {
+    id: "hc",
+    name: "Hold Clutch",
+    pedal: "clutch",
+    reps: 3,
+    leadInMs: 1000,
+    type: "hold",
+    target: 50,
+    holdMs: 1000,
+  };
+
+  it("considers hold and trace drills on brake and throttle playable", () => {
+    expect(isPlayable(holdBrake)).toBe(true);
+    expect(isPlayable(traceThrottle)).toBe(true);
+  });
+
+  it("rejects clutch drills as unplayable", () => {
+    expect(isPlayable(traceClutch)).toBe(false);
+    expect(isPlayable(holdClutch)).toBe(false);
+  });
+
+  it("filters unplayable drills from a preset", () => {
+    const preset: Preset = {
+      schemaVersion: 1,
+      id: "test",
+      name: "Test",
+      description: "",
+      drills: [holdBrake, traceThrottle, traceClutch, holdClutch],
+    };
+    expect(playableDrills(preset)).toEqual([holdBrake, traceThrottle]);
   });
 });

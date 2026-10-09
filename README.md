@@ -75,6 +75,16 @@ To run in debug mode with a virtual 3-axis pedal device ("SCT Simulated Pedals")
   SCT_SIM_PEDALS=1 npm run tauri dev
   ```
 
+#### Smoke test (dev)
+
+`npm run smoke` starts the dev app with the simulated pedals and drives it over the WebView2 debug protocol (about a minute with a warm build):
+
+- the device list, the pedal wizard, the live view, hold drills in and out of the band, abort and play again, and every bundled preset;
+- one PASS/FAIL line and one screenshot per step, in `smoke-out/` (gitignored);
+- free ports and a throwaway data directory (`SCT_DATA_DIR`), so it runs next to an open dev app and never touches your saved profiles or attempts.
+
+Options: `--keep-open`, `--out <dir>`, and `--no-launch --cdp <port>` to attach to an app that is already running. Windows only for now; it is not part of CI.
+
 ### Layout
 
 ```

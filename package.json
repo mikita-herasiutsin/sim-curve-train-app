@@ -22,7 +22,8 @@
     "rust:lint": "cargo clippy --workspace --all-targets --locked -- -D warnings",
     "rust:test": "cargo test --workspace --locked",
     "verify": "npm run check && npm run lint && npm run test && npm run rust:fmt && npm run rust:lint && npm run rust:test",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "smoke": "node scripts/smoke.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.11"

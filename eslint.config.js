@@ -30,6 +30,20 @@ export default defineConfig(
     },
   },
   {
+    // Node scripts (smoke test) run outside the WebView.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+  {
+    // Node scripts (smoke test) run outside the WebView.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+  {
     files: ["**/*.svelte", "**/*.svelte.ts", "**/*.svelte.js"],
     languageOptions: {
       parserOptions: {

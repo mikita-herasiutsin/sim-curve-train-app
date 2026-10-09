@@ -102,6 +102,25 @@ describe("startRealSource", () => {
     });
   });
 
+  it("prefers the profiled simulated device over real ones listed before it", async () => {
+    const { state, calls, handler } = createMockState();
+    mockIPC(handler, { shouldMockEvents: true });
+
+    const real = makeDevice(1);
+    const sim = { ...makeDevice(2), simulated: true };
+    state.devices = [real, sim];
+    state.profiled = [1, 2];
+
+    const statuses: SourceStatus[] = [];
+    const stream = { clear: vi.fn(), ingest: vi.fn() } as unknown as PedalStream;
+    startRealSource(stream, (status) => statuses.push(status));
+
+    await vi.waitFor(() => {
+      expect(statuses[statuses.length - 1]).toMatchObject({ kind: "live", device: sim });
+      expect(calls.startStream).toEqual([2]);
+    });
+  });
+
   it("hot-plug: starts with no devices, then emits devices-changed", async () => {
     const { state, calls, handler } = createMockState();
     mockIPC(handler, { shouldMockEvents: true });

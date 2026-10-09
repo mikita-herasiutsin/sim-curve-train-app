@@ -184,12 +184,14 @@ describe("SimPedalsPanel component", () => {
 
     const throttle = screen.getByLabelText("Throttle");
     const brake = screen.getByLabelText("Brake");
+    const clutch = screen.getByLabelText("Clutch");
     await fireEvent.input(throttle, { target: { value: "50" } });
     await fireEvent.input(brake, { target: { value: "70" } });
+    await fireEvent.input(clutch, { target: { value: "30" } });
 
     await waitFor(() => {
       expect(simCalls[simCalls.length - 1]).toEqual({
-        values: [0.5, 0.7, 0],
+        values: [0.5, 0.7, 0.3],
         auto: false,
       });
     });
@@ -204,6 +206,7 @@ describe("SimPedalsPanel component", () => {
       });
       expect(throttle).toHaveValue("0");
       expect(brake).toHaveValue("0");
+      expect(clutch).toHaveValue("0");
     });
   });
 

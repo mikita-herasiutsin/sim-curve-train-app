@@ -199,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn waveform_starts_at_rest_and_repeats() {
+    fn waveform_starts_with_brake_and_clutch_released_and_repeats() {
         let start = waveform(0);
         assert_eq!(start[CLUTCH], REST);
         assert_eq!(start[BRAKE], REST);

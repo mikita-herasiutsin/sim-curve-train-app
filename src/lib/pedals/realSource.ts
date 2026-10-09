@@ -49,7 +49,9 @@ export function startRealSource(
         dirty = false;
         const [ids, snapshot] = await Promise.all([profiledDevices(), listDevices()]);
         if (stopped) return;
-        const target = snapshot.devices.find((d) => ids.includes(d.id));
+        // The simulated device only exists when a developer turned it on, so it wins.
+        const profiled = snapshot.devices.filter((d) => ids.includes(d.id));
+        const target = profiled.find((d) => d.simulated) ?? profiled[0];
         if (device && device.deviceId === target?.id) continue;
         await detach();
         if (!target) {

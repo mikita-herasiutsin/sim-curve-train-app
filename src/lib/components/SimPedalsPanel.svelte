@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listDevices, onDevicesChanged, setSimPedals } from "$lib/devices";
+  import { listDevices, onDevicesChanged, setSimPedals, type DevicesSnapshot } from "$lib/devices";
 
   let hasSimDevice = $state(false);
   let collapsed = $state(false);
@@ -13,8 +13,10 @@
   let rafId: number | null = null;
   let inFlight = false;
   let pending = false;
+  let destroyed = false;
 
   function scheduleSend() {
+    if (destroyed) return;
     if (typeof requestAnimationFrame === "undefined") {
       void doSend();
       return;
@@ -58,12 +60,21 @@
     scheduleSend();
   }
 
+  /** Shows the panel for a snapshot. When the device appears, the backend may still hold
+   * targets from before a webview reload, so it gets the panel state. */
+  function showFor(snapshot: DevicesSnapshot) {
+    const present = snapshot.devices.some((d) => d.simulated);
+    if (present && !hasSimDevice) scheduleSend();
+    hasSimDevice = present;
+  }
+
   onMount(() => {
     let unlisten: (() => void) | undefined;
-    let destroyed = false;
 
+    let gotEvent = false;
     onDevicesChanged((snapshot) => {
-      hasSimDevice = snapshot.devices.some((d) => d.simulated);
+      gotEvent = true;
+      showFor(snapshot);
     })
       .then((fn) => {
         if (destroyed) {
@@ -78,7 +89,8 @@
 
     listDevices()
       .then((snapshot) => {
-        hasSimDevice = snapshot.devices.some((d) => d.simulated);
+        // An event that arrived first is newer than this snapshot.
+        if (!gotEvent) showFor(snapshot);
       })
       .catch((e: unknown) => {
         error = String(e);

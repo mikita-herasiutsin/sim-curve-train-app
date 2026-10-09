@@ -715,14 +715,20 @@ mod tests {
         for _ in 0..1000 {
             synth.next_sample(&shared);
         }
+        // A silent dip shorter than one 3 Hz period (16 000 samples at 48 kHz). Without the reset
+        // the old countdown would still hold about 15 000 samples and no beep would start yet.
         shared.set_pulse_rate(0.0);
-        for _ in 0..20_000 {
+        for _ in 0..2_400 {
             synth.next_sample(&shared);
         }
         let before = synth.beep_starts();
         shared.set_pulse_rate(3.0);
         synth.next_sample(&shared);
-        assert_eq!(synth.beep_starts(), before + 1);
+        assert_eq!(
+            synth.beep_starts(),
+            before + 1,
+            "a beep starts on the first sample"
+        );
     }
 
     #[test]

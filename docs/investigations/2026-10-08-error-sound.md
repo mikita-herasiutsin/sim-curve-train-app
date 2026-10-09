@@ -5,6 +5,8 @@ Date: 2026-10-08
 >
 > **Decision (2026-10-09):** the user listened to all eight candidates and chose **E, Parking sensor**, with rate scaling on (3→11 beeps/s by distance past the band edge). It is the **only** drill sound: the lock chime was dropped. The app uses `ERROR_GAIN = 0.15` before the master volume, which matches the page's level at the app's default volume. See D-20 in [decisions](../decisions/README.md). To revisit the choice, open [`2026-10-08-error-sounds.html`](2026-10-08-error-sounds.html) in a browser. It synthesises every candidate live with the parameters below.
 
+> **As implemented:** the beeper in `src-tauri/src/audio.rs` stops starting beeps when the pedal re-enters the band and releases the current one with τ 4 ms; there is no separate gate, and no separate error volume, because the beep is the only sound. Hysteresis is on re-entry: out at |error| > tol, back in at |error| ≤ 0.9·tol.
+
 Context when written: SimCurveTrainApp Hold/Trace drills. The error sound plays while the pedal is outside the tolerance band (e.g. ±5 %). Inside the band it's silent, and the 1 kHz lock chime plays after 100 ms in band (2 ms attack, 80 ms decay, gain 0.3). The previous continuous pitch-follows-error sine (220–880 Hz) was rejected as "too robotic" and it carried through the house.
 
 Listening page: [`2026-10-08-error-sounds.html`](2026-10-08-error-sounds.html) (same folder). It synthesises every candidate below with exactly these parameters.

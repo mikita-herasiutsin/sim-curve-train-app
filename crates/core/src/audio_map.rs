@@ -1,5 +1,7 @@
-/// Share of the tolerance an in-band pedal may drift past the band before it counts as out
-/// again. The hysteresis keeps the sound from fluttering when the pedal rests on the band edge.
+/// Share of the tolerance by which an out-of-band pedal must come back inside before the beeps
+/// stop: re-entry is at `|error| <= tolerance * (1 - BAND_HYSTERESIS)`, while leaving the band
+/// happens at `|error| > tolerance`, the same edge scoring uses. The hysteresis keeps the sound
+/// from stuttering when the pedal rests on the band edge.
 pub const BAND_HYSTERESIS: f32 = 0.1;
 
 /// Beeps per second right at the band edge.
@@ -34,10 +36,12 @@ pub fn pulse_rate_hz(error_pct: f32, tolerance_pct: f32) -> f32 {
 /// Turns a running drill's pedal samples into the beep rate, one call per sample. Silent
 /// (rate `0.0`) while the pedal is in the band.
 ///
-/// The pedal enters the band at `|error| <= tolerance`, as in scoring, and leaves it only past
-/// `tolerance * (1 + BAND_HYSTERESIS)`; the rate itself is measured from the band edge
-/// (`tolerance`). Hold and Trace drills behave the same. The state resets whenever no rep is
-/// active.
+/// The pedal leaves the band as soon as `|error| > tolerance`, the edge scoring uses, so the
+/// first beep comes exactly when scoring counts the pedal out. It re-enters only at
+/// `|error| <= tolerance * (1 - BAND_HYSTERESIS)`, so a pedal resting on the edge does not
+/// stutter. A pedal approaching from outside is therefore silent only once it is that close. The
+/// rate itself is measured from the band edge (`tolerance`). Hold and Trace drills behave the
+/// same. The state resets whenever no rep is active.
 #[derive(Debug, Default)]
 pub struct ToneTracker {
     in_band: bool,
@@ -56,9 +60,9 @@ impl ToneTracker {
         };
         let error = value - target;
         let limit = if self.in_band {
-            tolerance * (1.0 + BAND_HYSTERESIS)
-        } else {
             tolerance
+        } else {
+            tolerance * (1.0 - BAND_HYSTERESIS)
         };
         self.in_band = error.abs() <= limit;
         if self.in_band {
@@ -133,38 +137,71 @@ mod tests {
 
     #[test]
     fn tracker_band_edge_is_inclusive_like_scoring() {
-        // Exactly representable: |0.625 - 0.5| == 0.125.
+        // Exactly representable: |0.625 - 0.5| == 0.125. Reached from inside the band, the edge
+        // itself is still in band.
         let mut tracker = ToneTracker::default();
+        assert_eq!(tracker.step(Some(0.5), 0.5, 0.125), 0.0);
         assert_eq!(tracker.step(Some(0.5), 0.625, 0.125), 0.0);
         assert!(tracker.step(Some(0.5), 0.9, 0.125) > 0.0);
     }
 
     #[test]
+    fn rate_at_the_curve_midpoint() {
+        // d = 15 of a 30-point span: k = 0.5^0.6, rate = 3 + 8k.
+        assert!((pulse_rate_hz(20.0, 5.0) - 8.278).abs() < 1e-3);
+    }
+
+    #[test]
+    fn tracker_leaves_band_on_tolerance_and_reenters_at_hysteresis_limit() {
+        let mut tracker = ToneTracker::default();
+        assert_eq!(tracker.step(Some(0.5), 0.5, 0.05), 0.0);
+        // Just over tolerance: the beeps start at the rate for the band edge.
+        let edge = tracker.step(Some(0.5), 0.5501, 0.05);
+        assert!((PULSE_RATE_MIN_HZ..3.2).contains(&edge), "edge {edge}");
+        // Between 0.9 * tolerance and tolerance: still beeping.
+        assert!(tracker.step(Some(0.5), 0.549, 0.05) > 0.0);
+        assert!(tracker.step(Some(0.5), 0.546, 0.05) > 0.0);
+        // At or inside 0.9 * tolerance: silent again.
+        assert_eq!(tracker.step(Some(0.5), 0.544, 0.05), 0.0);
+        assert_eq!(tracker.step(Some(0.5), 0.5, 0.05), 0.0);
+    }
+
+    #[test]
+    fn tracker_approach_from_outside_is_silent_only_inside_hysteresis_limit() {
+        let mut tracker = ToneTracker::default();
+        // Inside the tolerance but outside 0.9 * tolerance, approaching from outside: beeping.
+        assert!(tracker.step(Some(0.5), 0.548, 0.05) > 0.0);
+        assert!(tracker.step(Some(0.5), 0.546, 0.05) > 0.0);
+        assert_eq!(tracker.step(Some(0.5), 0.544, 0.05), 0.0);
+    }
+
+    #[test]
     fn tracker_edge_dither_stays_out_then_returns_to_silence() {
         let mut tracker = ToneTracker::default();
-        // Settle in band, then leave well past the hysteresis limit.
+        // Settle in band, then leave well past the tolerance.
         assert_eq!(tracker.step(Some(0.5), 0.5, 0.05), 0.0);
         assert!(tracker.step(Some(0.5), 0.6, 0.05) > 0.0);
-        // Dither between the band edge and the hysteresis limit: still out of band.
+        // Dither just past the band edge: out of band, beeping throughout.
         for i in 0..100 {
             let value = if i % 2 == 0 { 0.5 + 0.052 } else { 0.5 + 0.057 };
             assert!(tracker.step(Some(0.5), value, 0.05) > 0.0, "sample {i}");
         }
-        // Back within the tolerance: silent.
-        assert_eq!(tracker.step(Some(0.5), 0.549, 0.05), 0.0);
-        // Inside the hysteresis zone now counts as in band.
-        assert_eq!(tracker.step(Some(0.5), 0.553, 0.05), 0.0);
-        assert!(tracker.step(Some(0.5), 0.56, 0.05) > 0.0);
+        // Back within the tolerance but not the re-entry limit: still beeping.
+        assert!(tracker.step(Some(0.5), 0.549, 0.05) > 0.0);
+        // Re-entry at 0.9 * tolerance: silent.
+        assert_eq!(tracker.step(Some(0.5), 0.544, 0.05), 0.0);
+        // Leaving the band again at just over tolerance: beeping on the first sample.
+        assert!(tracker.step(Some(0.5), 0.553, 0.05) > 0.0);
     }
 
     #[test]
     fn tracker_state_resets_between_reps() {
         let mut tracker = ToneTracker::default();
         assert_eq!(tracker.step(Some(0.5), 0.5, 0.05), 0.0);
-        // Hysteresis zone while in band: silent.
-        assert_eq!(tracker.step(Some(0.5), 0.553, 0.05), 0.0);
-        assert_eq!(tracker.step(None, 0.553, 0.05), 0.0);
-        // A fresh rep starts out of band at that position.
-        assert!(tracker.step(Some(0.5), 0.553, 0.05) > 0.0);
+        // Still in band just inside the tolerance: silent.
+        assert_eq!(tracker.step(Some(0.5), 0.548, 0.05), 0.0);
+        assert_eq!(tracker.step(None, 0.548, 0.05), 0.0);
+        // A fresh rep starts out of band, so 0.048 is past the re-entry limit: beeping.
+        assert!(tracker.step(Some(0.5), 0.548, 0.05) > 0.0);
     }
 }

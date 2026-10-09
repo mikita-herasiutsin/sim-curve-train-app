@@ -1011,6 +1011,43 @@ mod tests {
     }
 
     #[test]
+    fn trace_scoring_phase_is_silent() {
+        let mut stream = stream();
+        let audio = AudioFeedback::detached();
+        let (channel, _) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        // A 600 ms trace after a 1 s countdown: active from 1.0 s to 1.6 s, then scoring until
+        // 1.9 s (TRACE_LAG_MARGIN_MS after the active window).
+        let trace = Drill {
+            id: "t".into(),
+            name: "T".into(),
+            pedal: Pedal::Brake,
+            reps: 1,
+            lead_in_ms: 1000,
+            tolerance: 6.0,
+            kind: DrillKind::Trace {
+                points: vec![(0, 0.0), (150, 90.0), (600, 0.0)],
+            },
+        };
+        start_drill(
+            Some(&mut stream),
+            Some(brake_profile()),
+            0,
+            trace,
+            channel,
+            Some(audio.clone()),
+            &reply,
+        );
+        assert_eq!(answer.recv().unwrap(), Ok(()));
+        // Off target during the active window: beeping.
+        assert!(feed(&mut stream, &audio, 1_001, 1_500, 0.5) > 0.0);
+        // Off target in the scoring phase, where the target is no longer shown: silent.
+        assert_eq!(feed(&mut stream, &audio, 1_500, 1_700, 0.5), 0.0);
+        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
+        assert!(matches!(phase, Some(Phase::Scoring { .. })), "{phase:?}");
+    }
+
+    #[test]
     fn no_beeps_outside_the_active_phase() {
         let mut stream = stream();
         let audio = start_with_audio(&mut stream);

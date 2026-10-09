@@ -810,6 +810,11 @@ async function main() {
     const drill = findDrill("sample", "hairpin");
     await setPedals(0, 0, 0);
     await click("button", "Start Drill");
+    // The last second of the lead-in shows GO before the rep starts.
+    await waitFor(
+      () => ev(`document.querySelector(".countdown-number")?.textContent.trim() === "GO"`),
+      { timeout: 15_000, interval: 50, what: "GO in the countdown overlay" },
+    );
     await waitFor(
       () =>
         ev(`(() => {
@@ -935,7 +940,8 @@ async function main() {
           () =>
             ev(`(() => {
               const info = document.querySelector(".drill-info")?.innerText ?? "";
-              return info.includes("Target Pedal: ${d.pedal}") && info.includes("Target: ${d.target}%") && info.includes("Reps: ${d.reps}");
+              const kind = ${JSON.stringify(d.type === "trace" ? "Duration:" : `Target: ${d.target}%`)};
+              return info.includes("Target Pedal: ${d.pedal}") && info.includes(kind) && info.includes("Reps: ${d.reps}");
             })()`),
           { what: `details of ${p.name} / ${d.name} (index ${i})` },
         );

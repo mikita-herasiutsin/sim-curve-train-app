@@ -3661,6 +3661,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "telemetry-extract"
+version = "0.0.1"
+dependencies = [
+ "sct-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tendril"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

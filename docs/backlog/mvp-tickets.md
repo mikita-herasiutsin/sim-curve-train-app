@@ -133,13 +133,13 @@ A drill runs N reps (from the preset; default 5) with a short pause between reps
 - **AC:** you can abort mid-set; the summary shows the best, average and consistency.
 - **Deps:** SCT-032
 
-### SCT-038 · Audio feedback 🟨 · M
+### SCT-038 · Audio feedback ✅ · M
 Audio comes from the Rust side (`cpal`/`rodio`):
 - **Error beeps (parking-sensor style):** on Hold and Trace drills, while the pedal is outside the tolerance band during an active rep, short 784 Hz beeps repeat. The rate rises with the distance past the band edge, from 3 per second at the edge to 11 per second at 30 percentage points past it. Inside the band it is silent. There is no lock chime and no miss cue.
 
 Settings: on/off and volume. Defaults follow [D-20](../decisions/README.md): on, silent inside the band, quiet volume.
 - **AC:** the beeps start within about 20 ms of leaving the band, with no audible glitches; mute is persisted.
-- **Status:** done in code. The drill sets the beep rate per sample; the synth schedules the beeps (rate sampled once per beep, so the rhythm never glides) and fades out click-free when the pedal returns to the band. Earlier versions had a continuous pitch-following tone, then a lock chime plus a one-shot miss cue; after a listening test of 8 candidates the parking-sensor beeps were chosen (2026-10-09), see `docs/investigations/2026-10-08-error-sound.md`. Tests cover the synth reaching a beep in under 20 ms; device buffering adds roughly one audio period on top, not yet measured on hardware. Audio ignores the reaction-lag compensation used in trace scoring, so on Trace drills the beeps follow the raw pedal position; revisit with SCT-034. Check by ear before marking ✅.
+- **Status:** done (PR #30, merged 2026-10-09; beeps approved by ear). The drill sets the beep rate per sample; the synth schedules the beeps (rate sampled once per beep, so the rhythm never glides) and fades out click-free when the pedal returns to the band. Earlier versions had a continuous pitch-following tone, then a lock chime plus a one-shot miss cue; after a listening test of 8 candidates the parking-sensor beeps were chosen (2026-10-09), see `docs/investigations/2026-10-08-error-sound.md`. Tests cover the synth reaching a beep in under 20 ms; device buffering adds roughly one audio period on top, not yet measured on hardware. Audio ignores the reaction-lag compensation used in trace scoring, so on Trace drills the beeps follow the raw pedal position; revisit with SCT-034.
 - **Deps:** SCT-031
 
 ---
@@ -174,16 +174,20 @@ A home screen shows the preset cards (GT3, NASCAR and Road/MX-5). Opening a card
 - **AC:** presets are loaded from bundled JSON; the last preset used is remembered.
 - **Deps:** SCT-030, SCT-033
 
-### SCT-044 · Dev tool: `.ibt` zone extractor ⬜ · M
-A Python script at `tools/ibt-extract/` (using pyirsdk) does the following:
-1. Reads `.ibt` laps.
-2. Finds brake and throttle zones.
-3. Time-normalises them.
-4. Simplifies the curves (Ramer–Douglas–Peucker).
-5. Outputs draft drill JSON.
+### SCT-044 · Dev tool: Telemetry zone extractor ✅ · M
+A Rust workspace binary tool at `crates/telemetry-extract` (re-scoped from Python `.ibt` script to Garage 61 CSV exports; native `.ibt` support deferred as a post-MVP follow-up):
+1. Reads Garage 61 60 Hz CSV exports and parses car/track/lap time metadata.
+2. Finds brake zones (hysteresis thresholds, duration gating, gap merging), lift zones, and throttle exit zones (from throttle minimum after braking to sustained $\ge 98\%$).
+3. Normalises coordinates and simplifies curves using RDP into 5–15 points.
+4. Outputs validated draft drill JSON (trace drills and plateau hold drills) via `sct-core` validation.
+5. Computes statistical pedal metrics (`stats` subcommand) per car reporting median and IQR (and JSON).
 
-This is a developer tool only and is not shipped in the app.
-- **AC:** running it on your own laps produces valid drill JSON that the app loads; there is a README with usage.
+This is a developer tool only and is not shipped in the app. Zones are grouped into corners across laps, and a corner is kept only if it appears in at least half of them. Drills omit `tolerance` unless `--tolerance` is given, so `Drill.tolerance` is now optional and an unset value falls back to 10 (D-17). Usage: `crates/telemetry-extract/README.md`.
+- **AC:**
+  - Running `extract` produces valid drill JSON that `sct-core` loads and validates cleanly.
+  - Running `stats` outputs compact table and JSON with median and IQR for brake zones and staged throttle exits.
+  - Self-contained CLI with `--help` documentation.
+  - Unit tests on synthetic CSV data pass.
 - **Deps:** SCT-030
 
 ### SCT-041 · GT3 preset ⬜ · S

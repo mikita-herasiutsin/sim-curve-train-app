@@ -6,7 +6,8 @@ export interface BaseDrill {
   pedal: "brake" | "throttle" | "clutch";
   reps: number;
   leadInMs: number;
-  tolerance: number;
+  /** Band half-width in percentage points; omitted means the D-17 default. */
+  tolerance?: number;
 }
 
 export interface HoldDrill extends BaseDrill {
@@ -21,6 +22,14 @@ export interface TraceDrill extends BaseDrill {
 }
 
 export type Drill = HoldDrill | TraceDrill;
+
+/** Tolerance used when a drill omits it (D-17), matching `DEFAULT_TOLERANCE` in Rust. */
+export const DEFAULT_TOLERANCE = 10;
+
+/** The drill's tolerance band half-width in percentage points. */
+export function toleranceOf(drill: Drill): number {
+  return drill.tolerance ?? DEFAULT_TOLERANCE;
+}
 
 /**
  * Whether the drill screen can run it. Trace drills arrive with SCT-034; the engine already

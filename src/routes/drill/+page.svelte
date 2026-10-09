@@ -8,6 +8,7 @@
     abortDrillRun,
     applyDrillEvent,
     playableDrills,
+    toleranceOf,
     IDLE_VIEW,
     type Preset,
     type HoldDrill,
@@ -50,7 +51,7 @@
       ? {
           pedal: selectedDrill.pedal,
           target: selectedDrill.target / 100,
-          tolerance: selectedDrill.tolerance / 100,
+          tolerance: toleranceOf(selectedDrill) / 100,
         }
       : null,
   );
@@ -245,7 +246,7 @@
             <p><strong>Target Pedal:</strong> {selectedDrill.pedal}</p>
             {#if selectedDrill.type === "hold"}
               <p><strong>Target:</strong> {selectedDrill.target}%</p>
-              <p><strong>Tolerance:</strong> &plusmn;{selectedDrill.tolerance}%</p>
+              <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
               <p><strong>Hold Time:</strong> {selectedDrill.holdMs} ms</p>
             {/if}
             <p><strong>Reps:</strong> {selectedDrill.reps}</p>
@@ -282,7 +283,7 @@
                 stream={pedalStream}
                 targetPedal={selectedDrill.pedal}
                 targetVal={selectedDrill.target / 100}
-                targetTolerance={selectedDrill.tolerance / 100}
+                targetTolerance={toleranceOf(selectedDrill) / 100}
               />
             {:else if selectedDrill?.type === "trace"}
               <!-- Trace not fully supported in PedalBars target yet -->
@@ -303,7 +304,7 @@
               {/if}
               <p class="hold-time">Hold <span>{(holdRemainingMs / 1000).toFixed(1)}s</span></p>
               <p class="hold-target">
-                Target {selectedDrill.target}% &plusmn;{selectedDrill.tolerance}%
+                Target {selectedDrill.target}% &plusmn;{toleranceOf(selectedDrill)}%
               </p>
               <div
                 class="hold-progress"

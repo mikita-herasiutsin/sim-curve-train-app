@@ -12,15 +12,12 @@ use serde::{Deserialize, Serialize};
 /// Current schema version for preset files.
 pub const SCHEMA_VERSION: u32 = 1;
 
-const DEFAULT_REPS: u32 = 5;
-const DEFAULT_LEAD_IN_MS: u32 = 3000;
+pub const DEFAULT_REPS: u32 = 5;
+pub const DEFAULT_LEAD_IN_MS: u32 = 3000;
+pub const DEFAULT_TOLERANCE: f32 = 10.0;
 
 const fn default_reps() -> u32 {
     DEFAULT_REPS
-}
-
-const fn default_tolerance() -> f32 {
-    10.0
 }
 
 const fn default_lead_in() -> u32 {
@@ -67,8 +64,9 @@ pub struct Drill {
     #[serde(default = "default_lead_in")]
     pub lead_in_ms: u32,
     /// Permissible error tolerance in percent (`0.5..=50.0`).
-    #[serde(default = "default_tolerance")]
-    pub tolerance: f32,
+    /// `None` (omitted, or an explicit `null`) means unset: the drill uses 10.0 (D-17).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tolerance: Option<f32>,
     /// Drill type and parameters (flattened in JSON).
     #[serde(flatten)]
     pub kind: DrillKind,
@@ -96,7 +94,7 @@ impl Drill {
     /// Returns the permissible tolerance as a fraction in `[0.0, 1.0]`.
     #[must_use]
     pub fn tolerance_fraction(&self) -> f32 {
-        self.tolerance / 100.0
+        self.tolerance.unwrap_or(DEFAULT_TOLERANCE) / 100.0
     }
 }
 
@@ -211,13 +209,12 @@ fn validate_drill(drill: &Drill) -> Result<(), PresetError> {
         });
     }
 
-    if !drill.tolerance.is_finite() || !(0.5..=50.0).contains(&drill.tolerance) {
+    if let Some(tol) = drill.tolerance
+        && (!tol.is_finite() || !(0.5..=50.0).contains(&tol))
+    {
         return Err(PresetError::Invalid {
             drill: drill_ctx,
-            message: format!(
-                "field 'tolerance' ({}) must be finite and between 0.5 and 50",
-                drill.tolerance
-            ),
+            message: format!("field 'tolerance' ({tol}) must be finite and between 0.5 and 50"),
         });
     }
 
@@ -624,7 +621,7 @@ mod tests {
             pedal: Pedal::Brake,
             reps: 5,
             lead_in_ms: 3000,
-            tolerance: 5.0,
+            tolerance: Some(5.0),
             kind: DrillKind::Hold {
                 target: 70.0,
                 hold_ms: 2000,
@@ -639,7 +636,7 @@ mod tests {
             pedal: Pedal::Brake,
             reps: 5,
             lead_in_ms: 2000,
-            tolerance: 6.0,
+            tolerance: Some(6.0),
             kind: DrillKind::Trace {
                 points: vec![(0, 0.0), (150, 92.0), (600, 60.0), (1500, 0.0)],
             },
@@ -918,7 +915,7 @@ mod tests {
     #[test]
     fn validation_tolerance_range() {
         let mut preset = valid_preset();
-        preset.drills[0].tolerance = 0.4;
+        preset.drills[0].tolerance = Some(0.4);
         let json_too_low = serde_json::to_string(&preset).unwrap();
         let err = parse_preset(&json_too_low).unwrap_err();
         assert!(matches!(
@@ -929,13 +926,34 @@ mod tests {
             } if d == "brake-hold-70" && message.contains("field 'tolerance'")
         ));
 
-        preset.drills[0].tolerance = 50.1;
+        preset.drills[0].tolerance = Some(50.1);
         let json_too_high = serde_json::to_string(&preset).unwrap();
         assert!(parse_preset(&json_too_high).is_err());
 
-        preset.drills[0].tolerance = f32::NAN;
-        let json_nan = serde_json::to_string(&preset).unwrap();
-        assert!(parse_preset(&json_nan).is_err());
+        preset.drills[0].tolerance = Some(f32::NAN);
+        assert!(preset.validate().is_err());
+    }
+
+    #[test]
+    fn tolerance_omitted_defaults_to_ten() {
+        let json = r#"{
+            "schemaVersion": 1,
+            "id": "test-tol",
+            "name": "Test Tol",
+            "drills": [
+                {
+                    "id": "drill-1",
+                    "name": "Hold",
+                    "type": "hold",
+                    "pedal": "brake",
+                    "target": 50,
+                    "holdMs": 1000
+                }
+            ]
+        }"#;
+        let parsed = parse_preset(json).expect("omitted tolerance should parse");
+        assert_eq!(parsed.drills[0].tolerance, None);
+        assert!((parsed.drills[0].tolerance_fraction() - 0.10).abs() < 1e-6);
     }
 
     #[test]
@@ -1088,7 +1106,7 @@ mod tests {
     #[test]
     fn error_messages_contain_drill_id() {
         let mut preset = valid_preset();
-        preset.drills[0].tolerance = 0.1;
+        preset.drills[0].tolerance = Some(0.1);
         let json = serde_json::to_string(&preset).unwrap();
         let err = parse_preset(&json).unwrap_err();
         let msg = err.to_string();
@@ -1149,7 +1167,7 @@ mod tests {
         assert_eq!(preset.drills[2].pedal, Pedal::Brake);
         assert_eq!(preset.drills[3].id, "throttle-rolling-start-35");
         assert_eq!(preset.drills[3].pedal, Pedal::Throttle);
-        assert_eq!(preset.drills[3].tolerance, 10.0);
+        assert!((preset.drills[3].tolerance_fraction() - 0.10).abs() < f32::EPSILON);
         match &preset.drills[3].kind {
             DrillKind::Hold { target, hold_ms } => {
                 assert!((target - 35.0).abs() < 1e-6);
@@ -1268,6 +1286,7 @@ mod tests {
     fn tolerance_defaults_to_ten_when_omitted() {
         let json = r#"{"schemaVersion":1,"id":"p","name":"P","drills":[{"id":"d","name":"D","type":"hold","pedal":"brake","target":70,"holdMs":2000}]}"#;
         let preset = parse_preset(json).unwrap();
-        assert!((preset.drills[0].tolerance - 10.0).abs() < f32::EPSILON);
+        assert_eq!(preset.drills[0].tolerance, None);
+        assert!((preset.drills[0].tolerance_fraction() - 0.10).abs() < f32::EPSILON);
     }
 }

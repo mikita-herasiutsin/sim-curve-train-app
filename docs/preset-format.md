@@ -73,7 +73,7 @@ The parser validates all presets strictly upon loading:
 5. Presets must contain at least one drill.
 6. `reps` must be between `1` and `50`.
 7. `leadInMs` must be between `0` and `10000`.
-8. `tolerance` must be finite and between `0.5` and `50.0`.
+8. `tolerance` (if present) must be finite and between `0.5` and `50.0`. Omitted tolerances default to `10.0` (D-17).
 9. Hold drills: `target` must be finite and between `0.0` and `100.0`; `holdMs` must be between `200` and `60000`.
 10. Trace drills:
     - Must contain at least `2` points.

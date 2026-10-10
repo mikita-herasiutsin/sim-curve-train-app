@@ -18,6 +18,7 @@
     "allow-save-attempt",
     "allow-list-attempts",
     "allow-best-total",
+    "allow-best-totals",
     "allow-audio-test-tone",
     "allow-audio-set-enabled",
     "allow-audio-set-volume",

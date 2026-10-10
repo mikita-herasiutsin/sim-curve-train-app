@@ -21,6 +21,8 @@ import {
   initTheme,
   THEME_KEY,
   DEFAULT_THEME,
+  loadLastPreset,
+  saveLastPreset,
 } from "./settings";
 
 describe("settings", () => {
@@ -304,6 +306,37 @@ describe("settings", () => {
 
       expect(() => saveAudioVolume(0.5)).not.toThrow();
       expect(loadAudioVolume()).toBe(DEFAULT_AUDIO_VOLUME);
+
+      getSpy.mockRestore();
+      setSpy.mockRestore();
+    });
+  });
+
+  describe("loadLastPreset & saveLastPreset", () => {
+    it("returns null when unset", () => {
+      expect(loadLastPreset()).toBeNull();
+    });
+
+    it("returns null when stored value is empty string", () => {
+      localStorage.setItem("sct:last_preset", "");
+      expect(loadLastPreset()).toBeNull();
+    });
+
+    it("saves and loads preset id (round trip)", () => {
+      saveLastPreset("starter");
+      expect(loadLastPreset()).toBe("starter");
+    });
+
+    it("returns null and does not throw when localStorage throws", () => {
+      const getSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("SecurityError: Access is denied");
+      });
+      const setSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new Error("QuotaExceededError");
+      });
+
+      expect(() => saveLastPreset("starter")).not.toThrow();
+      expect(loadLastPreset()).toBeNull();
 
       getSpy.mockRestore();
       setSpy.mockRestore();

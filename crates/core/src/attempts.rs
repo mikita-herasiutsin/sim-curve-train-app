@@ -436,6 +436,26 @@ impl AttemptStore {
         )?;
         Ok(best)
     }
+
+    /// Returns the highest total score per drill of a preset, keyed by drill id. Drills with no scored attempt are absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttemptError::Sqlite`] if querying the database fails.
+    pub fn best_totals(
+        &self,
+        preset_id: &str,
+    ) -> Result<std::collections::HashMap<String, f32>, AttemptError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT drill_id, MAX(best) FROM attempt WHERE preset_id = ?1 AND best IS NOT NULL GROUP BY drill_id;",
+        )?;
+        let totals = stmt
+            .query_map(rusqlite::params![preset_id], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(totals)
+    }
 }
 
 #[cfg(test)]
@@ -634,6 +654,55 @@ mod tests {
         assert_eq!(store.best_total("drill-1").unwrap(), Some(95.5));
         assert_eq!(store.best_total("drill-2").unwrap(), Some(98.0));
         assert_eq!(store.best_total("drill-3").unwrap(), None);
+    }
+
+    #[test]
+    fn best_totals_per_preset() {
+        let store = AttemptStore::open_in_memory().unwrap();
+
+        let make_attempt = |preset: &str, drill: &str, best: Option<f32>| NewAttempt {
+            drill_id: drill.to_string(),
+            preset_id: preset.to_string(),
+            pedal: Pedal::Throttle,
+            started_at: "2026-10-07T12:00:00Z".to_string(),
+            aborted: false,
+            best,
+            average: best,
+            consistency: None,
+            reps: Vec::new(),
+        };
+
+        store
+            .save_attempt(&make_attempt("gt3", "d1", Some(80.0)))
+            .unwrap();
+        store
+            .save_attempt(&make_attempt("gt3", "d1", Some(90.0)))
+            .unwrap();
+        store
+            .save_attempt(&make_attempt("gt3", "d2", Some(70.0)))
+            .unwrap();
+        store
+            .save_attempt(&make_attempt("mx5", "d1", Some(99.0)))
+            .unwrap();
+        store
+            .save_attempt(&make_attempt("gt3", "d3", None))
+            .unwrap();
+
+        let gt3 = store.best_totals("gt3").unwrap();
+        assert_eq!(gt3.len(), 2);
+        assert_eq!(
+            gt3,
+            std::collections::HashMap::from([("d1".to_string(), 90.0), ("d2".to_string(), 70.0),])
+        );
+
+        let mx5 = store.best_totals("mx5").unwrap();
+        assert_eq!(
+            mx5,
+            std::collections::HashMap::from([("d1".to_string(), 99.0)])
+        );
+
+        let unknown = store.best_totals("unknown").unwrap();
+        assert!(unknown.is_empty());
     }
 
     #[test]

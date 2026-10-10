@@ -1,21 +1,73 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { goto } from "$app/navigation";
+  import { resolve } from "$app/paths";
+  import { isTauri } from "@tauri-apps/api/core";
   import AppHeader from "$lib/components/AppHeader.svelte";
+  import { listPresets, playableDrills, type Preset, type Drill } from "$lib/drill";
+  import { bestTotals } from "$lib/attempts";
+  import { loadLastPreset, saveLastPreset } from "$lib/settings";
 
-  const milestones = [
-    {
-      id: "M1",
-      title: "See my pedals",
-      text: "Detect & calibrate pedals, live bars and scrolling graph.",
-    },
-    { id: "M2", title: "First drill", text: "Hold drills with reps, scoring and audio feedback." },
-    { id: "M3", title: "Traces", text: "Follow real brake and throttle traces, two view modes." },
-    { id: "M4", title: "Content", text: "GT3, NASCAR and MX-5 presets plus a pre-race warm-up." },
-    {
-      id: "M5",
-      title: "Progress",
-      text: "Personal bests, leaderboard, onboarding, v0.1.0 release.",
-    },
-  ];
+  let inTauri = $state(true);
+  let loaded = $state(false);
+  let loadError = $state<unknown>(null);
+  let presets = $state<Preset[]>([]);
+  let openPresetId = $state<string | null>(null);
+  let scores = $state<Record<string, number>>({});
+
+  function fetchScores(presetId: string) {
+    scores = {};
+    bestTotals(presetId)
+      .then((result) => {
+        if (openPresetId !== presetId) return;
+        scores = result;
+      })
+      // Without scores every drill shows a dash.
+      .catch((err: unknown) => console.error("Failed to load best scores", err));
+  }
+
+  function handlePresetClick(id: string) {
+    if (openPresetId === id) {
+      openPresetId = null;
+      return;
+    }
+    openPresetId = id;
+    saveLastPreset(id);
+    fetchScores(id);
+  }
+
+  function handleDrillClick(preset: Preset, drill: Drill) {
+    saveLastPreset(preset.id);
+    goto(
+      resolve(
+        `/drill?preset=${encodeURIComponent(preset.id)}&drill=${encodeURIComponent(drill.id)}`,
+      ),
+    );
+  }
+
+  onMount(() => {
+    if (!isTauri()) {
+      inTauri = false;
+      return;
+    }
+    inTauri = true;
+    listPresets()
+      .then((p) => {
+        presets = p.filter((preset) => playableDrills(preset).length > 0);
+        loaded = true;
+        if (presets.length > 0) {
+          const lastId = loadLastPreset();
+          const initial = presets.find((pr) => pr.id === lastId) ?? presets[0];
+          openPresetId = initial.id;
+          fetchScores(initial.id);
+        }
+      })
+      .catch((e: unknown) => {
+        console.error("Failed to load presets", e);
+        loadError = e;
+        loaded = true;
+      });
+  });
 </script>
 
 <AppHeader />
@@ -34,19 +86,65 @@
     </div>
   </section>
 
-  <section class="roadmap" aria-labelledby="roadmap-title">
-    <h3 id="roadmap-title">Roadmap</h3>
-    <ol>
-      {#each milestones as m (m.id)}
-        <li>
-          <span class="badge">{m.id}</span>
-          <div>
-            <strong>{m.title}</strong>
-            <p>{m.text}</p>
-          </div>
-        </li>
-      {/each}
-    </ol>
+  <section class="presets" aria-labelledby="presets-title">
+    <h3 id="presets-title">Presets</h3>
+    {#if !inTauri}
+      <p>Presets load in the desktop app.</p>
+    {:else if loadError}
+      <p role="alert">Failed to load presets: {loadError}</p>
+    {:else if loaded && presets.length === 0}
+      <p>No playable drills found.</p>
+    {:else if !loaded}
+      <p>Loading presets…</p>
+    {:else}
+      <ul class="preset-list">
+        {#each presets as preset (preset.id)}
+          <li class="preset-card">
+            <button
+              type="button"
+              class="preset-header"
+              aria-expanded={openPresetId === preset.id}
+              onclick={() => handlePresetClick(preset.id)}
+            >
+              <span class="preset-info">
+                <strong class="preset-name">{preset.name}</strong>
+                {#if preset.description}
+                  <span class="preset-description">{preset.description}</span>
+                {/if}
+              </span>
+              <span class="drill-count"
+                >{playableDrills(preset).length}
+                {playableDrills(preset).length === 1 ? "drill" : "drills"}</span
+              >
+            </button>
+            {#if openPresetId === preset.id}
+              <ul class="drill-list">
+                {#each playableDrills(preset) as drill (drill.id)}
+                  <li>
+                    <button
+                      type="button"
+                      class="drill"
+                      onclick={() => handleDrillClick(preset, drill)}
+                    >
+                      <span class="drill-name">{drill.name}</span>
+                      <span class="drill-type">{drill.type}</span>
+                      <span class="drill-pedal pedal--{drill.pedal}">{drill.pedal}</span>
+                      <span class="drill-score">
+                        {#if Object.hasOwn(scores, drill.id)}
+                          Best {Math.round(scores[drill.id])}
+                        {:else}
+                          Best —
+                        {/if}
+                      </span>
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </section>
 </main>
 
@@ -116,7 +214,7 @@
     background: var(--throttle);
   }
 
-  .roadmap {
+  .presets {
     padding: 1.5rem;
     border: 1px solid var(--border);
     border-radius: 1rem;
@@ -128,7 +226,7 @@
     font-size: 1rem;
   }
 
-  ol {
+  .preset-list {
     display: grid;
     gap: 0.75rem;
     margin: 0;
@@ -136,30 +234,114 @@
     list-style: none;
   }
 
-  li {
-    display: flex;
-    gap: 0.875rem;
-    padding: 0.75rem;
+  .preset-card {
     border-radius: 0.75rem;
     background: var(--surface-raised);
+    overflow: hidden;
+    border: 1px solid var(--border);
   }
 
-  li p {
-    margin: 0.125rem 0 0;
+  .preset-header {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem;
+    background: transparent;
+    border: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .preset-header:hover {
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+
+  .preset-info {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .preset-info strong {
+    display: block;
+    font-size: 1rem;
+  }
+
+  .preset-description {
+    display: block;
+    margin: 0.25rem 0 0;
     color: var(--text-muted);
     font-size: 0.875rem;
   }
 
-  .badge {
+  .drill-count {
     flex: none;
-    display: grid;
-    place-items: center;
-    width: 2.25rem;
-    height: 2.25rem;
-    border-radius: 0.5rem;
+    padding: 0.25rem 0.625rem;
+    border-radius: 999px;
     background: color-mix(in srgb, var(--accent) 18%, transparent);
     color: var(--accent);
     font-size: 0.8125rem;
-    font-weight: 700;
+    font-weight: 600;
+  }
+
+  .drill-list {
+    display: grid;
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0 1rem 1rem;
+    list-style: none;
+  }
+
+  .drill {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.625rem 0.875rem;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    background: var(--surface);
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s ease;
+  }
+
+  .drill:hover {
+    border-color: var(--accent);
+  }
+
+  .drill-name {
+    font-weight: 500;
+    margin-right: auto;
+  }
+
+  .drill-type {
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+    text-transform: capitalize;
+  }
+
+  .drill-pedal {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-transform: capitalize;
+  }
+
+  .pedal--brake {
+    color: var(--brake);
+  }
+
+  .pedal--throttle {
+    color: var(--throttle);
+  }
+
+  .drill-score {
+    font-size: 0.875rem;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    color: var(--text-muted);
   }
 </style>

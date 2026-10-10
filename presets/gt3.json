@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "id": "gt3",
+  "name": "GT3",
+  "description": "GT3 with ABS: threshold holds, a heavy stop and a medium-corner trail, and staged exit throttle.",
+  "drills": [
+    {
+      "id": "brake-hold-80",
+      "name": "Brake hold 80%",
+      "type": "hold",
+      "pedal": "brake",
+      "target": 80,
+      "tolerance": 7,
+      "holdMs": 1500,
+      "reps": 5,
+      "leadInMs": 3000
+    },
+    {
+      "id": "brake-hold-50",
+      "name": "Brake hold 50%",
+      "type": "hold",
+      "pedal": "brake",
+      "target": 50,
+      "tolerance": 7,
+      "holdMs": 2000,
+      "reps": 5,
+      "leadInMs": 3000
+    },
+    {
+      "id": "heavy-stop",
+      "name": "Heavy stop trace",
+      "type": "trace",
+      "pedal": "brake",
+      "tolerance": 7,
+      "reps": 5,
+      "leadInMs": 2000,
+      "points": [
+        [0, 0],
+        [200, 78],
+        [900, 76],
+        [1700, 58],
+        [2400, 25],
+        [2900, 12],
+        [3300, 5],
+        [3600, 0]
+      ]
+    },
+    {
+      "id": "medium-corner",
+      "name": "Medium corner trace",
+      "type": "trace",
+      "pedal": "brake",
+      "tolerance": 7,
+      "reps": 5,
+      "leadInMs": 2000,
+      "points": [
+        [0, 0],
+        [350, 52],
+        [800, 48],
+        [1500, 28],
+        [2100, 12],
+        [2600, 4],
+        [2900, 0]
+      ]
+    },
+    {
+      "id": "staged-exit",
+      "name": "Staged exit throttle",
+      "type": "trace",
+      "pedal": "throttle",
+      "tolerance": 7,
+      "reps": 5,
+      "leadInMs": 2000,
+      "points": [
+        [0, 0],
+        [150, 65],
+        [600, 68],
+        [1200, 100],
+        [1600, 100]
+      ]
+    },
+    {
+      "id": "two-step-exit",
+      "name": "Two-step exit throttle",
+      "type": "trace",
+      "pedal": "throttle",
+      "tolerance": 7,
+      "reps": 5,
+      "leadInMs": 2000,
+      "points": [
+        [0, 0],
+        [200, 50],
+        [600, 55],
+        [800, 75],
+        [1300, 80],
+        [1700, 100],
+        [2000, 100]
+      ]
+    }
+  ]
+}

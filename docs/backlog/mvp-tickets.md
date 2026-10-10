@@ -196,12 +196,13 @@ This is a developer tool only and is not shipped in the app. Zones are grouped i
   - Unit tests on synthetic CSV data pass.
 - **Deps:** SCT-030
 
-### SCT-041 · GT3 preset ⬜ · S
+### SCT-041 · GT3 preset ✅ · S
 Five or six drills hand-tuned from your own GT3 laps:
 - Two brake holds (e.g. 70% and 90%)
 - Two brake traces (hairpin, medium corner)
 - One or two staged exit-throttle traces ([D-18](../decisions/README.md)), with GT3 thresholds and ramp rate
 - **AC:** every drill can be played and scored.
+- **Status:** `presets/gt3.json` has six drills tuned from six BMW M4 GT3 laps at Road Atlanta: brake holds at 80% and 50%, a heavy-stop and a medium-corner brake trace, a single-step and a two-step exit. A core test scores an exact follow of every bundled trace drill.
 - **Deps:** SCT-044, SCT-036
 
 ### SCT-042 · NASCAR preset ⬜ · S

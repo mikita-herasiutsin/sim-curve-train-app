@@ -994,6 +994,39 @@ mod tests {
     }
 
     #[test]
+    fn bundled_trace_drills_score_an_exact_follow_near_full_marks() {
+        // Every trace drill in presets/ must load, build a curve and score a perfect follow.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("presets/ is readable") {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let json = std::fs::read_to_string(&path).unwrap();
+            let preset = crate::preset::parse_preset(&json)
+                .unwrap_or_else(|e| panic!("{} must be valid: {e}", path.display()));
+            for drill in &preset.drills {
+                let Some(curve) = drill.trace_curve() else {
+                    continue;
+                };
+                let params = TraceParams::new(&curve, drill.tolerance_fraction());
+                let samples = generate_synthetic_samples(&curve, START_US, 0.0, |_n, val| val);
+                let score = score_trace(&samples, START_US, &params).unwrap();
+                assert!(
+                    score.accuracy > 99.0,
+                    "{} / {}: accuracy was {}",
+                    preset.id,
+                    drill.id,
+                    score.accuracy
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "no trace drills found in presets/");
+    }
+
+    #[test]
     fn test_14_low_plateau_leaves_the_band() {
         let target = second_curve();
         let params = TraceParams::new(&target, 0.10);

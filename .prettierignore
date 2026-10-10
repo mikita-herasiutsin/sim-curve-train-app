@@ -7,3 +7,5 @@ static/
 docs/
 package-lock.json
 LICENSE
+.claude/
+.agents/

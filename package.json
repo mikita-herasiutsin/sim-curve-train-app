@@ -1,6 +1,6 @@
 {
   "name": "sim-curve-train-app",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Sim racing pedal muscle-memory trainer",
   "private": true,
   "license": "GPL-3.0-only",

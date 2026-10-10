@@ -20,10 +20,13 @@ cargo run -p telemetry-extract -- extract \
   --preset-name "My Preset" \
   --tolerance 10.0 \
   --max-drills 12 \
+  --min-brake 4 \
   "Garage 61 - Driver - Car - Track - 01.23.456 - 123.csv"
 ```
 
 If `--out` is omitted, JSON prints to stdout.
+
+`--min-brake N` and `--min-lift N` reserve slots for the N top-ranked brake (lift) corners before the rest fill by ranking. If fewer such corners exist, the tool warns on stderr and continues. `--min-brake` plus `--min-lift` above `--max-drills` is an error. Per-class values (decision D-22): road cars use `--min-brake` (GT3 4, MX-5 3, Caterham 3), ovals use `--min-lift`.
 
 ## stats
 

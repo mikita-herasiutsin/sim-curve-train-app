@@ -12,7 +12,7 @@ use std::path::Path;
 use sct_core::preset::{DrillKind, parse_preset};
 
 use crate::csv::{LapTelemetry, parse_filename_metadata, parse_lap_time_str, read_csv_file};
-use crate::extract::{ExtractOptions, extract_preset_from_laps};
+use crate::extract::{ExtractOptions, extract_preset_from_laps, extract_with_warnings};
 use crate::simplify::{Point2D, process_trace_segment, rdp, simplify_adaptive};
 use crate::stats::{MetricSummary, StatsCollector, analyze_throttle_exit};
 use crate::zones::{BrakeZone, detect_brake_zones, detect_lift_zones, detect_throttle_exit_zones};
@@ -378,6 +378,8 @@ fn test_synthetic_oval_lap() {
         out_path: None,
         tolerance: None,
         max_drills: 12,
+        min_brake: 0,
+        min_lift: 0,
     };
     let preset = extract_preset_from_laps(&[lap], &options).expect("extraction should succeed");
     preset
@@ -465,6 +467,8 @@ fn test_preset_output_validates_against_sct_core() {
         out_path: None,
         tolerance: None,
         max_drills: 12,
+        min_brake: 0,
+        min_lift: 0,
     };
 
     let preset =
@@ -557,6 +561,8 @@ fn test_corner_grouping_and_options() {
         out_path: None,
         tolerance: None,
         max_drills: 12,
+        min_brake: 0,
+        min_lift: 0,
     };
     let preset = extract_preset_from_laps(&laps, &options_default).expect("extract succeeds");
     preset.validate().expect("extracted preset validates");
@@ -618,6 +624,8 @@ fn opts(max: usize) -> ExtractOptions {
         out_path: None,
         tolerance: None,
         max_drills: max,
+        min_brake: 0,
+        min_lift: 0,
     }
 }
 fn brake(b: &mut [f32], t: &mut [f32], s: usize, len: usize, peak: f32) {
@@ -898,6 +906,8 @@ fn test_drill_id_format_slug() {
         out_path: None,
         tolerance: None,
         max_drills: 12,
+        min_brake: 0,
+        min_lift: 0,
     };
     let preset = extract_preset_from_laps(&[lap], &opts).expect("extract succeeds");
     assert_ne!(preset.drills.len(), 0);
@@ -949,6 +959,8 @@ fn test_partial_lift_plateau_is_not_duplicated() {
         out_path: None,
         tolerance: None,
         max_drills: 12,
+        min_brake: 0,
+        min_lift: 0,
     };
     let preset = extract_preset_from_laps(&laps, &options).expect("extract succeeds");
     preset.validate().expect("extracted preset validates");
@@ -1098,4 +1110,306 @@ fn test_cli_option_values() {
     assert!(crate::parse_tolerance("abc").is_err());
     assert!(crate::parse_tolerance("0.1").is_err());
     assert!(crate::parse_tolerance("51").is_err());
+}
+
+/// Drops the throttle from full to `to` for `len` frames starting at `s`, with no braking.
+fn lift(t: &mut [f32], s: usize, len: usize, to: f32) {
+    t[s..s + len].fill(to);
+}
+
+/// Corner numbers (`cNN`) of the drills whose id ends with one of `suffixes`.
+fn corners_with(p: &sct_core::preset::Preset, suffixes: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = p
+        .drills
+        .iter()
+        .filter(|d| suffixes.iter().any(|s| d.id.ends_with(s)))
+        .filter_map(|d| {
+            d.id.split('-')
+                .find(|s| {
+                    s.len() > 1 && s.starts_with('c') && s[1..].chars().all(|c| c.is_ascii_digit())
+                })
+                .map(str::to_string)
+        })
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Three laps with brake corners and lift corners at fixed positions.
+fn brake_and_lift_laps(brakes: usize, lifts: usize) -> Vec<LapTelemetry> {
+    let n = 3000;
+    (0..3)
+        .map(|k| {
+            let mut b = vec![0.0; n];
+            let mut t = vec![1.0; n];
+            for i in 0..brakes {
+                brake(&mut b, &mut t, 300 + 400 * i, 60, 0.90 - 0.03 * i as f32);
+            }
+            for i in 0..lifts {
+                lift(&mut t, 2300 + 300 * i, 60, 0.60);
+            }
+            mk(n, b, t, dist(n), k)
+        })
+        .collect()
+}
+
+#[test]
+fn test_min_lift_reserves_slots_for_lift_corners() {
+    let laps = brake_and_lift_laps(5, 2);
+    let lift_ids = ["-lift", "-lift-hold"];
+
+    let base = extract_preset_from_laps(&laps, &opts(10)).unwrap();
+    assert!(
+        corners_with(&base, &lift_ids).is_empty(),
+        "ranking alone must pick no lift drill: {:?}",
+        base.drills.iter().map(|d| &d.id).collect::<Vec<_>>()
+    );
+
+    let options = ExtractOptions {
+        min_lift: 2,
+        ..opts(10)
+    };
+    options.validate().unwrap();
+    let (p, warnings) = extract_with_warnings(&laps, &options).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut lifted = corners_with(&p, &lift_ids);
+    lifted.sort();
+    lifted.dedup();
+    assert_eq!(
+        lifted.len(),
+        2,
+        "{:?}",
+        p.drills.iter().map(|d| &d.id).collect::<Vec<_>>()
+    );
+    assert!(p.drills.len() <= 10);
+}
+
+#[test]
+fn test_min_flag_shortfall_warns_and_succeeds() {
+    let laps = brake_and_lift_laps(2, 1);
+    let options = ExtractOptions {
+        min_lift: 3,
+        ..opts(12)
+    };
+    let (p, warnings) = extract_with_warnings(&laps, &options).unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("--min-lift"), "{warnings:?}");
+    assert_eq!(corners_with(&p, &["-lift", "-lift-hold"]).len(), 1);
+}
+
+#[test]
+fn test_validate_min_flags_against_max_drills() {
+    let options = |max_drills| ExtractOptions {
+        min_brake: 3,
+        min_lift: 2,
+        max_drills,
+        ..opts(12)
+    };
+    let err = options(4).validate().unwrap_err();
+    assert!(
+        err.contains("--min-brake") && err.contains("--min-lift") && err.contains("--max-drills")
+    );
+    assert!(options(5).validate().is_ok());
+}
+
+#[test]
+fn test_validate_rejects_zero_max_drills_and_overflow() {
+    let zero = ExtractOptions {
+        max_drills: 0,
+        ..opts(12)
+    };
+    assert!(zero.validate().unwrap_err().contains("--max-drills"));
+    let overflow = ExtractOptions {
+        min_brake: usize::MAX,
+        min_lift: 2,
+        ..opts(12)
+    };
+    assert!(overflow.validate().is_err());
+}
+
+/// A corner braked in 2 laps and lifted in 2 is one brake corner (a tie goes to brake). Before the
+/// fix each half passed the half-the-laps cut, so it showed up as a fourth corner.
+#[test]
+fn test_mixed_brake_lift_corner_is_one_brake_corner() {
+    let n = 3000;
+    let laps: Vec<LapTelemetry> = (0..4)
+        .map(|k| {
+            let mut b = vec![0.0; n];
+            let mut t = vec![1.0; n];
+            brake(&mut b, &mut t, 300, 60, 0.80);
+            brake(&mut b, &mut t, 2100, 60, 0.70);
+            if k < 2 {
+                brake(&mut b, &mut t, 1200, 60, 0.85);
+            } else {
+                lift(&mut t, 1200, 60, 0.60);
+            }
+            mk(n, b, t, dist(n), k)
+        })
+        .collect();
+    let p = extract_preset_from_laps(&laps, &opts(12)).unwrap();
+    let ids: Vec<&String> = p.drills.iter().map(|d| &d.id).collect();
+    let mut corners: Vec<&str> = ids.iter().filter_map(|id| id.split('-').nth(1)).collect();
+    corners.dedup();
+    assert_eq!(corners, ["c01", "c02", "c03"], "{ids:?}");
+    assert!(
+        ids.iter()
+            .any(|id| id.contains("-c02-brake") && !id.contains("lift")),
+        "{ids:?}"
+    );
+    assert!(!ids.iter().any(|id| id.contains("-c02-lift")), "{ids:?}");
+}
+
+/// Two mixed corners in one lap: the second lift cluster is merged after the first one was
+/// merged away, so the merge loop must skip the emptied cluster.
+#[test]
+fn test_two_mixed_corners_both_merge() {
+    let n = 3000;
+    let laps: Vec<LapTelemetry> = (0..4)
+        .map(|k| {
+            let mut b = vec![0.0; n];
+            let mut t = vec![1.0; n];
+            brake(&mut b, &mut t, 300, 60, 0.80);
+            for s in [1200, 2100] {
+                if k < 2 {
+                    brake(&mut b, &mut t, s, 60, 0.85);
+                } else {
+                    lift(&mut t, s, 60, 0.60);
+                }
+            }
+            mk(n, b, t, dist(n), k)
+        })
+        .collect();
+    let p = extract_preset_from_laps(&laps, &opts(12)).unwrap();
+    let ids: Vec<&String> = p.drills.iter().map(|d| &d.id).collect();
+    assert_eq!(
+        corners_with(&p, &["-brake"]),
+        ["c01", "c02", "c03"],
+        "{ids:?}"
+    );
+    assert!(
+        corners_with(&p, &["-lift", "-lift-hold"]).is_empty(),
+        "{ids:?}"
+    );
+}
+
+#[test]
+fn test_zones_open_at_last_frame_are_kept() {
+    let n = 300;
+    let mut b = vec![0.0_f32; n];
+    b[100..].fill(0.8);
+    let zones = detect_brake_zones(&b);
+    assert_eq!(zones.len(), 1);
+    assert_eq!(zones[0].release_idx, n - 1);
+
+    let mut t = vec![1.0_f32; n];
+    t[100..].fill(0.6);
+    let zones = detect_lift_zones(&t, &vec![0.0; n]);
+    assert_eq!(zones.len(), 1);
+    assert_eq!(zones[0].recovery_idx, n - 1);
+}
+
+#[test]
+fn test_min_brake_reserves_slots_for_brake_corners() {
+    let n = 3000;
+    let laps: Vec<LapTelemetry> = (0..3)
+        .map(|k| {
+            let mut b = vec![0.0; n];
+            let mut t = vec![1.0; n];
+            for i in 0..4 {
+                lift(&mut t, 300 + 400 * i, 60, 0.10); // ranks high: priority 90
+            }
+            for i in 0..3 {
+                brake(&mut b, &mut t, 2000 + 300 * i, 60, 0.30); // priority 30
+            }
+            mk(n, b, t, dist(n), k)
+        })
+        .collect();
+    let brake_ids = ["-brake", "-brake-hold"];
+
+    let base = extract_preset_from_laps(&laps, &opts(8)).unwrap();
+    assert!(
+        corners_with(&base, &brake_ids).is_empty(),
+        "ranking alone must pick no brake drill: {:?}",
+        base.drills.iter().map(|d| &d.id).collect::<Vec<_>>()
+    );
+
+    let options = ExtractOptions {
+        min_brake: 2,
+        ..opts(8)
+    };
+    let (p, warnings) = extract_with_warnings(&laps, &options).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        corners_with(&p, &brake_ids).len(),
+        2,
+        "{:?}",
+        p.drills.iter().map(|d| &d.id).collect::<Vec<_>>()
+    );
+    assert!(p.drills.len() <= 8);
+}
+
+/// A corner lifted in 3 laps and braked in 1 is a lift corner.
+#[test]
+fn test_mixed_corner_with_lift_majority_is_a_lift_corner() {
+    let n = 3000;
+    let laps: Vec<LapTelemetry> = (0..4)
+        .map(|k| {
+            let mut b = vec![0.0; n];
+            let mut t = vec![1.0; n];
+            brake(&mut b, &mut t, 300, 60, 0.80);
+            if k < 3 {
+                lift(&mut t, 1200, 60, 0.60);
+            } else {
+                brake(&mut b, &mut t, 1200, 60, 0.85);
+            }
+            mk(n, b, t, dist(n), k)
+        })
+        .collect();
+    let p = extract_preset_from_laps(&laps, &opts(12)).unwrap();
+    let ids: Vec<&String> = p.drills.iter().map(|d| &d.id).collect();
+    assert_eq!(
+        corners_with(&p, &["-lift", "-lift-hold"]),
+        ["c02"],
+        "{ids:?}"
+    );
+    assert_eq!(
+        corners_with(&p, &["-brake", "-brake-hold"]),
+        ["c01"],
+        "{ids:?}"
+    );
+}
+
+/// Brake zones in laps that already have a lift at the same spot belong to a separate brake
+/// corner. They must not be pulled into the lift cluster.
+#[test]
+fn test_lift_then_brake_stays_two_corners() {
+    let n = 10000;
+    let laps: Vec<LapTelemetry> = (0..4)
+        .map(|k| {
+            let mut b = vec![0.0; n];
+            let mut t = vec![1.0; n];
+            match k {
+                0 | 1 => {
+                    lift(&mut t, 3000, 40, 0.60); // 0.300
+                    brake(&mut b, &mut t, 3045, 60, 0.80); // 0.3045
+                }
+                2 => brake(&mut b, &mut t, 3010, 60, 0.80), // 0.301
+                _ => brake(&mut b, &mut t, 3020, 60, 0.80), // 0.302
+            }
+            mk(n, b, t, dist(n), k)
+        })
+        .collect();
+    let p = extract_preset_from_laps(&laps, &opts(12)).unwrap();
+    let ids: Vec<&String> = p.drills.iter().map(|d| &d.id).collect();
+    assert_eq!(
+        corners_with(&p, &["-lift", "-lift-hold"]).len(),
+        1,
+        "{ids:?}"
+    );
+    assert_eq!(
+        corners_with(&p, &["-brake", "-brake-hold"]).len(),
+        1,
+        "{ids:?}"
+    );
 }

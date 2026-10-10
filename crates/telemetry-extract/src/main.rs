@@ -54,6 +54,9 @@ OPTIONS:
                            Human-readable preset name.
     --tolerance <PCT>      Permissible error tolerance in percent (e.g. 10.0). If omitted, defaults to app default (10%).
     --max-drills <N>       Maximum number of drills to output (default: 12).
+    --min-brake <N>        Reserve at least one drill slot for each of the N top-ranked brake corners (default: 0).
+    --min-lift <N>         Reserve at least one drill slot for each of the N top-ranked lift corners (default: 0).
+                           --min-brake plus --min-lift must not exceed --max-drills.
     --allow-mixed          Accept laps from different cars or tracks in one run.
     -h, --help             Print help information.
 "
@@ -247,6 +250,8 @@ fn handle_extract(args: &[String]) -> ExitCode {
     let mut preset_name = None;
     let mut tolerance = None;
     let mut max_drills = 12;
+    let mut min_brake = 0;
+    let mut min_lift = 0;
     let mut allow_mixed = false;
     let mut inputs = Vec::new();
 
@@ -267,6 +272,16 @@ fn handle_extract(args: &[String]) -> ExitCode {
                     .map(|n| max_drills = n)
                     .ok_or_else(|| format!("--max-drills must be a positive integer, got '{v}'"))
             }),
+            "--min-brake" => option_value(args, &mut i).and_then(|v| {
+                v.parse::<usize>()
+                    .map(|n| min_brake = n)
+                    .map_err(|_| format!("--min-brake must be a non-negative integer, got '{v}'"))
+            }),
+            "--min-lift" => option_value(args, &mut i).and_then(|v| {
+                v.parse::<usize>()
+                    .map(|n| min_lift = n)
+                    .map_err(|_| format!("--min-lift must be a non-negative integer, got '{v}'"))
+            }),
             "--allow-mixed" => {
                 allow_mixed = true;
                 Ok(())
@@ -278,6 +293,20 @@ fn handle_extract(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
         i += 1;
+    }
+
+    let options = ExtractOptions {
+        preset_id,
+        preset_name,
+        out_path,
+        tolerance,
+        max_drills,
+        min_brake,
+        min_lift,
+    };
+    if let Err(e) = options.validate() {
+        eprintln!("error: {e}");
+        return ExitCode::FAILURE;
     }
 
     if inputs.is_empty() {
@@ -305,14 +334,6 @@ fn handle_extract(args: &[String]) -> ExitCode {
         eprintln!("error: {e}");
         return ExitCode::FAILURE;
     }
-
-    let options = ExtractOptions {
-        preset_id,
-        preset_name,
-        out_path,
-        tolerance,
-        max_drills,
-    };
 
     if let Err(e) = run_extract(&laps, &options) {
         eprintln!("error during extraction: {e}");

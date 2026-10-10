@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/svelte";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/svelte";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import DrillPage from "./+page.svelte";
 import type { Preset } from "$lib/drill";
@@ -459,6 +459,20 @@ describe("Drill page", () => {
     expect(info).toHaveTextContent("Duration: 1.5 s");
     expect(info).toHaveTextContent("Peak: 100%");
     expect(info).toHaveTextContent("Tolerance: ±6%");
+  });
+
+  it("shows the Playhead and Ghost view toggle for a trace drill and saves Ghost", async () => {
+    presetsList = [tracePreset];
+    render(DrillPage);
+    const info = (await screen.findByText("Type:")).closest(".drill-info")!;
+    const playhead = within(info as HTMLElement).getByRole("button", { name: "Playhead" });
+    const ghost = within(info as HTMLElement).getByRole("button", { name: "Ghost" });
+    expect(playhead).toHaveAttribute("aria-pressed", "true");
+    expect(ghost).toHaveAttribute("aria-pressed", "false");
+
+    await fireEvent.click(ghost);
+    expect(localStorage.getItem("sct:trace_view")).toBe("ghost");
+    expect(ghost).toHaveAttribute("aria-pressed", "true");
   });
 
   it("renders trace-view and trace-hud showing Target after repStarted for a trace drill", async () => {

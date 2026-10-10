@@ -264,7 +264,7 @@ export function traceViewPhase(i: TracePhaseInput): TracePhase {
 export type TimeToX = (tMs: number) => number;
 export type ValueToY = (fraction: number) => number;
 
-/** Fills the ±150 ms envelope band (D-21): upper min(1, hi + tolerance), lower max(0, lo - tolerance) from curve.envelopeAt(t), at each time in `times` (ascending). Sets ctx.fillStyle = color. No-op when times.length < 2. */
+/** Fills the ±150 ms envelope band (D-21): upper min(1, hi + tolerance), lower max(0, lo - tolerance) from curve.envelopeAt(t), at the times times[from..to) (ascending, half-open). Sets ctx.fillStyle = color. No-op when to - from < 2. */
 export function drawTraceBand(
   ctx: CanvasRenderingContext2D,
   curve: TraceCurve,
@@ -273,24 +273,26 @@ export function drawTraceBand(
   color: string,
   xOf: TimeToX,
   yOf: ValueToY,
+  from = 0,
+  to = times.length,
 ): void {
-  if (times.length < 2) return;
+  if (to - from < 2) return;
 
   ctx.fillStyle = color;
   ctx.beginPath();
-  for (let i = 0; i < times.length; i++) {
+  for (let i = from; i < to; i++) {
     const t = times[i];
     const [, hi] = curve.envelopeAt(t);
     const topVal = Math.min(1, hi + tolerance);
     const x = xOf(t);
     const y = yOf(topVal);
-    if (i === 0) {
+    if (i === from) {
       ctx.moveTo(x, y);
     } else {
       ctx.lineTo(x, y);
     }
   }
-  for (let i = times.length - 1; i >= 0; i--) {
+  for (let i = to - 1; i >= from; i--) {
     const t = times[i];
     const [lo] = curve.envelopeAt(t);
     const botVal = Math.max(0, lo - tolerance);
@@ -302,7 +304,7 @@ export function drawTraceBand(
   ctx.fill();
 }
 
-/** Dashed (4,4) 2 px line in `color` of curve.valueAt sampled every 5 ms from fromMs to toMs, plus a final sample at toMs when (toMs - fromMs) % 5 !== 0. Resets line dash after. */
+/** Dashed (4,4) 2 px line in `color` of curve.valueAt sampled every 5 ms from fromMs to toMs, plus a final sample at toMs when (toMs - fromMs) % 5 !== 0. dashOffset shifts the dash phase in px. Resets line dash and dash offset after. */
 export function drawTargetLine(
   ctx: CanvasRenderingContext2D,
   curve: TraceCurve,
@@ -311,6 +313,7 @@ export function drawTargetLine(
   color: string,
   xOf: TimeToX,
   yOf: ValueToY,
+  dashOffset = 0,
 ): void {
   if (fromMs >= toMs) return;
 
@@ -336,19 +339,22 @@ export function drawTargetLine(
     const y = yOf(val);
     ctx.lineTo(x, y);
   }
+  ctx.lineDashOffset = dashOffset;
   ctx.stroke();
+  ctx.lineDashOffset = 0;
   ctx.setLineDash([]);
 }
 
-/** Solid 2.5 px round-joined, round-capped line in `color` through user points [tMs, fraction]. No-op when empty. */
+/** Solid 2.5 px round-joined, round-capped line in `color` through user points [tMs, fraction], starting at index `from`. No-op when none remain. */
 export function drawUserLine(
   ctx: CanvasRenderingContext2D,
   user: [number, number][],
   color: string,
   xOf: TimeToX,
   yOf: ValueToY,
+  from = 0,
 ): void {
-  if (user.length === 0) return;
+  if (user.length <= from) return;
 
   ctx.strokeStyle = color;
   ctx.lineWidth = 2.5;
@@ -356,11 +362,11 @@ export function drawUserLine(
   ctx.lineCap = "round";
   ctx.setLineDash([]);
   ctx.beginPath();
-  for (let i = 0; i < user.length; i++) {
+  for (let i = from; i < user.length; i++) {
     const [userT, userVal] = user[i];
     const x = xOf(userT);
     const y = yOf(userVal);
-    if (i === 0) {
+    if (i === from) {
       ctx.moveTo(x, y);
     } else {
       ctx.lineTo(x, y);
@@ -388,19 +394,24 @@ export function ghostX(tMs: number, nowMs: number, width: number): number {
   return ghostNowX(width) + ((tMs - nowMs) * width) / (GHOST_PAST_MS + GHOST_FUTURE_MS);
 }
 
-/** Rep time shown at the now-line: playheadMs when not null; otherwise durationMs when hasUser (a rep just finished, freeze at its end), else -GO_LEAD_MS (idle before the first rep, the curve waits right of the line). */
-export function ghostNowMs(
-  playheadMs: number | null,
-  hasUser: boolean,
-  durationMs: number,
-): number {
-  if (playheadMs !== null) {
-    return playheadMs;
+/** Rep time shown at the now-line: playheadMs when not null, otherwise -GO_LEAD_MS (idle before the first rep, the curve waits right of the line). */
+export function ghostNowMs(playheadMs: number | null): number {
+  return playheadMs ?? -GO_LEAD_MS;
+}
+
+/** First index in [0, n) whose time is >= t, or n when none is. timeAt(i) returns the time of index i; times must ascend. */
+function lowerBound(n: number, timeAt: (i: number) => number, t: number): number {
+  let low = 0;
+  let high = n;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (timeAt(mid) < t) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
   }
-  if (hasUser) {
-    return durationMs;
-  }
-  return -GO_LEAD_MS;
+  return low;
 }
 
 function drawGridBackground(
@@ -442,6 +453,71 @@ function drawGridBackground(
 }
 
 /**
+ * Draws the t=0 rep-start line (solid, theme.textMuted), the dashed 500 ms grid with "0.5 s"
+ * labels, and optionally the solid rep-end line at durationMs. xOf maps rep time to x. Lines
+ * outside [0, width] and labels outside [16, width - 16] are skipped. No-op when durationMs or
+ * width is not positive.
+ */
+function drawTimeGrid(
+  ctx: CanvasRenderingContext2D,
+  durationMs: number,
+  width: number,
+  height: number,
+  xOf: TimeToX,
+  theme: AppThemeColors,
+  paddingTop: number,
+  paddingBottom: number,
+  drawEndLine: boolean,
+): void {
+  if (!(durationMs > 0 && width > 0)) return;
+
+  const x0 = xOf(0);
+  if (x0 >= 0 && x0 <= width) {
+    ctx.strokeStyle = theme.textMuted;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(x0, paddingTop);
+    ctx.lineTo(x0, height - paddingBottom);
+    ctx.stroke();
+  }
+
+  ctx.strokeStyle = theme.border;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 4]);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "bottom";
+  ctx.fillStyle = theme.textMuted;
+
+  for (let tMs = 500; tMs <= durationMs; tMs += 500) {
+    const x = xOf(tMs);
+    if (x < 0 || x > width) continue;
+    ctx.beginPath();
+    ctx.moveTo(x, paddingTop);
+    ctx.lineTo(x, height - paddingBottom);
+    ctx.stroke();
+
+    if (x >= 16 && x <= width - 16) {
+      ctx.fillText(`${tMs / 1000} s`, x, height - 6);
+    }
+  }
+  ctx.setLineDash([]);
+
+  if (drawEndLine) {
+    const xEnd = xOf(durationMs);
+    if (xEnd >= 0 && xEnd <= width) {
+      ctx.strokeStyle = theme.textMuted;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(xEnd, paddingTop);
+      ctx.lineTo(xEnd, height - paddingBottom);
+      ctx.stroke();
+    }
+  }
+}
+
+/**
  * Draws the trace drill view: time axis from -GO_LEAD_MS to the duration with grid lines,
  * the t=0 line marking rep start, the envelope tolerance band, the target curve,
  * the user line, and the playhead.
@@ -458,43 +534,10 @@ export function drawTrace(
   drawGridBackground(ctx, width, height, theme, paddingTop, paddingBottom);
 
   const durationMs = state.curve.durationMs;
-
-  // Vertical grid lines and rep start mark
-  if (durationMs > 0 && width > 0) {
-    // A thin solid vertical line in theme.textMuted at t = 0 marks where the rep starts
-    const x0 = traceX(0, durationMs, width, 0, 0, -GO_LEAD_MS);
-    ctx.strokeStyle = theme.textMuted;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    ctx.moveTo(x0, paddingTop);
-    ctx.lineTo(x0, height - paddingBottom);
-    ctx.stroke();
-
-    // Vertical grid lines every 500 ms from 0 (labels "0.5 s" etc. as today)
-    ctx.strokeStyle = theme.border;
-    ctx.setLineDash([4, 4]);
-    ctx.textAlign = "center";
-    ctx.textBaseline = "bottom";
-    ctx.fillStyle = theme.textMuted;
-
-    for (let tMs = 500; tMs <= durationMs; tMs += 500) {
-      const x = traceX(tMs, durationMs, width, 0, 0, -GO_LEAD_MS);
-      if (x < 0 || x > width) continue;
-      ctx.beginPath();
-      ctx.moveTo(x, paddingTop);
-      ctx.lineTo(x, height - paddingBottom);
-      ctx.stroke();
-
-      if (x >= 16 && x <= width - 16) {
-        ctx.fillText(`${tMs / 1000} s`, x, height - 6);
-      }
-    }
-    ctx.setLineDash([]);
-  }
-
   const xOf: TimeToX = (t) => traceX(t, durationMs, width, 0, 0, -GO_LEAD_MS);
   const yOf: ValueToY = (v) => getGraphY(v, height, paddingTop, paddingBottom);
+
+  drawTimeGrid(ctx, durationMs, width, height, xOf, theme, paddingTop, paddingBottom, false);
 
   // Tolerance band as a filled polygon
   if (state.curve.points.length >= 2 && durationMs > 0) {
@@ -535,7 +578,8 @@ export function drawTrace(
 
 /**
  * Draws the scrolling ghost trace view: curve scrolls right-to-left towards a fixed
- * vertical now-line, with the target percentage drawn at the line.
+ * vertical now-line, with the target percentage drawn at the line. After a rep (playheadMs
+ * null and user frames present) it draws the whole rep the way drawTrace does.
  */
 export function drawGhostTrace(
   ctx: CanvasRenderingContext2D,
@@ -546,95 +590,71 @@ export function drawGhostTrace(
   paddingTop = 18,
   paddingBottom = 26,
 ): void {
+  // A rep is over: show the whole rep, the same picture as the playhead view.
+  if (state.playheadMs === null && state.user.length > 0) {
+    drawTrace(ctx, width, height, state, theme, paddingTop, paddingBottom);
+    return;
+  }
+
   // 1. clearRect + theme.surface background, horizontal grid lines and % labels
   drawGridBackground(ctx, width, height, theme, paddingTop, paddingBottom);
 
   const durationMs = state.curve.durationMs;
 
   // 2. nowMs and coordinate mapping functions
-  const nowMs = ghostNowMs(state.playheadMs, state.user.length > 0, durationMs);
+  const nowMs = ghostNowMs(state.playheadMs);
   const xOf: TimeToX = (t) => ghostX(t, nowMs, width);
   const yOf: ValueToY = (v) => getGraphY(v, height, paddingTop, paddingBottom);
 
   // 3. When durationMs > 0: solid t=0 line, dashed 500 ms grid lines, solid t=durationMs line
-  if (durationMs > 0 && width > 0) {
-    const x0 = xOf(0);
-    if (x0 >= 0 && x0 <= width) {
-      ctx.strokeStyle = theme.textMuted;
-      ctx.lineWidth = 1;
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.moveTo(x0, paddingTop);
-      ctx.lineTo(x0, height - paddingBottom);
-      ctx.stroke();
-    }
-
-    ctx.strokeStyle = theme.border;
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4, 4]);
-    ctx.textAlign = "center";
-    ctx.textBaseline = "bottom";
-    ctx.fillStyle = theme.textMuted;
-
-    for (let tMs = 500; tMs <= durationMs; tMs += 500) {
-      const x = xOf(tMs);
-      if (x < 0 || x > width) continue;
-      ctx.beginPath();
-      ctx.moveTo(x, paddingTop);
-      ctx.lineTo(x, height - paddingBottom);
-      ctx.stroke();
-
-      if (x >= 16 && x <= width - 16) {
-        ctx.fillText(`${tMs / 1000} s`, x, height - 6);
-      }
-    }
-    ctx.setLineDash([]);
-
-    const xEnd = xOf(durationMs);
-    if (xEnd >= 0 && xEnd <= width) {
-      ctx.strokeStyle = theme.textMuted;
-      ctx.lineWidth = 1;
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.moveTo(xEnd, paddingTop);
-      ctx.lineTo(xEnd, height - paddingBottom);
-      ctx.stroke();
-    }
-  }
+  drawTimeGrid(ctx, durationMs, width, height, xOf, theme, paddingTop, paddingBottom, true);
 
   const hasPoints = state.curve.points.length > 0 && durationMs > 0;
 
-  // 4. Band via drawTraceBand
+  // 4. Band via drawTraceBand, over the sample times in [minBandT, maxBandT]
   if (state.curve.points.length >= 2 && durationMs > 0) {
+    const sampleTimes = state.curve.sampleTimes;
     const minBandT = nowMs - GHOST_PAST_MS - 10;
     const maxBandT = nowMs + GHOST_FUTURE_MS + 10;
-    const times = state.curve.sampleTimes.filter((t) => t >= minBandT && t <= maxBandT);
+    const bandFrom = lowerBound(sampleTimes.length, (i) => sampleTimes[i], minBandT);
+    const bandTo = lowerBound(sampleTimes.length, (i) => sampleTimes[i], maxBandT + 1e-9);
     drawTraceBand(
       ctx,
       state.curve,
       state.tolerance,
-      times,
+      sampleTimes,
       bandColor(state.inBand, theme),
       xOf,
       yOf,
+      bandFrom,
+      bandTo,
     );
   }
 
-  // 5. Target line via drawTargetLine
+  // 5. Target line via drawTargetLine; the dash phase follows rep time
   if (hasPoints) {
     const fromMs = Math.max(-GO_LEAD_MS, nowMs - GHOST_PAST_MS);
     const toMs = Math.min(durationMs, nowMs + GHOST_FUTURE_MS);
     if (fromMs < toMs) {
-      drawTargetLine(ctx, state.curve, fromMs, toMs, theme.text, xOf, yOf);
+      drawTargetLine(
+        ctx,
+        state.curve,
+        fromMs,
+        toMs,
+        theme.text,
+        xOf,
+        yOf,
+        xOf(fromMs) - xOf(-GO_LEAD_MS),
+      );
     }
   }
 
-  // 6. User line via drawUserLine
+  // 6. User line via drawUserLine, from the first frame at or after minUserT
   if (hasPoints && state.user.length > 0) {
     const minUserT = nowMs - GHOST_PAST_MS - 50;
-    const userPoints = state.user.filter(([t]) => t >= minUserT);
+    const userFrom = lowerBound(state.user.length, (i) => state.user[i][0], minUserT);
     const color = state.pedal === "brake" ? theme.brake : theme.throttle;
-    drawUserLine(ctx, userPoints, color, xOf, yOf);
+    drawUserLine(ctx, state.user, color, xOf, yOf, userFrom);
   }
 
   // 7. Now-line: 2 px solid theme.accent vertical line at ghostNowX(width)

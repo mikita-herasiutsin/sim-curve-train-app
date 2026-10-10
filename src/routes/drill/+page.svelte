@@ -425,7 +425,6 @@
                 countingDown={view.runState === "countdown"}
                 mode={traceView}
               />
-              <div class="trace-view-toggle-overlay">{@render traceViewToggle()}</div>
             {:else}
               <PedalGraph stream={pedalStream} band={graphBand} />
             {/if}
@@ -485,6 +484,12 @@
           <div class="rep-info panel">
             <h3>Rep {view.currentRep + 1} / {selectedDrill?.reps}</h3>
             <p class="status-badge {view.runState}">{view.runState.toUpperCase()}</p>
+            {#if selectedDrill?.type === "trace"}
+              <p class="view-row rep-view-row">
+                <strong>View:</strong>
+                {@render traceViewToggle()}
+              </p>
+            {/if}
             {#if errorMessage}
               <p class="error-message" role="alert">{errorMessage}</p>
             {/if}
@@ -991,13 +996,6 @@
   .graph-container {
     flex: 1 1 0;
     min-height: 160px;
-    position: relative;
-  }
-
-  .trace-view-toggle-overlay {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.5rem;
   }
 
   .view-row {

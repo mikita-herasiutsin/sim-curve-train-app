@@ -167,9 +167,10 @@ These give the total and grade; reps and consistency reuse SCT-033.
 - **AC:** unit tests on synthetic traces (exact copy, 100 ms delay, noisy, overshoot) give the expected order of scores.
 - **Deps:** SCT-034, SCT-033
 
-### SCT-037 · Brake drills start from the throttle ⬜ · M
+### SCT-037 · Brake drills start from the throttle ✅ · M
 A brake drill starts with the throttle pressed, as on track: the user holds the throttle, the cue releases it, and the brake trace or hold follows. The drill reports any overlap where both pedals are pressed at once, because that slows the car and is a habit worth breaking.
 - **AC:** an optional throttle lead-in in the preset (level and duration); overlap time and peak overlap are shown after each rep; drills without the lead-in behave as before.
+- **Status:** done (PR #44). The engine waits for the throttle with no timeout, the hold restarts if the throttle drops, and overlap is shown but not yet saved with attempts.
 - **Deps:** SCT-034
 
 ---
@@ -203,7 +204,7 @@ Five or six drills hand-tuned from your own GT3 laps:
 - Two brake traces (hairpin, medium corner)
 - One or two staged exit-throttle traces ([D-18](../decisions/README.md)), with GT3 thresholds and ramp rate
 - **AC:** every drill can be played and scored.
-- **Status:** `presets/gt3.json` has six drills tuned from six BMW M4 GT3 laps at Road Atlanta: brake holds at 80% and 50%, a heavy-stop and a medium-corner brake trace, a single-step and a two-step exit. Drill ids start with `gt3-`, because attempts and bests are keyed by drill id alone. A core test plays every bundled drill: an exact follow must score an S, and a trace followed 250 ms late must lose at least 5 points.
+- **Status:** `presets/gt3.json` has seven drills tuned from six BMW M4 GT3 laps at Road Atlanta: brake holds at 80% and 50%, a heavy-stop and a medium-corner brake trace, a heavy stop from full throttle (lead-in drill), a single-step and a two-step exit. Drill ids start with `gt3-`, because attempts and bests are keyed by drill id alone. A core test plays every bundled drill: an exact follow must score an S, and a trace followed 250 ms late must lose at least 5 points.
 - **Deps:** SCT-044, SCT-036
 
 ### SCT-042 · NASCAR preset ⬜ · S

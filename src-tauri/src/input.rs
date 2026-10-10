@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioFeedback;
-use sct_core::audio_map::ToneTracker;
+use sct_core::audio_map::{BAND_HYSTERESIS, ToneTracker};
 use sct_core::axis_detect::{AxisDetector, Detection};
 use sct_core::calibration::RangeCapture;
 use sct_core::device::{DeviceInfo, DevicesSnapshot, usb_ids_from_guid};
@@ -452,14 +452,16 @@ impl Stream {
             // `clamp`.
             let (target, tone_value, tolerance) = match drill.run.phase() {
                 // Any throttle from the level up to full counts, as in the engine: the
-                // target is the nearest point of that range.
+                // target is the nearest point of that range. The tolerance makes the tracker's
+                // re-entry limit `tolerance * (1 - BAND_HYSTERESIS)` equal the engine's arm
+                // margin, so the tone goes silent on the sample that arms the hold.
                 Phase::ThrottleWait { .. } | Phase::ThrottleHold { .. } => (
                     drill
                         .run
                         .throttle_target_at()
                         .map(|level| throttle.max(level)),
                     throttle,
-                    THROTTLE_ARM_MARGIN,
+                    THROTTLE_ARM_MARGIN / (1.0 - BAND_HYSTERESIS),
                 ),
                 Phase::Active { .. } => (
                     drill
@@ -1262,6 +1264,37 @@ mod tests {
 
         // Full throttle is above the level but still accepted, so the tone stays silent.
         for ms in 1_100..1_200 {
+            stream.step_drill(&pedals_at(ms * 1000, 0.0, 1.0));
+        }
+        assert_eq!(audio.pulse_rate(), 0.0);
+
+        // Throttle released: the hold drops and the tone beeps again.
+        for ms in 1_200..1_210 {
+            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.0));
+        }
+        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
+        assert!(
+            matches!(phase, Some(Phase::ThrottleWait { .. })),
+            "{phase:?}"
+        );
+        assert!(audio.pulse_rate() > 0.0);
+
+        // Coming from 0, a throttle just above the arm edge (level - 0.10 + 0.001) arms the
+        // hold and the tone goes silent on the same sample.
+        stream.step_drill(&pedals_at(
+            1_210_000,
+            0.0,
+            0.80 - THROTTLE_ARM_MARGIN + 0.001,
+        ));
+        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
+        assert!(
+            matches!(phase, Some(Phase::ThrottleHold { .. })),
+            "{phase:?}"
+        );
+        assert_eq!(audio.pulse_rate(), 0.0);
+
+        // Full throttle stays silent.
+        for ms in 1_211..1_300 {
             stream.step_drill(&pedals_at(ms * 1000, 0.0, 1.0));
         }
         assert_eq!(audio.pulse_rate(), 0.0);

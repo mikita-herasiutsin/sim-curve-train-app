@@ -57,6 +57,9 @@
   let stopSource: (() => void) | null = null;
 
   let view = $state<RunView>({ ...IDLE_VIEW });
+  const throttleTarget = $derived(
+    Boolean(leadIn && (view.runState === "countdown" || view.runState === "throttle")),
+  );
   let countdownMs = $state(0);
   let throttleRemainingSec = $state(0);
   let showLiftCue = $state(false);
@@ -444,31 +447,21 @@
             {#if selectedDrill?.type === "hold"}
               <PedalBars
                 stream={pedalStream}
-                targetPedal={view.runState === "throttle" && leadIn
-                  ? "throttle"
-                  : selectedDrill.pedal}
-                targetVal={view.runState === "throttle" && leadIn
+                targetPedal={throttleTarget ? "throttle" : selectedDrill.pedal}
+                targetVal={throttleTarget && leadIn
                   ? leadIn.level / 100
                   : selectedDrill.target / 100}
-                targetTolerance={view.runState === "throttle" && leadIn
-                  ? 0.1
-                  : toleranceOf(selectedDrill) / 100}
-                targetRange={null}
+                targetTolerance={throttleTarget ? 0.1 : toleranceOf(selectedDrill) / 100}
+                targetRange={throttleTarget && leadIn ? [leadIn.level / 100, 1] : null}
                 decimals={selectedDrill.decimals ?? 0}
               />
             {:else if selectedDrill?.type === "trace"}
               <PedalBars
                 stream={pedalStream}
-                targetPedal={view.runState === "throttle" && leadIn
-                  ? "throttle"
-                  : selectedDrill.pedal}
-                targetVal={view.runState === "throttle" && leadIn
-                  ? leadIn.level / 100
-                  : currentTargetFrac}
-                targetRange={view.runState === "throttle" && leadIn ? null : currentRangeFrac}
-                targetTolerance={view.runState === "throttle" && leadIn
-                  ? 0.1
-                  : toleranceOf(selectedDrill) / 100}
+                targetPedal={throttleTarget ? "throttle" : selectedDrill.pedal}
+                targetVal={throttleTarget && leadIn ? leadIn.level / 100 : currentTargetFrac}
+                targetRange={throttleTarget && leadIn ? [leadIn.level / 100, 1] : currentRangeFrac}
+                targetTolerance={throttleTarget ? 0.1 : toleranceOf(selectedDrill) / 100}
                 decimals={selectedDrill.decimals ?? 0}
               />
             {/if}
@@ -482,9 +475,7 @@
                 repStartUs={view.repStartUs}
                 active={view.runState === "active"}
                 countdownEndsUs={leadIn ? view.throttleHoldEndsUs : view.countdownEndsUs}
-                countingDown={leadIn
-                  ? view.runState === "throttle" && view.throttleHoldEndsUs > 0
-                  : view.runState === "countdown"}
+                countingDown={leadIn ? view.runState === "throttle" : view.runState === "countdown"}
                 mode={traceView}
               />
             {:else}
@@ -671,7 +662,12 @@
 </div>
 
 {#snippet overlapBlock(overlap: Overlap)}
-  <div class="overlap" class:clean={Math.round(overlap.overlapMs) === 0} data-testid="overlap">
+  <div
+    class="overlap"
+    class:clean={Math.round(overlap.overlapMs) === 0 &&
+      Math.round(overlap.peakThrottle * 100) === 0}
+    data-testid="overlap"
+  >
     <small title="Time both pedals were pressed at once, during the throttle hold and the rep."
       >Overlap {Math.round(overlap.overlapMs)} ms</small
     >
@@ -861,14 +857,18 @@
 
   .lift-cue {
     position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    top: 0.75rem;
+    left: 50%;
+    transform: translateX(-50%);
     pointer-events: none;
-    font-size: 5rem;
+    font-size: 2.5rem;
     font-weight: 800;
+    line-height: 1;
     color: var(--accent);
+    background: rgba(0, 0, 0, 0.65);
+    border: 1px solid var(--border);
+    padding: 0.25rem 1.25rem;
+    border-radius: 999px;
     margin: 0;
     z-index: 10;
   }

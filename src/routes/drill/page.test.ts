@@ -59,6 +59,30 @@ const tracePreset: Preset = {
   ],
 };
 
+const leadInHoldPreset: Preset = {
+  schemaVersion: 1,
+  id: "lead-in-hold",
+  name: "Lead-In Drills",
+  description: "",
+  drills: [
+    {
+      id: "brake-hold-lead-in",
+      name: "Brake hold with throttle lead-in",
+      type: "hold",
+      pedal: "brake",
+      reps: 3,
+      leadInMs: 1000,
+      tolerance: 5,
+      target: 70,
+      holdMs: 2000,
+      throttleLeadIn: {
+        level: 80,
+        holdMs: 1500,
+      },
+    },
+  ],
+};
+
 const device = {
   id: 1,
   name: "Test Pedals",
@@ -689,5 +713,90 @@ describe("Drill page", () => {
     advancedOption.selected = true;
     await fireEvent.change(advancedOption.closest("select")!);
     expect(localStorage.getItem("sct:last_preset")).toBe("advanced");
+  });
+
+  it("shows lead-in-info in the drill details for a lead-in drill", async () => {
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    const info = await screen.findByTestId("lead-in-info");
+    expect(info).toHaveTextContent("Starts from throttle: 80% for 1.5s, then lift and brake");
+  });
+
+  it("shows throttle cue with 'Press the throttle' on throttleWait and seconds on throttleHoldStarted", async () => {
+    const nowUs = 1_000_000;
+    vi.spyOn(pedalStream, "dataNowUs").mockImplementation(() => nowUs);
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({ event: "throttleWait", rep: 0, sinceUs: 1_000_000 });
+    const cue = await screen.findByTestId("throttle-cue");
+    expect(cue).toHaveTextContent("Press the throttle");
+    expect(cue).toHaveTextContent("Throttle to 80%");
+
+    drillChannel!.onmessage({
+      event: "throttleHoldStarted",
+      rep: 0,
+      startUs: 1_000_000,
+      endsUs: 2_500_000,
+    });
+    await waitFor(() => expect(cue).toHaveTextContent("1.5"));
+    expect(cue).not.toHaveTextContent("Press the throttle");
+  });
+
+  it("renders overlap block after repScored and has class clean only when both numbers round to 0", async () => {
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    // Both non-zero: not clean
+    drillChannel!.onmessage({
+      event: "repScored",
+      rep: 0,
+      score: holdScore,
+      overlap: { overlapMs: 25, peakThrottle: 0.15 },
+    });
+    let overlapEl = await screen.findByTestId("overlap");
+    expect(overlapEl).toHaveTextContent("Overlap 25 ms");
+    expect(overlapEl).toHaveTextContent("Peak throttle while braking 15%");
+    expect(overlapEl).not.toHaveClass("clean");
+
+    // overlapMs rounds to 0, peakThrottle does not: not clean
+    drillChannel!.onmessage({
+      event: "repScored",
+      rep: 0,
+      score: holdScore,
+      overlap: { overlapMs: 0.4, peakThrottle: 0.1 },
+    });
+    overlapEl = await screen.findByTestId("overlap");
+    expect(overlapEl).toHaveTextContent("Overlap 0 ms");
+    expect(overlapEl).toHaveTextContent("Peak throttle while braking 10%");
+    expect(overlapEl).not.toHaveClass("clean");
+
+    // peakThrottle rounds to 0, overlapMs does not: not clean
+    drillChannel!.onmessage({
+      event: "repScored",
+      rep: 0,
+      score: holdScore,
+      overlap: { overlapMs: 14, peakThrottle: 0.002 },
+    });
+    overlapEl = await screen.findByTestId("overlap");
+    expect(overlapEl).toHaveTextContent("Overlap 14 ms");
+    expect(overlapEl).toHaveTextContent("Peak throttle while braking 0%");
+    expect(overlapEl).not.toHaveClass("clean");
+
+    // Both round to 0: clean
+    drillChannel!.onmessage({
+      event: "repScored",
+      rep: 0,
+      score: holdScore,
+      overlap: { overlapMs: 0.2, peakThrottle: 0.003 },
+    });
+    overlapEl = await screen.findByTestId("overlap");
+    expect(overlapEl).toHaveTextContent("Overlap 0 ms");
+    expect(overlapEl).toHaveTextContent("Peak throttle while braking 0%");
+    expect(overlapEl).toHaveClass("clean");
   });
 });

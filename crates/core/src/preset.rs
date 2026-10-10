@@ -28,8 +28,9 @@ pub const MIN_TRACE_MS: u32 = 500;
 pub const MAX_TRACE_MS: u32 = 15000;
 /// Most points a trace may have.
 pub const MAX_TRACE_POINTS: usize = 64;
-/// Lowest throttle level in percent a throttle lead-in may hold.
-pub const MIN_THROTTLE_LEAD_IN_LEVEL: f32 = 10.0;
+/// Lowest throttle level in percent a throttle lead-in may hold. At 20 the arm threshold
+/// (`level - THROTTLE_ARM_MARGIN`) is 10 %, so a resting throttle never arms the hold.
+pub const MIN_THROTTLE_LEAD_IN_LEVEL: f32 = 20.0;
 /// Highest throttle level in percent a throttle lead-in may hold.
 pub const MAX_THROTTLE_LEAD_IN_LEVEL: f32 = 100.0;
 /// Shortest throttle hold in milliseconds before the lift cue.
@@ -1657,8 +1658,15 @@ mod tests {
             "field 'throttleLeadIn' is only allowed on brake drills",
         );
         assert_lead_in_error(
-            &lead_in_json("brake", r#","throttleLeadIn":{"level":9.9,"holdMs":1500}"#),
-            "field 'throttleLeadIn.level' (9.9)",
+            &lead_in_json("brake", r#","throttleLeadIn":{"level":19.9,"holdMs":1500}"#),
+            "field 'throttleLeadIn.level' (19.9)",
+        );
+        assert!(
+            parse_preset(&lead_in_json(
+                "brake",
+                r#","throttleLeadIn":{"level":20,"holdMs":1500}"#
+            ))
+            .is_ok()
         );
         assert_lead_in_error(
             &lead_in_json(

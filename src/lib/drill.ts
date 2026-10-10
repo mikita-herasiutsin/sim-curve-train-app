@@ -185,6 +185,7 @@ export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
         runState: "countdown",
         currentRep: e.rep,
         countdownEndsUs: e.endsUs,
+        throttleHoldEndsUs: 0,
       };
     case "throttleWait":
       return {
@@ -206,6 +207,7 @@ export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
         runState: "active",
         currentRep: e.rep,
         repStartUs: e.startUs,
+        throttleHoldEndsUs: 0,
         lastScore: null,
         lastOverlap: null,
       };

@@ -89,6 +89,41 @@ describe("applyDrillEvent", () => {
     });
   });
 
+  it("resets throttleHoldEndsUs to 0 on countdownStarted", () => {
+    const holdingView = applyDrillEvent(IDLE_VIEW, {
+      event: "throttleHoldStarted",
+      rep: 0,
+      startUs: 1000,
+      endsUs: 3500,
+    });
+    expect(holdingView.throttleHoldEndsUs).toBe(3500);
+
+    const view = applyDrillEvent(holdingView, {
+      event: "countdownStarted",
+      rep: 1,
+      startUs: 4000,
+      endsUs: 6000,
+    });
+    expect(view.throttleHoldEndsUs).toBe(0);
+  });
+
+  it("resets throttleHoldEndsUs to 0 on repStarted", () => {
+    const holdingView = applyDrillEvent(IDLE_VIEW, {
+      event: "throttleHoldStarted",
+      rep: 0,
+      startUs: 1000,
+      endsUs: 3500,
+    });
+    expect(holdingView.throttleHoldEndsUs).toBe(3500);
+
+    const view = applyDrillEvent(holdingView, {
+      event: "repStarted",
+      rep: 0,
+      startUs: 3500,
+    });
+    expect(view.throttleHoldEndsUs).toBe(0);
+  });
+
   it("clears lastOverlap when repStarted fires", () => {
     const overlap: Overlap = { overlapMs: 45, peakThrottle: 0.3 };
     let view = applyDrillEvent(IDLE_VIEW, {

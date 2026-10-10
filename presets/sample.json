@@ -55,5 +55,25 @@
       "reps": 3,
       "leadInMs": 3000
     }
-  ]
+  ],
+  "warmUp": {
+    "steps": [
+      {
+        "drill": "brake-hold-70",
+        "reps": 12
+      },
+      {
+        "drill": "throttle-hold-50",
+        "reps": 12
+      },
+      {
+        "drill": "hairpin",
+        "reps": 12
+      },
+      {
+        "drill": "throttle-rolling-start-35",
+        "reps": 4
+      }
+    ]
+  }
 }

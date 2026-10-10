@@ -7,6 +7,7 @@ use rusqlite::Connection;
 /// - Migration 1: Device pedal profile table (`device_profile`, SCT-015).
 /// - Migration 2: Attempt parent and child rep tables (`attempt`, `attempt_rep`, SCT-050).
 ///   `attempt.samples` is reserved for the compressed sample blob used by replays (not written yet).
+/// - Migration 3: warm-up runs and their steps (`warm_up_run`, `warm_up_step`, SCT-045).
 pub const MIGRATIONS: &[&str] = &[
     "CREATE TABLE device_profile (\
         guid TEXT NOT NULL, \
@@ -45,6 +46,22 @@ pub const MIGRATIONS: &[&str] = &[
         ldlj_user REAL, \
         ldlj_target REAL, \
         PRIMARY KEY (attempt_id, rep_index)\
+    );",
+    "CREATE TABLE warm_up_run (\
+        id INTEGER PRIMARY KEY AUTOINCREMENT, \
+        preset_id TEXT NOT NULL, \
+        started_at TEXT NOT NULL, \
+        score REAL NOT NULL\
+    ); \
+    CREATE INDEX idx_warm_up_run_preset_score ON warm_up_run (preset_id, score DESC, started_at DESC); \
+    CREATE TABLE warm_up_step (\
+        run_id INTEGER NOT NULL REFERENCES warm_up_run (id) ON DELETE CASCADE, \
+        step_index INTEGER NOT NULL, \
+        drill_id TEXT NOT NULL, \
+        skipped INTEGER NOT NULL, \
+        attempt_id INTEGER REFERENCES attempt (id) ON DELETE SET NULL, \
+        score REAL, \
+        PRIMARY KEY (run_id, step_index)\
     );",
 ];
 
@@ -149,6 +166,24 @@ mod tests {
             )
             .unwrap();
         assert!(attempt_rep_exists);
+
+        let warm_up_run_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'warm_up_run');",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(warm_up_run_exists);
+
+        let warm_up_step_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'warm_up_step');",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(warm_up_step_exists);
     }
 
     #[test]
@@ -216,5 +251,60 @@ mod tests {
 
         apply_migrations(&mut conn).unwrap();
         assert_eq!(user_version(&conn).unwrap(), expected_version);
+    }
+
+    #[test]
+    fn upgrade_from_version_2_keeps_attempts() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure_connection(&conn).unwrap();
+
+        // Build a DB by running only MIGRATIONS[0] and MIGRATIONS[1] and setting user_version = 2
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.execute_batch(MIGRATIONS[1]).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), 2);
+
+        // Insert an attempt row
+        conn.execute(
+            "INSERT INTO attempt (drill_id, preset_id, pedal, started_at, aborted) \
+             VALUES ('drill-test', 'gt3', 'brake', '2026-10-10T12:00:00Z', 0);",
+            [],
+        )
+        .unwrap();
+
+        // Run apply_migrations
+        apply_migrations(&mut conn).unwrap();
+
+        // Assert version == 3
+        assert_eq!(user_version(&conn).unwrap(), 3);
+
+        // Assert the attempt row survives
+        let attempt_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM attempt WHERE drill_id = 'drill-test';",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempt_count, 1);
+
+        // Assert both new tables exist
+        let warm_up_run_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'warm_up_run');",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(warm_up_run_exists);
+
+        let warm_up_step_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'warm_up_step');",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(warm_up_step_exists);
     }
 }

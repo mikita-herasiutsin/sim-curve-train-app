@@ -156,6 +156,69 @@ pub struct Attempt {
     pub reps: Vec<AttemptRep>,
 }
 
+/// One step of a warm-up run, in run order. Mirrors the TS `WarmUpStepResult`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmUpStepResult {
+    /// Identifier of the drill executed in this step.
+    pub drill_id: String,
+    /// True when the step was skipped, before or during its set.
+    pub skipped: bool,
+    /// The attempt saved for this step's set; None when no set was saved.
+    pub attempt_id: Option<i64>,
+    /// The set's average rep score; None when skipped or no rep was scored.
+    pub score: Option<f32>,
+}
+
+/// Data required to persist a finished warm-up run.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewWarmUpRun {
+    /// Identifier of the parent preset containing the warm-up drills.
+    pub preset_id: String,
+    /// UTC timestamp when the warm-up run started (formatted as an ISO 8601 string).
+    pub started_at: String,
+    /// Step results in run order.
+    pub steps: Vec<WarmUpStepResult>,
+}
+
+/// A persisted warm-up run with its assigned unique ID, overall score, and child steps.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmUpRun {
+    /// Database primary key for this warm-up run.
+    pub id: i64,
+    /// Identifier of the parent preset containing the warm-up drills.
+    pub preset_id: String,
+    /// UTC timestamp when the warm-up run started (formatted as an ISO 8601 string).
+    pub started_at: String,
+    /// Overall warm-up score computed from the step results.
+    pub score: f32,
+    /// Step results in run order.
+    pub steps: Vec<WarmUpStepResult>,
+}
+
+/// Overall warm-up score (D-26): the mean of the steps' set averages, where a skipped step or
+/// a step without a score counts as 0. An empty run scores 0.
+#[must_use]
+#[expect(clippy::cast_precision_loss, reason = "step count fits in f32")]
+pub fn warm_up_score(steps: &[WarmUpStepResult]) -> f32 {
+    if steps.is_empty() {
+        return 0.0;
+    }
+    let total: f32 = steps
+        .iter()
+        .map(|s| {
+            if s.skipped {
+                0.0
+            } else {
+                s.score.unwrap_or(0.0)
+            }
+        })
+        .sum();
+    total / steps.len() as f32
+}
+
 /// Errors that can occur during attempt store operations.
 #[derive(Debug)]
 pub enum AttemptError {
@@ -456,6 +519,131 @@ impl AttemptStore {
             .collect::<Result<_, _>>()?;
         Ok(totals)
     }
+
+    /// Persists a completed warm-up run and its individual step results.
+    ///
+    /// Computes the overall score from the steps via [`warm_up_score`].
+    /// Returns the database generated unique ID for the newly saved warm-up run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttemptError::Sqlite`] if executing any insert statement fails or foreign key
+    /// constraints are violated.
+    pub fn save_warm_up_run(&self, run: &NewWarmUpRun) -> Result<i64, AttemptError> {
+        let score = warm_up_score(&run.steps);
+
+        // Rolls back on drop, so an error (or a failed commit) never leaves the transaction open.
+        let tx = self.conn.unchecked_transaction()?;
+
+        let result = (|| -> Result<i64, AttemptError> {
+            self.conn.execute(
+                "INSERT INTO warm_up_run (preset_id, started_at, score) \
+                 VALUES (?1, ?2, ?3);",
+                rusqlite::params![&run.preset_id, &run.started_at, score],
+            )?;
+
+            let run_id = self.conn.last_insert_rowid();
+
+            let mut step_stmt = self.conn.prepare(
+                "INSERT INTO warm_up_step (run_id, step_index, drill_id, skipped, attempt_id, score) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6);",
+            )?;
+
+            for (idx, step) in run.steps.iter().enumerate() {
+                let step_index = i64::try_from(idx).unwrap_or(i64::MAX);
+                step_stmt.execute(rusqlite::params![
+                    run_id,
+                    step_index,
+                    &step.drill_id,
+                    i64::from(step.skipped),
+                    step.attempt_id,
+                    step.score,
+                ])?;
+            }
+
+            Ok(run_id)
+        })();
+
+        let id = result?;
+        tx.commit()?;
+        Ok(id)
+    }
+
+    /// Lists the most recent recorded warm-up runs for a preset, up to `limit`.
+    ///
+    /// Results are sorted newest first (`started_at DESC, id DESC`), each with its steps
+    /// ordered by `step_index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttemptError::Sqlite`] if querying warm-up runs or child steps fails.
+    pub fn list_warm_up_runs(
+        &self,
+        preset_id: &str,
+        limit: u32,
+    ) -> Result<Vec<WarmUpRun>, AttemptError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, preset_id, started_at, score \
+             FROM warm_up_run \
+             WHERE preset_id = ?1 \
+             ORDER BY started_at DESC, id DESC \
+             LIMIT ?2;",
+        )?;
+
+        let mut step_stmt = self.conn.prepare(
+            "SELECT drill_id, skipped, attempt_id, score \
+             FROM warm_up_step \
+             WHERE run_id = ?1 \
+             ORDER BY step_index ASC;",
+        )?;
+
+        let rows = stmt.query_map(rusqlite::params![preset_id, limit], |row| {
+            let id: i64 = row.get(0)?;
+            let preset_id: String = row.get(1)?;
+            let started_at: String = row.get(2)?;
+            let score: f32 = row.get(3)?;
+            Ok((id, preset_id, started_at, score))
+        })?;
+
+        let mut runs = Vec::new();
+        for row in rows {
+            let (id, preset_id, started_at, score) = row?;
+
+            let step_rows = step_stmt.query_map(rusqlite::params![id], |step_row| {
+                let drill_id: String = step_row.get(0)?;
+                let skipped_int: i64 = step_row.get(1)?;
+                let attempt_id: Option<i64> = step_row.get(2)?;
+                let score: Option<f32> = step_row.get(3)?;
+
+                Ok(WarmUpStepResult {
+                    drill_id,
+                    skipped: skipped_int != 0,
+                    attempt_id,
+                    score,
+                })
+            })?;
+
+            let mut steps = Vec::new();
+            for step in step_rows {
+                steps.push(step?);
+            }
+
+            runs.push(WarmUpRun {
+                id,
+                preset_id,
+                started_at,
+                score,
+                steps,
+            });
+        }
+
+        Ok(runs)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raw_conn(&self) -> &rusqlite::Connection {
+        &self.conn
+    }
 }
 
 #[cfg(test)]
@@ -533,7 +721,10 @@ mod tests {
 
         let saved_id = {
             let store = AttemptStore::open(&temp_file).unwrap();
-            assert_eq!(store.user_version().unwrap(), 2);
+            assert_eq!(
+                store.user_version().unwrap(),
+                u32::try_from(crate::db::MIGRATIONS.len()).unwrap()
+            );
             let id = store.save_attempt(&new_attempt).unwrap();
             assert!(id > 0);
             id
@@ -541,7 +732,10 @@ mod tests {
 
         {
             let store = AttemptStore::open(&temp_file).unwrap();
-            assert_eq!(store.user_version().unwrap(), 2);
+            assert_eq!(
+                store.user_version().unwrap(),
+                u32::try_from(crate::db::MIGRATIONS.len()).unwrap()
+            );
             let attempts = store.list_attempts("hold-brake-70", 10).unwrap();
             assert_eq!(attempts.len(), 1);
 
@@ -785,5 +979,268 @@ mod tests {
         assert_eq!(new_attempt.average, Some(90.0));
         assert!(new_attempt.consistency.is_some());
         assert_eq!(new_attempt.reps.len(), 2);
+    }
+
+    #[test]
+    fn warm_up_score_calculation() {
+        assert_eq!(warm_up_score(&[]), 0.0);
+
+        let steps = vec![
+            WarmUpStepResult {
+                drill_id: "d1".to_string(),
+                skipped: false,
+                attempt_id: Some(1),
+                score: Some(80.0),
+            },
+            WarmUpStepResult {
+                drill_id: "d2".to_string(),
+                skipped: true,
+                attempt_id: None,
+                score: None,
+            },
+            WarmUpStepResult {
+                drill_id: "d3".to_string(),
+                skipped: false,
+                attempt_id: Some(2),
+                score: Some(60.0),
+            },
+            WarmUpStepResult {
+                drill_id: "d4".to_string(),
+                skipped: false,
+                attempt_id: None,
+                score: None,
+            },
+        ];
+        assert_eq!(warm_up_score(&steps), 35.0);
+
+        let all_scored = vec![
+            WarmUpStepResult {
+                drill_id: "d1".to_string(),
+                skipped: false,
+                attempt_id: Some(1),
+                score: Some(80.0),
+            },
+            WarmUpStepResult {
+                drill_id: "d2".to_string(),
+                skipped: false,
+                attempt_id: Some(2),
+                score: Some(90.0),
+            },
+        ];
+        assert_eq!(warm_up_score(&all_scored), 85.0);
+    }
+
+    #[test]
+    fn warm_up_run_save_and_list_round_trip() {
+        let store = AttemptStore::open_in_memory().unwrap();
+
+        let attempt = NewAttempt {
+            drill_id: "d1".to_string(),
+            preset_id: "gt3".to_string(),
+            pedal: Pedal::Brake,
+            started_at: "2026-10-10T11:00:00Z".to_string(),
+            aborted: false,
+            best: Some(95.0),
+            average: Some(95.0),
+            consistency: None,
+            reps: Vec::new(),
+        };
+        let saved_attempt_id = store.save_attempt(&attempt).unwrap();
+
+        let new_run = NewWarmUpRun {
+            preset_id: "gt3".to_string(),
+            started_at: "2026-10-10T12:00:00Z".to_string(),
+            steps: vec![
+                WarmUpStepResult {
+                    drill_id: "d1".to_string(),
+                    skipped: false,
+                    attempt_id: Some(saved_attempt_id),
+                    score: Some(95.0),
+                },
+                WarmUpStepResult {
+                    drill_id: "d2".to_string(),
+                    skipped: true,
+                    attempt_id: None,
+                    score: None,
+                },
+                WarmUpStepResult {
+                    drill_id: "d3".to_string(),
+                    skipped: false,
+                    attempt_id: None,
+                    score: Some(65.0),
+                },
+            ],
+        };
+
+        let expected_score = warm_up_score(&new_run.steps);
+        let run_id = store.save_warm_up_run(&new_run).unwrap();
+        assert!(run_id > 0);
+
+        let runs = store.list_warm_up_runs("gt3", 10).unwrap();
+        assert_eq!(runs.len(), 1);
+
+        let loaded = &runs[0];
+        assert_eq!(loaded.id, run_id);
+        assert_eq!(loaded.preset_id, new_run.preset_id);
+        assert_eq!(loaded.started_at, new_run.started_at);
+        assert!((loaded.score - expected_score).abs() < f32::EPSILON);
+        assert_eq!(loaded.steps.len(), 3);
+        assert_eq!(loaded.steps, new_run.steps);
+        assert_eq!(loaded.steps[0].attempt_id, Some(saved_attempt_id));
+    }
+
+    #[test]
+    fn list_warm_up_runs_ordering_filter_and_limit() {
+        let store = AttemptStore::open_in_memory().unwrap();
+
+        let make_run = |preset: &str, started_at: &str| NewWarmUpRun {
+            preset_id: preset.to_string(),
+            started_at: started_at.to_string(),
+            steps: vec![WarmUpStepResult {
+                drill_id: "drill-1".to_string(),
+                skipped: false,
+                attempt_id: None,
+                score: Some(80.0),
+            }],
+        };
+
+        let id1 = store
+            .save_warm_up_run(&make_run("gt3", "2026-10-01T10:00:00Z"))
+            .unwrap();
+        let id2 = store
+            .save_warm_up_run(&make_run("gt3", "2026-10-03T10:00:00Z"))
+            .unwrap();
+        let id3 = store
+            .save_warm_up_run(&make_run("gt3", "2026-10-02T10:00:00Z"))
+            .unwrap();
+        let _id_mx5 = store
+            .save_warm_up_run(&make_run("mx5", "2026-10-04T10:00:00Z"))
+            .unwrap();
+
+        // Newest first order
+        let runs = store.list_warm_up_runs("gt3", 10).unwrap();
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].id, id2);
+        assert_eq!(runs[0].started_at, "2026-10-03T10:00:00Z");
+        assert_eq!(runs[1].id, id3);
+        assert_eq!(runs[1].started_at, "2026-10-02T10:00:00Z");
+        assert_eq!(runs[2].id, id1);
+        assert_eq!(runs[2].started_at, "2026-10-01T10:00:00Z");
+
+        // Honours limit
+        let limited = store.list_warm_up_runs("gt3", 2).unwrap();
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].id, id2);
+        assert_eq!(limited[1].id, id3);
+
+        // Filters by preset
+        let mx5_runs = store.list_warm_up_runs("mx5", 10).unwrap();
+        assert_eq!(mx5_runs.len(), 1);
+        assert_eq!(mx5_runs[0].started_at, "2026-10-04T10:00:00Z");
+
+        let unknown_runs = store.list_warm_up_runs("unknown", 10).unwrap();
+        assert_eq!(unknown_runs, []);
+    }
+
+    #[test]
+    fn deleting_referenced_attempt_sets_step_attempt_id_to_none() {
+        let store = AttemptStore::open_in_memory().unwrap();
+
+        let attempt = NewAttempt {
+            drill_id: "d1".to_string(),
+            preset_id: "gt3".to_string(),
+            pedal: Pedal::Brake,
+            started_at: "2026-10-10T10:00:00Z".to_string(),
+            aborted: false,
+            best: Some(90.0),
+            average: Some(90.0),
+            consistency: None,
+            reps: Vec::new(),
+        };
+        let attempt_id = store.save_attempt(&attempt).unwrap();
+
+        let run = NewWarmUpRun {
+            preset_id: "gt3".to_string(),
+            started_at: "2026-10-10T10:30:00Z".to_string(),
+            steps: vec![
+                WarmUpStepResult {
+                    drill_id: "d1".to_string(),
+                    skipped: false,
+                    attempt_id: Some(attempt_id),
+                    score: Some(90.0),
+                },
+                WarmUpStepResult {
+                    drill_id: "d2".to_string(),
+                    skipped: false,
+                    attempt_id: None,
+                    score: Some(80.0),
+                },
+            ],
+        };
+        let run_id = store.save_warm_up_run(&run).unwrap();
+
+        // Delete the referenced attempt using raw SQL
+        store
+            .raw_conn()
+            .execute(
+                "DELETE FROM attempt WHERE id = ?1;",
+                rusqlite::params![attempt_id],
+            )
+            .unwrap();
+
+        // The warm_up_run survives, but the step's attempt_id is now None (ON DELETE SET NULL)
+        let runs = store.list_warm_up_runs("gt3", 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        let loaded = &runs[0];
+        assert_eq!(loaded.id, run_id);
+        assert_eq!(loaded.steps.len(), 2);
+        assert_eq!(loaded.steps[0].attempt_id, None);
+        assert_eq!(loaded.steps[0].drill_id, "d1");
+        assert_eq!(loaded.steps[0].score, Some(90.0));
+        assert_eq!(loaded.steps[1].attempt_id, None);
+        assert_eq!(loaded.steps[1].drill_id, "d2");
+    }
+
+    #[test]
+    fn saving_nonexistent_attempt_id_fails_and_rolls_back() {
+        let store = AttemptStore::open_in_memory().unwrap();
+
+        let run = NewWarmUpRun {
+            preset_id: "gt3".to_string(),
+            started_at: "2026-10-10T12:00:00Z".to_string(),
+            steps: vec![
+                WarmUpStepResult {
+                    drill_id: "d1".to_string(),
+                    skipped: false,
+                    attempt_id: None,
+                    score: Some(85.0),
+                },
+                WarmUpStepResult {
+                    drill_id: "d2".to_string(),
+                    skipped: false,
+                    attempt_id: Some(999_999), // does not exist
+                    score: Some(90.0),
+                },
+            ],
+        };
+
+        let result = store.save_warm_up_run(&run);
+        assert!(result.is_err(), "should fail due to foreign key constraint");
+
+        // Verify rollback: no warm_up_run or warm_up_step rows remain
+        let run_count: i64 = store
+            .raw_conn()
+            .query_row("SELECT COUNT(*) FROM warm_up_run;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(run_count, 0);
+
+        let step_count: i64 = store
+            .raw_conn()
+            .query_row("SELECT COUNT(*) FROM warm_up_step;", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(step_count, 0);
+
+        let runs = store.list_warm_up_runs("gt3", 10).unwrap();
+        assert_eq!(runs, []);
     }
 }

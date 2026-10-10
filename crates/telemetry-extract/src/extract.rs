@@ -632,6 +632,7 @@ pub(crate) fn extract_with_warnings(
             name: "dummy".to_string(),
             description: String::new(),
             drills: vec![drill.clone()],
+            warm_up: None,
         };
         if let Err(e) = dummy_preset.validate() {
             warnings.push(format!(
@@ -666,6 +667,7 @@ pub(crate) fn extract_with_warnings(
             "Pedal practice drills extracted from Garage 61 telemetry for {default_car}."
         ),
         drills: valid_drills,
+        warm_up: None,
     };
 
     // Strict validation via sct-core

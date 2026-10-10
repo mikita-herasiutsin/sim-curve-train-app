@@ -152,10 +152,11 @@ The whole target curve is drawn with its tolerance band. A playhead sweeps acros
 - **Deps:** SCT-031
 - **Status:** done (PR #38, merged 2026-10-09). The per-drill `decimals` field and the tighter rolling-start band came from the same feedback round.
 
-### SCT-035 · Trace drill: scrolling ghost view + toggle ⬜ · M
+### SCT-035 · Trace drill: scrolling ghost view + toggle ✅ · M
 The target curve scrolls right to left towards a fixed "now" line, so you see what's coming next. The numeric target % is shown at the now-line. A toggle switches between ghost and playhead view, and the choice is persisted.
 - **AC:** both views use the same drill engine and score the same.
 - **Deps:** SCT-034
+- **Status:** done (PR #42). The now-line sits at a quarter of the width, with 1 s of the past and 3 s ahead; after a rep the ghost view shows the whole rep like the playhead view. The choice is saved as `sct:trace_view`.
 
 ### SCT-036 · Trace scoring ✅ · M
 - **Accuracy:** time in the band and RMSE

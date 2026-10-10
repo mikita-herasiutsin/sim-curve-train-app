@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  drawGhostTrace,
+  drawTargetLine,
   drawTrace,
+  drawTraceBand,
+  drawUserLine,
+  ghostNowMs,
+  ghostNowX,
+  ghostX,
+  GHOST_NOW_FRAC,
   GO_LEAD_MS,
   TraceCurve,
   traceDurationMs,
@@ -232,42 +240,43 @@ describe("traceX", () => {
   });
 });
 
+function makeMockContext(): CanvasRenderingContext2D {
+  return {
+    clearRect: vi.fn(),
+    fillRect: vi.fn(),
+    fillText: vi.fn(),
+    beginPath: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    stroke: vi.fn(),
+    fill: vi.fn(),
+    closePath: vi.fn(),
+    setLineDash: vi.fn(),
+    save: vi.fn(),
+    restore: vi.fn(),
+    arc: vi.fn(),
+  } as unknown as CanvasRenderingContext2D;
+}
+
+const baseState: TraceViewState = {
+  curve: new TraceCurve([
+    [0, 0],
+    [500, 100],
+    [1000, 50],
+    [1500, 0],
+  ]),
+  pedal: "brake",
+  tolerance: 0.06,
+  playheadMs: 500,
+  user: [
+    [0, 0],
+    [250, 0.4],
+    [500, 0.95],
+  ],
+  inBand: true,
+};
+
 describe("drawTrace", () => {
-  function makeMockContext(): CanvasRenderingContext2D {
-    return {
-      clearRect: vi.fn(),
-      fillRect: vi.fn(),
-      fillText: vi.fn(),
-      beginPath: vi.fn(),
-      moveTo: vi.fn(),
-      lineTo: vi.fn(),
-      stroke: vi.fn(),
-      fill: vi.fn(),
-      closePath: vi.fn(),
-      setLineDash: vi.fn(),
-      save: vi.fn(),
-      restore: vi.fn(),
-    } as unknown as CanvasRenderingContext2D;
-  }
-
-  const baseState: TraceViewState = {
-    curve: new TraceCurve([
-      [0, 0],
-      [500, 100],
-      [1000, 50],
-      [1500, 0],
-    ]),
-    pedal: "brake",
-    tolerance: 0.06,
-    playheadMs: 500,
-    user: [
-      [0, 0],
-      [250, 0.4],
-      [500, 0.95],
-    ],
-    inBand: true,
-  };
-
   it("renders background, grids, tolerance band, target curve, user trace, and playhead", () => {
     const ctx = makeMockContext();
     drawTrace(ctx, 600, 400, baseState, theme);
@@ -385,5 +394,247 @@ describe("traceViewPhase", () => {
       shownStartUs: 3_000_000,
       playheadMs: null,
     });
+  });
+});
+
+describe("ghost geometry", () => {
+  it("computes ghostNowX and GHOST_NOW_FRAC", () => {
+    expect(GHOST_NOW_FRAC).toBe(0.25);
+    expect(ghostNowX(800)).toBe(200);
+  });
+
+  it("projects tMs to ghostX", () => {
+    const width = 800;
+    const nowMs = 1200;
+    expect(ghostX(nowMs, nowMs, width)).toBe(0.25 * width);
+    expect(ghostX(nowMs - 1000, nowMs, width)).toBe(0);
+    expect(ghostX(nowMs + 3000, nowMs, width)).toBe(width);
+    expect(ghostX(nowMs + 1500, nowMs, width)).toBe(0.625 * width);
+    expect(ghostX(nowMs, nowMs, 0)).toBe(0);
+  });
+
+  it("uses the playhead when set and -GO_LEAD_MS when it is null", () => {
+    expect(ghostNowMs(420)).toBe(420);
+    expect(ghostNowMs(-500)).toBe(-500);
+    expect(ghostNowMs(null)).toBe(-GO_LEAD_MS);
+  });
+});
+
+interface RecordedStroke {
+  strokeStyle: string;
+  points: [number, number][];
+}
+
+/** Mock context that records each stroke's strokeStyle and the points of its path. */
+function makeRecordingContext(): { ctx: CanvasRenderingContext2D; strokes: RecordedStroke[] } {
+  const ctx = makeMockContext();
+  const strokes: RecordedStroke[] = [];
+  let path: [number, number][] = [];
+  vi.mocked(ctx.beginPath).mockImplementation(() => {
+    path = [];
+  });
+  vi.mocked(ctx.moveTo).mockImplementation((x: number, y: number) => {
+    path.push([x, y]);
+  });
+  vi.mocked(ctx.lineTo).mockImplementation((x: number, y: number) => {
+    path.push([x, y]);
+  });
+  vi.mocked(ctx.stroke).mockImplementation(() => {
+    strokes.push({ strokeStyle: String(ctx.strokeStyle), points: path.slice() });
+  });
+  return { ctx, strokes };
+}
+
+describe("drawGhostTrace", () => {
+  it("renders band, target % label, and grid lines on baseState", () => {
+    const ctx = makeMockContext();
+    drawGhostTrace(ctx, 600, 400, baseState, theme);
+
+    // fills the band (closePath and fill called)
+    expect(ctx.closePath).toHaveBeenCalled();
+    expect(ctx.fill).toHaveBeenCalled();
+
+    // with playheadMs 500 (curve value 100% there) calls fillText("100%", 158, any number)
+    expect(ctx.fillText).toHaveBeenCalledWith("100%", 158, expect.any(Number));
+
+    // calls fillText("0.5 s", ...) when that grid line is in view
+    expect(ctx.fillText).toHaveBeenCalledWith("0.5 s", expect.any(Number), expect.any(Number));
+  });
+
+  it("draws the now-line in theme.accent at x = 150 for playheadMs 700", () => {
+    // 700 is not a multiple of 500, so the 0.5 s grid line (x = 120 here) cannot match
+    const { ctx, strokes } = makeRecordingContext();
+    drawGhostTrace(ctx, 600, 400, { ...baseState, playheadMs: 700 }, theme);
+    const accentStrokes = strokes.filter((s) => s.strokeStyle === theme.accent);
+    expect(accentStrokes).toEqual([
+      {
+        strokeStyle: theme.accent,
+        points: [
+          [150, 18],
+          [150, 374],
+        ],
+      },
+    ]);
+  });
+
+  it("idle before a rep (playheadMs null, no user): label shows the value at -1000 ms and the now-line is drawn", () => {
+    const curve = new TraceCurve([
+      [0, 40],
+      [500, 100],
+      [1000, 50],
+      [1500, 0],
+    ]);
+    const { ctx, strokes } = makeRecordingContext();
+    drawGhostTrace(ctx, 600, 400, { ...baseState, curve, playheadMs: null, user: [] }, theme);
+
+    // valueAt(-1000) clamps to the first point, 40%
+    expect(ctx.fillText).toHaveBeenCalledWith("40%", 158, expect.any(Number));
+    expect(strokes.filter((s) => s.strokeStyle === theme.accent)).toEqual([
+      {
+        strokeStyle: theme.accent,
+        points: [
+          [150, 18],
+          [150, 374],
+        ],
+      },
+    ]);
+  });
+
+  it("after a rep (playheadMs null, user set): no accent stroke and the band is filled", () => {
+    const { ctx, strokes } = makeRecordingContext();
+    drawGhostTrace(ctx, 600, 400, { ...baseState, playheadMs: null }, theme);
+    expect(strokes.filter((s) => s.strokeStyle === theme.accent)).toEqual([]);
+    expect(ctx.fill).toHaveBeenCalled();
+    // The whole-rep view draws no target label at the now-line
+    expect(vi.mocked(ctx.fillText).mock.calls.filter(([, x]) => x === 158)).toEqual([]);
+  });
+
+  it("clamps the target label to paddingTop + 8 when the curve is at 100%", () => {
+    // playheadMs 500 on baseState is 100%; its y would be the top of the plot without the clamp
+    const ctx = makeMockContext();
+    drawGhostTrace(ctx, 600, 400, baseState, theme);
+    expect(ctx.fillText).toHaveBeenCalledWith("100%", 158, 18 + 8);
+  });
+
+  it("does not throw and draws no target label for empty points and durationMs 0", () => {
+    const ctx = makeMockContext();
+    const state = { ...baseState, curve: new TraceCurve([]), playheadMs: null, user: [] };
+    expect(() => drawGhostTrace(ctx, 600, 400, state, theme)).not.toThrow();
+    expect(vi.mocked(ctx.fillText).mock.calls.filter(([, x]) => x === 158)).toEqual([]);
+  });
+
+  it("formats target % label with decimals", () => {
+    const ctx = makeMockContext();
+    drawGhostTrace(ctx, 600, 400, { ...baseState, decimals: 1 }, theme);
+    expect(ctx.fillText).toHaveBeenCalledWith("100.0%", 158, expect.any(Number));
+  });
+});
+
+describe("drawTargetLine", () => {
+  it("sets lineDashOffset before stroke and resets it to 0 after", () => {
+    const curve = new TraceCurve([
+      [0, 0],
+      [1000, 100],
+    ]);
+    const ctx = makeMockContext();
+    const offsetsAtStroke: number[] = [];
+    vi.mocked(ctx.stroke).mockImplementation(() => {
+      offsetsAtStroke.push(ctx.lineDashOffset);
+    });
+    drawTargetLine(
+      ctx,
+      curve,
+      0,
+      1000,
+      theme.text,
+      (t) => t,
+      (v) => v,
+      7,
+    );
+    expect(offsetsAtStroke).toEqual([7]);
+    expect(ctx.lineDashOffset).toBe(0);
+  });
+});
+
+describe("drawUserLine", () => {
+  it("starts its path at user[from]", () => {
+    const ctx = makeMockContext();
+    const user: [number, number][] = [
+      [0, 0.1],
+      [250, 0.4],
+      [500, 0.95],
+      [750, 0.6],
+    ];
+    drawUserLine(
+      ctx,
+      user,
+      theme.brake,
+      (t) => t,
+      (v) => v,
+      2,
+    );
+    expect(vi.mocked(ctx.moveTo).mock.calls).toEqual([[500, 0.95]]);
+    expect(vi.mocked(ctx.lineTo).mock.calls).toEqual([[750, 0.6]]);
+  });
+});
+
+describe("drawTraceBand", () => {
+  it("on a flat curve: every moveTo/lineTo y equals yOf(value + tolerance) or yOf(value - tolerance)", () => {
+    const flatCurve = new TraceCurve([
+      [0, 50],
+      [1000, 50],
+    ]);
+    const ctx = makeMockContext();
+    const tolerance = 0.08;
+    const yOf = (v: number) => 400 - v * 300;
+    const xOf = (t: number) => t;
+
+    drawTraceBand(
+      ctx,
+      flatCurve,
+      tolerance,
+      flatCurve.sampleTimes,
+      "rgba(255, 255, 255, 0.2)",
+      xOf,
+      yOf,
+    );
+
+    const expectedUpperY = yOf(0.5 + tolerance);
+    const expectedLowerY = yOf(0.5 - tolerance);
+
+    const moveCalls = vi.mocked(ctx.moveTo).mock.calls;
+    const lineCalls = vi.mocked(ctx.lineTo).mock.calls;
+    const allCalls = [...moveCalls, ...lineCalls];
+
+    expect(allCalls.length).toBeGreaterThan(0);
+    for (const [, y] of allCalls) {
+      expect(y === expectedUpperY || y === expectedLowerY).toBe(true);
+    }
+  });
+
+  it("with a from/to range only visits the times in [from, to)", () => {
+    const flatCurve = new TraceCurve([
+      [0, 50],
+      [1000, 50],
+    ]);
+    const ctx = makeMockContext();
+    const times = [0, 100, 200, 300, 400, 500];
+    drawTraceBand(
+      ctx,
+      flatCurve,
+      0.08,
+      times,
+      "rgba(255, 255, 255, 0.2)",
+      (t) => t,
+      (v) => v,
+      2,
+      4,
+    );
+
+    const xs = [...vi.mocked(ctx.moveTo).mock.calls, ...vi.mocked(ctx.lineTo).mock.calls].map(
+      ([x]) => x,
+    );
+    expect([...new Set(xs)].sort((a, b) => a - b)).toEqual([200, 300]);
+    expect(ctx.fill).toHaveBeenCalled();
   });
 });

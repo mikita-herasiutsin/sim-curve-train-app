@@ -3,7 +3,13 @@
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
   import { isTauri } from "@tauri-apps/api/core";
-  import { loadLastPreset, saveLastPreset } from "$lib/settings";
+  import {
+    loadLastPreset,
+    saveLastPreset,
+    loadTraceView,
+    saveTraceView,
+    type TraceViewMode,
+  } from "$lib/settings";
   import {
     listPresets,
     startDrillRun,
@@ -32,6 +38,12 @@
   let presets = $state<Preset[]>([]);
   let selectedPreset = $state<Preset | null>(null);
   let selectedDrill = $state<Drill | null>(null);
+  let traceView = $state<TraceViewMode>(loadTraceView());
+
+  function setTraceView(mode: TraceViewMode): void {
+    traceView = mode;
+    saveTraceView(mode);
+  }
   let presetsError = $state<string | null>(null);
 
   const traceCurve = $derived<TraceCurve | null>(
@@ -351,6 +363,7 @@
                 {formatPercentValue(peak / 100, selectedDrill.decimals ?? 0)}%
               </p>
               <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
+              <p class="view-row"><strong>View:</strong> {@render traceViewToggle()}</p>
             {/if}
             <p><strong>Reps:</strong> {selectedDrill.reps}</p>
           </div>
@@ -410,6 +423,7 @@
                 active={view.runState === "active"}
                 countdownEndsUs={view.countdownEndsUs}
                 countingDown={view.runState === "countdown"}
+                mode={traceView}
               />
             {:else}
               <PedalGraph stream={pedalStream} band={graphBand} />
@@ -470,6 +484,12 @@
           <div class="rep-info panel">
             <h3>Rep {view.currentRep + 1} / {selectedDrill?.reps}</h3>
             <p class="status-badge {view.runState}">{view.runState.toUpperCase()}</p>
+            {#if selectedDrill?.type === "trace"}
+              <p class="view-row rep-view-row">
+                <strong>View:</strong>
+                {@render traceViewToggle()}
+              </p>
+            {/if}
             {#if errorMessage}
               <p class="error-message" role="alert">{errorMessage}</p>
             {/if}
@@ -577,6 +597,19 @@
     {/if}
   </main>
 </div>
+
+{#snippet traceViewToggle()}
+  <span class="view-toggle" role="group" aria-label="Trace view">
+    {#each [["playhead", "Playhead"], ["ghost", "Ghost"]] as const as [mode, label] (mode)}
+      <button
+        type="button"
+        class:selected={traceView === mode}
+        aria-pressed={traceView === mode}
+        onclick={() => setTraceView(mode)}>{label}</button
+      >
+    {/each}
+  </span>
+{/snippet}
 
 <style>
   .drill-page {
@@ -963,6 +996,35 @@
   .graph-container {
     flex: 1 1 0;
     min-height: 160px;
+  }
+
+  .view-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .view-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: var(--surface);
+  }
+
+  .view-toggle button {
+    border: none;
+    border-radius: 0;
+    padding: 0.25rem 0.625rem;
+    font-size: 0.8125rem;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .view-toggle button.selected {
+    background: var(--accent);
+    color: var(--surface);
   }
 
   /* Let the canvases shrink with their panel instead of keeping their own 18rem floor. */

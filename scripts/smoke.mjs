@@ -459,6 +459,32 @@ const drillSnap = () =>
     };
   })()`);
 
+/**
+ * True when the trace canvas shows the accent now-line. Samples the canvas pixels at 25% of its
+ * width (plus one pixel either side for subpixel offsets) at 30%, 50% and 70% of its height.
+ * A pixel counts when each RGB channel is within 40 of --accent.
+ */
+const nowLineDrawn = () =>
+  ev(`(() => {
+    const canvas = document.querySelector('[data-testid="trace-view"] canvas');
+    if (!canvas || canvas.width === 0 || canvas.height === 0) return false;
+    const ctx = canvas.getContext("2d");
+    const hex = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim();
+    const m = /^#([0-9a-f]{6})$/i.exec(hex);
+    if (!m) return false;
+    const n = parseInt(m[1], 16);
+    const accent = [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+    const x = Math.round(canvas.width * 0.25);
+    for (const dx of [0, -1, 1]) {
+      for (const f of [0.3, 0.5, 0.7]) {
+        const y = Math.round(canvas.height * f);
+        const d = ctx.getImageData(x + dx, y, 1, 1).data;
+        if (accent.every((c, i) => Math.abs(d[i] - c) <= 40)) return true;
+      }
+    }
+    return false;
+  })()`);
+
 /** Opens /drill, waits for the live pedals and the preset list. */
 async function openDrillPage() {
   await go("/drill");
@@ -808,6 +834,13 @@ async function main() {
     await selectOption(1, "Hairpin trace");
     await waitFor(() => hasText("Duration:"), { what: "trace drill details" });
     const drill = findDrill("sample", "hairpin");
+    const traceMode = () =>
+      ev(`document.querySelector('[data-testid="trace-view"]')?.dataset.mode ?? null`);
+    await click("button", "Ghost", `document.querySelector(".view-toggle")`);
+    assert(
+      (await ev(`localStorage.getItem("sct:trace_view")`)) === "ghost",
+      "sct:trace_view is not ghost after clicking Ghost",
+    );
     await setPedals(0, 0, 0);
     await click("button", "Start Drill");
     // The last second of the lead-in shows GO before the rep starts.
@@ -815,6 +848,8 @@ async function main() {
       () => ev(`document.querySelector(".countdown-number")?.textContent.trim() === "GO"`),
       { timeout: 15_000, interval: 50, what: "GO in the countdown overlay" },
     );
+    assert((await traceMode()) === "ghost", "trace view is not in ghost mode at GO");
+    await waitFor(nowLineDrawn, { timeout: 5_000, what: "the ghost now-line on the canvas" });
     await waitFor(
       () =>
         ev(`(() => {
@@ -827,6 +862,29 @@ async function main() {
     const grades = new Set();
     const states = new Set();
     let snap;
+    // The rep heading moves to "Rep 2 / N" once rep 1 is scored. Switch to Playhead then,
+    // while the set keeps running.
+    await waitFor(
+      async () => {
+        snap = await drillSnap();
+        if (snap.state) states.add(snap.state);
+        if (snap.grade) grades.add(snap.grade);
+        if (snap.error) throw new Fatal(`drill page error: ${snap.error}`);
+        return snap.rep?.startsWith("Rep 2 /");
+      },
+      { timeout: 90_000, interval: 100, what: "the second trace rep (Rep 2 heading)" },
+    );
+    await click("button", "Playhead", `document.querySelector(".rep-view-row")`);
+    assert(
+      (await traceMode()) === "playhead",
+      "trace view is not in playhead mode after clicking Playhead",
+    );
+    assert(!(await drillSnap()).finished, "the set finished before the switch to Playhead");
+    assert(
+      (await ev(`localStorage.getItem("sct:trace_view")`)) === "playhead",
+      "sct:trace_view is not playhead after clicking Playhead",
+    );
+    log(`      views: ghost rep 1, playhead from rep 2`);
     await waitFor(
       async () => {
         snap = await drillSnap();

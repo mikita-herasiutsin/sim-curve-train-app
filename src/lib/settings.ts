@@ -244,3 +244,29 @@ export function saveLastPreset(id: string): void {
     // Ignore storage quota or access errors
   }
 }
+
+export type TraceViewMode = "playhead" | "ghost";
+export const DEFAULT_TRACE_VIEW: TraceViewMode = "playhead";
+const TRACE_VIEW_KEY = "sct:trace_view";
+
+export function loadTraceView(): TraceViewMode {
+  try {
+    if (typeof localStorage === "undefined") return DEFAULT_TRACE_VIEW;
+    const stored = localStorage.getItem(TRACE_VIEW_KEY);
+    if (stored === "playhead" || stored === "ghost") {
+      return stored;
+    }
+    return DEFAULT_TRACE_VIEW;
+  } catch {
+    return DEFAULT_TRACE_VIEW;
+  }
+}
+
+export function saveTraceView(mode: TraceViewMode): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(TRACE_VIEW_KEY, mode);
+  } catch {
+    // Ignore storage quota or access errors
+  }
+}

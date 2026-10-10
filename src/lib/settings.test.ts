@@ -23,6 +23,9 @@ import {
   DEFAULT_THEME,
   loadLastPreset,
   saveLastPreset,
+  loadTraceView,
+  saveTraceView,
+  DEFAULT_TRACE_VIEW,
 } from "./settings";
 
 describe("settings", () => {
@@ -337,6 +340,40 @@ describe("settings", () => {
 
       expect(() => saveLastPreset("starter")).not.toThrow();
       expect(loadLastPreset()).toBeNull();
+
+      getSpy.mockRestore();
+      setSpy.mockRestore();
+    });
+  });
+
+  describe("loadTraceView & saveTraceView", () => {
+    it("defaults to playhead when nothing is in localStorage", () => {
+      expect(loadTraceView()).toBe(DEFAULT_TRACE_VIEW);
+    });
+
+    it("saves and loads both modes (round trip)", () => {
+      saveTraceView("ghost");
+      expect(loadTraceView()).toBe("ghost");
+
+      saveTraceView("playhead");
+      expect(loadTraceView()).toBe("playhead");
+    });
+
+    it("returns default when stored value is garbage", () => {
+      localStorage.setItem("sct:trace_view", "garbage");
+      expect(loadTraceView()).toBe(DEFAULT_TRACE_VIEW);
+    });
+
+    it("handles localStorage exceptions gracefully", () => {
+      const getSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new Error("SecurityError: Access is denied");
+      });
+      const setSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+        throw new Error("QuotaExceededError");
+      });
+
+      expect(() => saveTraceView("ghost")).not.toThrow();
+      expect(loadTraceView()).toBe(DEFAULT_TRACE_VIEW);
 
       getSpy.mockRestore();
       setSpy.mockRestore();

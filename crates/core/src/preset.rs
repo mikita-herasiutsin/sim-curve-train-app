@@ -458,7 +458,7 @@ impl TraceCurve {
     /// `-window_ms ..= duration + window_ms`, so index `i` is `t = i - window_ms`.
     ///
     /// Each entry equals [`Self::envelope_at`] at that integer t. Building it is O(duration);
-    /// a lookup with [`EnvelopeTable::at`] is O(1), for the input thread.
+    /// a lookup with [`EnvelopeTable::at`] is O(1), for the per-sample path on the drill thread.
     #[must_use]
     pub fn envelope_table(&self, window_ms: u32) -> EnvelopeTable {
         let w = i64::from(window_ms);

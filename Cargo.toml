@@ -32,6 +32,6 @@ codegen-units = 1
 lto = true
 opt-level = 3
 # Unwind (not abort) so a panic in the input thread is caught and shown in the UI
-# instead of killing the app silently (SCT-012).
+# instead of killing the app silently (SCT-012), and a panicking drill thread still ends its run.
 panic = "unwind"
 strip = true

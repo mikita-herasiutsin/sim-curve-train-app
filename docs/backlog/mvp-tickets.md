@@ -12,7 +12,7 @@ Status: ⬜ todo · 🟨 in progress · ✅ done
 | **M1 See my pedals** (risk spike) | SCT-010 – SCT-015, SCT-020 – SCT-022 | VNM pedals detected and calibrated; live bars and graph; latency measured |
 | **M2 First drill** | SCT-030 – SCT-033, SCT-038 | Hold drill with reps, scoring, results and audio |
 | **M3 Traces** | SCT-034 – SCT-037 | Trace drills in both views with scoring |
-| **M4 Content** | SCT-040 – SCT-045 | GT3, NASCAR and MX-5 presets and the pre-race warm-up |
+| **M4 Content** | SCT-040 – SCT-046 | GT3, NASCAR, MX-5 and Caterham presets and the pre-race warm-up |
 | **M5 Progress & release** | SCT-023, SCT-050 – SCT-051, SCT-060 – SCT-062 | Personal bests and leaderboard, theme, onboarding, v0.1.0 release |
 
 ---
@@ -146,11 +146,11 @@ Settings: on/off and volume. Defaults follow [D-20](../decisions/README.md): on,
 
 ## M3: Traces
 
-### SCT-034 · Trace drill: fixed curve + playhead view 🟨 · M
+### SCT-034 · Trace drill: fixed curve + playhead view ✅ · M
 The whole target curve is drawn with its tolerance band. A playhead sweeps across it and the user's trace is drawn on top. The **current target % is shown as a number** next to the current %.
 - **AC:** the curve is rounded (monotone cubic between points, changed from linear by [D-21](../decisions/README.md)); the band widens on ramps through a ±150 ms timing window (D-21); works for brake and throttle; there is a lead-in countdown that shows GO one second before the rep starts.
 - **Deps:** SCT-031
-- **Status:** in progress (playhead view, rounded curves, ramp band, GO second). The per-drill `decimals` field and the tighter rolling-start band came from the same feedback round.
+- **Status:** done (PR #38, merged 2026-10-09). The per-drill `decimals` field and the tighter rolling-start band came from the same feedback round.
 
 ### SCT-035 · Trace drill: scrolling ghost view + toggle ⬜ · M
 The target curve scrolls right to left towards a fixed "now" line, so you see what's coming next. The numeric target % is shown at the now-line. A toggle switches between ghost and playhead view, and the choice is persisted.
@@ -212,9 +212,13 @@ Same structure as GT3, using NASCAR-style traces (lower peak, long trail, partia
 Same structure, using MX-5 traces (low grip, gentle threshold, early throttle).
 - **Deps:** SCT-044, SCT-036
 
+### SCT-046 · Caterham preset ⬜ · S
+Same structure as GT3, from the Caterham 420R laps (light car, short sharp brake peak). Road-car brake budget per [D-22](../decisions/README.md).
+- **Deps:** SCT-044, SCT-036
+
 ### SCT-045 · Pre-race warm-up ⬜ · M
 One button on each preset card runs a 3–5 minute routine: a chain of the preset's drills with fewer reps. It ends with a summary.
-- **AC:** the routine is defined in the preset JSON ([D-19](../decisions/README.md)); you can skip a drill; the summary shows a score per drill and an overall warm-up score.
+- **AC:** the routine is defined in the preset JSON ([D-19](../decisions/README.md)); you can skip a drill; the summary shows a score per drill and an overall warm-up score; each warm-up run is saved (per-drill scores and the overall score) for the per-warm-up leaderboard in SCT-051.
 - **Deps:** SCT-040, at least one preset
 
 ---
@@ -232,8 +236,8 @@ Save every finished rep and set to SQLite: drill, preset, time, total score, sub
 - PB badges on drill cards.
 - A leaderboard screen showing your own top 10 attempts per drill, with date and grade.
 - A "New PB!" moment on the result card.
-- **AC:** the PB updates right away; the leaderboard level is set by Q-02.
-- **Deps:** SCT-050
+- **AC:** the PB updates right away; the leaderboard is kept per drill, per preset and per warm-up ([D-23](../decisions/README.md)).
+- **Deps:** SCT-050, SCT-045 (the per-warm-up level needs the stored warm-up runs)
 
 ### SCT-023 · Dark/light theme switch ✅ · S
 Theme tokens (CSS variables) for dark and light HUD palettes, including the canvas colours. The toggle is in the header and the choice is persisted.
@@ -266,7 +270,7 @@ User README (install, SmartScreen note, first steps, screenshots), a CHANGELOG, 
 ## Post-MVP backlog (v1.x and later, not scheduled)
 
 - **SCT-016** DirectInput8 fallback backend. Moved into the MVP if SCT-010 finds devices that SDL misses.
-- **SCT-070** Gamification: XP, levels, licence tiers (Rookie → Pro), daily streak, badges (Q-06)
+- **SCT-070** Gamification: XP, levels, licence tiers (Rookie → Pro), daily streak, badges ([D-24](../decisions/README.md))
 - **SCT-071** Attempt replay: your trace drawn over the target, from the saved samples
 - **SCT-072** "Blind" mode: the graph is hidden and only audio feedback plays
 - **SCT-073** Sequence drills: brake → trail → throttle for a full corner

@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import DrillPage from "./+page.svelte";
 import type { Preset } from "$lib/drill";
-import type { NewAttempt } from "$lib/attempts";
+import type { NewAttempt, NewWarmUpRun } from "$lib/attempts";
 import { pedalStream } from "$lib/pedals/stream";
 
 let mockUrl = new URL("http://localhost/drill");
@@ -34,6 +34,43 @@ const preset: Preset = {
       holdMs: 2000,
     },
   ],
+};
+
+const warmUpPreset: Preset = {
+  schemaVersion: 1,
+  id: "warmup-preset",
+  name: "Warm-up Drills",
+  description: "Two-drill routine",
+  drills: [
+    {
+      id: "warmup-hold-1",
+      name: "Hold Drill 1",
+      type: "hold",
+      pedal: "brake",
+      reps: 5,
+      leadInMs: 1000,
+      tolerance: 5,
+      target: 70,
+      holdMs: 2000,
+    },
+    {
+      id: "warmup-hold-2",
+      name: "Hold Drill 2",
+      type: "hold",
+      pedal: "brake",
+      reps: 5,
+      leadInMs: 1000,
+      tolerance: 5,
+      target: 80,
+      holdMs: 2000,
+    },
+  ],
+  warmUp: {
+    steps: [
+      { drill: "warmup-hold-1", reps: 2 },
+      { drill: "warmup-hold-2", reps: 3 },
+    ],
+  },
 };
 
 const tracePreset: Preset = {
@@ -82,6 +119,15 @@ describe("Drill page", () => {
   let presetsList: Preset[] = [preset];
   let saved: NewAttempt[] = [];
   let saveError: string | null = null;
+  let savedWarmUpRuns: NewWarmUpRun[] = [];
+  let saveWarmUpRunError: string | null = null;
+  let lastStartDrillRunArgs: {
+    token: number;
+    presetId: string;
+    drillId: string;
+    warmUp: boolean;
+    onEvent: Channelish;
+  } | null = null;
 
   beforeEach(() => {
     localStorage.clear();
@@ -92,6 +138,9 @@ describe("Drill page", () => {
     presetsList = [preset];
     saved = [];
     saveError = null;
+    savedWarmUpRuns = [];
+    saveWarmUpRunError = null;
+    lastStartDrillRunArgs = null;
     (globalThis as { isTauri?: boolean }).isTauri = true;
     globalThis.ResizeObserver = class {
       observe() {}
@@ -120,7 +169,18 @@ describe("Drill page", () => {
             if (saveError) throw saveError;
             saved.push((args as { attempt: NewAttempt }).attempt);
             return saved.length;
+          case "save_warm_up_run":
+            if (saveWarmUpRunError) throw saveWarmUpRunError;
+            savedWarmUpRuns.push((args as { run: NewWarmUpRun }).run);
+            return savedWarmUpRuns.length;
           case "start_drill_run":
+            lastStartDrillRunArgs = args as {
+              token: number;
+              presetId: string;
+              drillId: string;
+              warmUp: boolean;
+              onEvent: Channelish;
+            };
             drillChannel = (args as { onEvent: Channelish }).onEvent;
             if (startError) throw startError;
             return null;
@@ -689,5 +749,135 @@ describe("Drill page", () => {
     advancedOption.selected = true;
     await fireEvent.change(advancedOption.closest("select")!);
     expect(localStorage.getItem("sct:last_preset")).toBe("advanced");
+  });
+
+  it("?preset=<id>&warmup=1 shows Warm-up: <name> and Drill 1 of 2, and Start invokes start_drill_run with warmUp: true", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    expect(await screen.findByText("Warm-up: Warm-up Drills")).toBeInTheDocument();
+    expect(await screen.findByText(/Drill 1 of 2/)).toBeInTheDocument();
+    expect(screen.getByTestId("warm-up-skip")).toBeInTheDocument();
+
+    await startDrill();
+    expect(lastStartDrillRunArgs?.warmUp).toBe(true);
+    expect(lastStartDrillRunArgs?.presetId).toBe("warmup-preset");
+    expect(lastStartDrillRunArgs?.drillId).toBe("warmup-hold-1");
+  });
+
+  it("completing step 1 and skipping step 2 from idle panel shows summary with scores and invokes save_warm_up_run", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 80.0 } });
+    drillChannel!.onmessage({ event: "repScored", rep: 1, score: { ...holdScore, total: 84.0 } });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [80.0, 84.0],
+        best: 84.0,
+        average: 82.0,
+        grade: "B",
+        consistency: 95.0,
+        stdDev: 2.0,
+      },
+    });
+
+    const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
+    await waitFor(() => expect(nextBtn).toBeEnabled());
+    await fireEvent.click(nextBtn);
+
+    expect(await screen.findByText("Warm-up: Warm-up Drills")).toBeInTheDocument();
+    expect(await screen.findByText(/Drill 2 of 2/)).toBeInTheDocument();
+
+    const skipBtn = screen.getByTestId("warm-up-skip");
+    await fireEvent.click(skipBtn);
+
+    const summaryElem = await screen.findByTestId("warm-up-summary");
+    expect(summaryElem).toBeInTheDocument();
+    expect(screen.getByText("Warm-up complete")).toBeInTheDocument();
+
+    expect(within(summaryElem).getByText("Hold Drill 1")).toBeInTheDocument();
+    expect(within(summaryElem).getByText("82")).toBeInTheDocument();
+    expect(within(summaryElem).getByText("Hold Drill 2")).toBeInTheDocument();
+    expect(within(summaryElem).getByText("Skipped")).toBeInTheDocument();
+
+    const scoreElem = screen.getByTestId("warm-up-score");
+    expect(scoreElem).toHaveTextContent("41");
+    expect(screen.getByText("Skipped drills count as 0.")).toBeInTheDocument();
+
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+
+    expect(savedWarmUpRuns).toHaveLength(1);
+    expect(savedWarmUpRuns[0].steps).toEqual([
+      { drillId: "warmup-hold-1", skipped: false, attemptId: 1, score: 82.0 },
+      { drillId: "warmup-hold-2", skipped: true, attemptId: null, score: null },
+    ]);
+  });
+
+  it("Skip during a set aborts the run and records the step as skipped with the attempt id of the saved partial set", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 80.0 } });
+
+    const skipBtn = await screen.findByRole("button", { name: "Skip Drill" });
+    expect(skipBtn).toHaveAttribute("data-testid", "warm-up-skip");
+    await fireEvent.click(skipBtn);
+    await waitFor(() => expect(aborts).toBe(1));
+
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: { ...summary, repTotals: [80.0] },
+    });
+
+    expect(screen.queryByText("Set Finished!")).not.toBeInTheDocument();
+    expect(await screen.findByText(/Drill 2 of 2/)).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByTestId("warm-up-skip"));
+    expect(await screen.findByTestId("warm-up-summary")).toBeInTheDocument();
+
+    await waitFor(() => expect(savedWarmUpRuns).toHaveLength(1));
+    expect(savedWarmUpRuns[0].steps[0]).toEqual({
+      drillId: "warmup-hold-1",
+      skipped: true,
+      attemptId: 1,
+      score: null,
+    });
+  });
+
+  it("a failing save_warm_up_run shows the alert", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    saveWarmUpRunError = "warm-up store is unavailable";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    render(DrillPage);
+
+    await fireEvent.click(await screen.findByTestId("warm-up-skip"));
+    await fireEvent.click(await screen.findByTestId("warm-up-skip"));
+
+    expect(await screen.findByTestId("warm-up-summary")).toBeInTheDocument();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("This warm-up was not saved: warm-up store is unavailable");
+  });
+
+  it("without warmup=1 a preset with warm-up shows the picker as before", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset");
+    render(DrillPage);
+
+    expect(await screen.findByText("Select a Drill")).toBeInTheDocument();
+    expect(screen.getByLabelText("Preset:")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Drill:")).toBeInTheDocument();
+    expect(screen.queryByTestId("warm-up-skip")).not.toBeInTheDocument();
   });
 });

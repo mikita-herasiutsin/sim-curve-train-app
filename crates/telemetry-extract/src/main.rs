@@ -54,8 +54,8 @@ OPTIONS:
                            Human-readable preset name.
     --tolerance <PCT>      Permissible error tolerance in percent (e.g. 10.0). If omitted, defaults to app default (10%).
     --max-drills <N>       Maximum number of drills to output (default: 12).
-    --min-brake <N>        Keep drills from at least N brake corners, ranked first (default: 0).
-    --min-lift <N>         Keep drills from at least N lift corners, ranked first (default: 0).
+    --min-brake <N>        Reserve at least one drill slot for each of the N top-ranked brake corners (default: 0).
+    --min-lift <N>         Reserve at least one drill slot for each of the N top-ranked lift corners (default: 0).
                            --min-brake plus --min-lift must not exceed --max-drills.
     --allow-mixed          Accept laps from different cars or tracks in one run.
     -h, --help             Print help information.

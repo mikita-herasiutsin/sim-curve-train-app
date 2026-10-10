@@ -81,9 +81,16 @@ impl ExtractOptions {
     ///
     /// # Errors
     ///
-    /// Returns an error string when `min_brake + min_lift` exceeds `max_drills`.
+    /// Returns an error string when `max_drills` is 0 or `min_brake + min_lift` exceeds it.
     pub fn validate(&self) -> Result<(), String> {
-        if self.min_brake + self.min_lift > self.max_drills {
+        if self.max_drills == 0 {
+            return Err("--max-drills must be a positive integer".to_string());
+        }
+        if self
+            .min_brake
+            .checked_add(self.min_lift)
+            .is_none_or(|sum| sum > self.max_drills)
+        {
             return Err(format!(
                 "--min-brake {} plus --min-lift {} must not exceed --max-drills {}",
                 self.min_brake, self.min_lift, self.max_drills
@@ -326,6 +333,20 @@ fn select_drills(
             }
             traces
         };
+        let (kind, suffixes) = if corner.decel.is_brake() {
+            ("brake", ["-brake", "-brake-hold"])
+        } else {
+            ("lift", ["-lift", "-lift-hold"])
+        };
+        if !chosen
+            .iter()
+            .any(|d| suffixes.iter().any(|s| d.id.ends_with(s)))
+        {
+            warnings.push(format!(
+                "warning: reserved {kind} corner {} yielded no {kind} drill",
+                corner.corner_num
+            ));
+        }
         if chosen.is_empty() {
             continue;
         }
@@ -391,6 +412,7 @@ pub(crate) fn extract_with_warnings(
     laps: &[LapTelemetry],
     options: &ExtractOptions,
 ) -> Result<(Preset, Vec<String>), String> {
+    options.validate()?;
     if laps.is_empty() {
         return Err("no telemetry laps provided for extraction".to_string());
     }
@@ -447,9 +469,8 @@ pub(crate) fn extract_with_warnings(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Each candidate joins the nearest cluster (by circular mean onset) that has no zone from its
-    // lap yet. Brake and lift zones cluster together, so a corner braked in some laps and lifted
-    // in others stays one corner. Nearest, not first-fit, so a short stab just before a corner's
+    // Each candidate joins the nearest cluster (by circular mean onset) of the same type that has
+    // no zone from its lap yet. Nearest, not first-fit, so a short stab just before a corner's
     // main zone cannot pull that main zone away from its own cluster. `circular_dist` lets a
     // corner straddling the 0/1 line form a single cluster.
     let mut clusters: Vec<Vec<CornerCandidate>> = Vec::new();
@@ -458,7 +479,10 @@ pub(crate) fn extract_with_warnings(
         let nearest = clusters
             .iter()
             .enumerate()
-            .filter(|(_, cluster)| !cluster.iter().any(|c| c.lap_idx == cand.lap_idx))
+            .filter(|(_, cluster)| {
+                cluster[0].decel.is_brake() == cand.decel.is_brake()
+                    && !cluster.iter().any(|c| c.lap_idx == cand.lap_idx)
+            })
             .map(|(c_idx, cluster)| (c_idx, circular_dist(circular_mean(cluster), cand.onset_pct)))
             .filter(|&(_, dist)| dist <= CORNER_CLUSTER_EPSILON)
             .min_by(|a, b| a.1.total_cmp(&b.1));
@@ -469,6 +493,44 @@ pub(crate) fn extract_with_warnings(
             clusters.push(vec![cand]);
         }
     }
+
+    // A corner braked in some laps and lifted in others forms a brake and a lift cluster with
+    // disjoint laps. Merge each lift cluster into the nearest brake cluster within the epsilon
+    // that shares no lap with it, each brake cluster taking at most one. Lift clusters go in onset
+    // order. A lift cluster that overlaps in laps is a separate corner and stays alone.
+    let lift_order = {
+        let mut v: Vec<usize> = (0..clusters.len())
+            .filter(|&i| !clusters[i][0].decel.is_brake())
+            .collect();
+        v.sort_by(|&a, &b| circular_mean(&clusters[a]).total_cmp(&circular_mean(&clusters[b])));
+        v
+    };
+    let mut merged_away = vec![false; clusters.len()];
+    let mut has_merge = vec![false; clusters.len()];
+    for l in lift_order {
+        let lift_mean = circular_mean(&clusters[l]);
+        let nearest = (0..clusters.len())
+            .filter(|&b| !merged_away[b] && clusters[b][0].decel.is_brake() && !has_merge[b])
+            .filter(|&b| {
+                !clusters[b]
+                    .iter()
+                    .any(|c| clusters[l].iter().any(|d| d.lap_idx == c.lap_idx))
+            })
+            .map(|b| (b, circular_dist(circular_mean(&clusters[b]), lift_mean)))
+            .filter(|&(_, dist)| dist <= CORNER_CLUSTER_EPSILON)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((b, _)) = nearest {
+            let lifted = std::mem::take(&mut clusters[l]);
+            clusters[b].extend(lifted);
+            merged_away[l] = true;
+            has_merge[b] = true;
+        }
+    }
+    let clusters: Vec<Vec<CornerCandidate>> = clusters
+        .into_iter()
+        .zip(merged_away)
+        .filter_map(|(c, gone)| (!gone).then_some(c))
+        .collect();
 
     // 3. Keep only corners seen in at least half the laps
     let total_laps = laps.len();
@@ -552,7 +614,7 @@ pub(crate) fn extract_with_warnings(
         .map_or("track", |m| m.track.as_str());
     let t_slug = track_slug(track_name);
 
-    let (mut selected, warnings) = select_drills(&chosen_corners, laps, &t_slug, options);
+    let (mut selected, mut warnings) = select_drills(&chosen_corners, laps, &t_slug, options);
 
     // 6. Stable, deterministic ordering by LapDistPct
     selected.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -572,7 +634,10 @@ pub(crate) fn extract_with_warnings(
             drills: vec![drill.clone()],
         };
         if let Err(e) = dummy_preset.validate() {
-            eprintln!("warning: dropping invalid drill '{}': {e}", drill.id);
+            warnings.push(format!(
+                "warning: dropping invalid drill '{}': {e}",
+                drill.id
+            ));
         } else {
             valid_drills.push(drill);
         }

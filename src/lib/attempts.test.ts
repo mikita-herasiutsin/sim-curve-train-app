@@ -4,9 +4,13 @@ import {
   saveAttempt,
   listAttempts,
   bestTotal,
+  saveWarmUpRun,
+  listWarmUpRuns,
   buildAttempt,
   type Attempt,
   type NewAttempt,
+  type NewWarmUpRun,
+  type WarmUpRun,
 } from "./attempts";
 import type { TraceScore } from "./drill";
 
@@ -103,6 +107,68 @@ describe("attempts IPC wrappers", () => {
 
     response = null;
     await expect(bestTotal("hold-brake-70")).resolves.toBeNull();
+  });
+
+  it("saveWarmUpRun invokes save_warm_up_run command and returns run ID", async () => {
+    const newRun: NewWarmUpRun = {
+      presetId: "gt3",
+      startedAt: "2026-10-10T12:00:00Z",
+      steps: [
+        {
+          drillId: "hold-brake-70",
+          skipped: false,
+          attemptId: 42,
+          score: 88.5,
+        },
+      ],
+    };
+
+    let calledCommand = "";
+    let calledPayload: unknown = null;
+
+    mockIPC((cmd, payload) => {
+      calledCommand = cmd;
+      calledPayload = payload;
+      return 10;
+    });
+
+    const id = await saveWarmUpRun(newRun);
+    expect(calledCommand).toBe("save_warm_up_run");
+    expect(calledPayload).toEqual({ run: newRun });
+    expect(id).toBe(10);
+  });
+
+  it("listWarmUpRuns invokes list_warm_up_runs with default and custom limits", async () => {
+    const mockRun: WarmUpRun = {
+      id: 10,
+      presetId: "gt3",
+      startedAt: "2026-10-10T12:00:00Z",
+      score: 88.5,
+      steps: [],
+    };
+
+    const calls: { cmd: string; payload: unknown }[] = [];
+
+    mockIPC((cmd, payload) => {
+      calls.push({ cmd, payload });
+      return [mockRun];
+    });
+
+    // Default limit
+    const results1 = await listWarmUpRuns("gt3");
+    expect(results1).toEqual([mockRun]);
+    expect(calls[0]).toEqual({
+      cmd: "list_warm_up_runs",
+      payload: { presetId: "gt3", limit: 10 },
+    });
+
+    // Custom limit
+    const results2 = await listWarmUpRuns("gt3", 5);
+    expect(results2).toEqual([mockRun]);
+    expect(calls[1]).toEqual({
+      cmd: "list_warm_up_runs",
+      payload: { presetId: "gt3", limit: 5 },
+    });
   });
 });
 

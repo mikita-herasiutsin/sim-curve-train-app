@@ -128,3 +128,34 @@ export function bestTotal(drillId: string): Promise<number | null> {
 export function bestTotals(presetId: string): Promise<Record<string, number>> {
   return invoke<Record<string, number>>("best_totals", { presetId });
 }
+
+/** One step of a warm-up run, in run order. Mirrors `sct_core::attempts::WarmUpStepResult`. */
+export interface WarmUpStepResult {
+  drillId: string;
+  skipped: boolean;
+  attemptId: number | null;
+  score: number | null;
+}
+
+/** Data required to persist a finished warm-up run. Mirrors `sct_core::attempts::NewWarmUpRun`. */
+export interface NewWarmUpRun {
+  presetId: string;
+  startedAt: string;
+  steps: WarmUpStepResult[];
+}
+
+/** A persisted warm-up run with its assigned unique ID and overall score. Mirrors `sct_core::attempts::WarmUpRun`. */
+export interface WarmUpRun extends NewWarmUpRun {
+  id: number;
+  score: number;
+}
+
+/** Saves a completed warm-up run and its step results, returning the assigned warm-up run ID. */
+export function saveWarmUpRun(run: NewWarmUpRun): Promise<number> {
+  return invoke<number>("save_warm_up_run", { run });
+}
+
+/** Lists the most recent recorded warm-up runs for a preset, ordered from newest to oldest. */
+export function listWarmUpRuns(presetId: string, limit = 10): Promise<WarmUpRun[]> {
+  return invoke<WarmUpRun[]>("list_warm_up_runs", { presetId, limit });
+}

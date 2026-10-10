@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-save-warm-up-run"
+description = "Enables the save_warm_up_run command without any pre-configured scope."
+commands.allow = ["save_warm_up_run"]
+
+[[permission]]
+identifier = "deny-save-warm-up-run"
+description = "Denies the save_warm_up_run command without any pre-configured scope."
+commands.deny = ["save_warm_up_run"]

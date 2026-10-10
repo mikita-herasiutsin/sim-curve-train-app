@@ -133,9 +133,8 @@ pub fn detect_brake_zones(brakes: &[f32]) -> Vec<BrakeZone> {
 
     // 3. Filter by duration and peak, and construct BrakeZone.
     let mut zones = Vec::new();
-    let len = brakes.len();
     for (start, end) in merged_intervals {
-        if end <= start || start == 0 || end == len.saturating_sub(1) {
+        if end <= start || start == 0 {
             continue;
         }
 
@@ -251,9 +250,8 @@ pub fn detect_lift_zones(throttles: &[f32], brakes: &[f32]) -> Vec<LiftZone> {
     merged.push(current);
 
     let mut zones = Vec::new();
-    let len = throttles.len();
     for (start, min_i, end, min_v) in merged {
-        if start == 0 || end == len.saturating_sub(1) {
+        if start == 0 {
             continue;
         }
         if min_v >= LIFT_THRESHOLD {

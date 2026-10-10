@@ -222,3 +222,25 @@ export function saveAudioVolume(volume: number): void {
     // Ignore error
   }
 }
+
+const LAST_PRESET_KEY = "sct:last_preset";
+
+export function loadLastPreset(): string | null {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const stored = localStorage.getItem(LAST_PRESET_KEY);
+    if (!stored) return null;
+    return stored;
+  } catch {
+    return null;
+  }
+}
+
+export function saveLastPreset(id: string): void {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(LAST_PRESET_KEY, id);
+  } catch {
+    // Ignore storage quota or access errors
+  }
+}

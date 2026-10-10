@@ -4,6 +4,8 @@ mod input;
 mod sim_pedals;
 mod window;
 
+use std::collections::HashMap;
+
 use audio::AudioFeedback;
 use input::InputService;
 use sct_core::AppInfo;
@@ -245,6 +247,23 @@ fn best_total(
     store.best_total(&drill_id).map_err(|e| e.to_string())
 }
 
+/// Returns the highest total score per drill of a preset, keyed by drill id.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn best_totals(
+    preset_id: String,
+    attempts: tauri::State<'_, AttemptsService>,
+) -> Result<HashMap<String, f32>, String> {
+    let guard = lock_attempts(&attempts.store);
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "attempts store is unavailable".to_string())?;
+    store.best_totals(&preset_id).map_err(|e| e.to_string())
+}
+
 /// Loads the bundled presets from `<resource dir>/presets`.
 fn load_presets(app: &tauri::AppHandle) -> Result<Vec<Preset>, String> {
     let resources = app
@@ -413,6 +432,7 @@ pub fn run() {
             save_attempt,
             list_attempts,
             best_total,
+            best_totals,
             #[cfg(debug_assertions)]
             audio_test_tone,
             audio_set_enabled,

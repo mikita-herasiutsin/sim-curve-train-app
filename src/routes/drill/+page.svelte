@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { resolve } from "$app/paths";
+  import { page } from "$app/state";
   import { isTauri } from "@tauri-apps/api/core";
+  import { saveLastPreset } from "$lib/settings";
   import {
     listPresets,
     startDrillRun,
@@ -101,8 +103,13 @@
           // Only presets with something this screen can run are offered.
           presets = p.filter((preset) => playableDrills(preset).length > 0);
           if (presets.length > 0) {
-            selectedPreset = presets[0];
-            selectedDrill = playableDrills(presets[0])[0] ?? null;
+            // The home picker opens this screen with ?preset=<id>&drill=<id>.
+            const params = page.url.searchParams;
+            const preset = presets.find((pr) => pr.id === params.get("preset")) ?? presets[0];
+            const playable = playableDrills(preset);
+            selectedPreset = preset;
+            selectedDrill =
+              playable.find((d) => d.id === params.get("drill")) ?? playable[0] ?? null;
           } else {
             presetsError = "No playable drills found.";
           }
@@ -292,10 +299,14 @@
             Preset:
             <select
               bind:value={selectedPreset}
-              onchange={() =>
-                (selectedDrill = selectedPreset
-                  ? (playableDrills(selectedPreset)[0] ?? null)
-                  : null)}
+              onchange={() => {
+                if (selectedPreset) {
+                  saveLastPreset(selectedPreset.id);
+                  selectedDrill = playableDrills(selectedPreset)[0] ?? null;
+                } else {
+                  selectedDrill = null;
+                }
+              }}
             >
               {#each presets as p (p.id)}
                 <option value={p}>{p.name}</option>

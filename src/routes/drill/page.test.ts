@@ -6,6 +6,16 @@ import type { Preset } from "$lib/drill";
 import type { NewAttempt } from "$lib/attempts";
 import { pedalStream } from "$lib/pedals/stream";
 
+let mockUrl = new URL("http://localhost/drill");
+
+vi.mock("$app/state", () => ({
+  page: {
+    get url() {
+      return mockUrl;
+    },
+  },
+}));
+
 const preset: Preset = {
   schemaVersion: 1,
   id: "starter",
@@ -74,6 +84,7 @@ describe("Drill page", () => {
   let saveError: string | null = null;
 
   beforeEach(() => {
+    mockUrl = new URL("http://localhost/drill");
     startError = null;
     drillChannel = null;
     aborts = 0;
@@ -569,5 +580,62 @@ describe("Drill page", () => {
     drillChannel!.onmessage({ event: "repStarted", rep: 0, startUs: 1_000_000 });
     const hud = await screen.findByTestId("hold-hud");
     expect(hud).toHaveTextContent("Target 35.0% ±2");
+  });
+
+  const multiDrillPreset: Preset = {
+    schemaVersion: 1,
+    id: "advanced",
+    name: "Advanced Drills",
+    description: "",
+    drills: [
+      {
+        id: "adv-drill-1",
+        name: "First Advanced Drill",
+        type: "hold",
+        pedal: "brake",
+        reps: 3,
+        leadInMs: 1000,
+        target: 40,
+        holdMs: 2000,
+      },
+      {
+        id: "adv-drill-2",
+        name: "Second Advanced Drill",
+        type: "hold",
+        pedal: "throttle",
+        reps: 3,
+        leadInMs: 1000,
+        target: 80,
+        holdMs: 2000,
+      },
+    ],
+  };
+
+  it("selects preset and non-first drill from query params", async () => {
+    presetsList = [preset, multiDrillPreset];
+    mockUrl = new URL("http://localhost/drill?preset=advanced&drill=adv-drill-2");
+    render(DrillPage);
+    const presetOption = await screen.findByRole<HTMLOptionElement>("option", {
+      name: "Advanced Drills",
+    });
+    expect(presetOption.selected).toBe(true);
+    const drillOption = await screen.findByRole<HTMLOptionElement>("option", {
+      name: /Second Advanced Drill/,
+    });
+    expect(drillOption.selected).toBe(true);
+  });
+
+  it("falls back to the preset's first playable drill when drill param is unknown", async () => {
+    presetsList = [preset, multiDrillPreset];
+    mockUrl = new URL("http://localhost/drill?preset=advanced&drill=unknown-drill");
+    render(DrillPage);
+    const presetOption = await screen.findByRole<HTMLOptionElement>("option", {
+      name: "Advanced Drills",
+    });
+    expect(presetOption.selected).toBe(true);
+    const drillOption = await screen.findByRole<HTMLOptionElement>("option", {
+      name: /First Advanced Drill/,
+    });
+    expect(drillOption.selected).toBe(true);
   });
 });

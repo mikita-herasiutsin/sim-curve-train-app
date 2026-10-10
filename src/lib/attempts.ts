@@ -123,3 +123,8 @@ export function listAttempts(drillId: string, limit = 10): Promise<Attempt[]> {
 export function bestTotal(drillId: string): Promise<number | null> {
   return invoke<number | null>("best_total", { drillId });
 }
+
+/** Returns the highest total score per drill of a preset, keyed by drill id; drills without a scored attempt are absent. */
+export function bestTotals(presetId: string): Promise<Record<string, number>> {
+  return invoke<Record<string, number>>("best_totals", { presetId });
+}

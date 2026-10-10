@@ -956,6 +956,109 @@ async function main() {
       }`,
     );
   });
+
+  await step("home-picker-opens-drill", async () => {
+    await go("/");
+    await waitFor(() => ev(`document.querySelectorAll(".preset-card").length > 0`), {
+      what: "preset cards on the home page",
+    });
+    const playable = bundledPresets().filter((p) => playableOf(p).length > 0);
+    const cardCount = await ev(`document.querySelectorAll(".preset-card").length`);
+    assert(
+      cardCount === playable.length,
+      `home lists ${cardCount} presets, expected ${playable.length}`,
+    );
+    const names = await ev(
+      `[...document.querySelectorAll(".preset-name")].map((e) => e.textContent.trim())`,
+    );
+    for (const p of playable) {
+      assert(
+        names.includes(p.name),
+        `preset ${JSON.stringify(p.name)} missing on home (has ${names.join(", ")})`,
+      );
+    }
+
+    // Card of a preset by its name, and the card's list of drills and scores.
+    const cardOf = (name) =>
+      `[...document.querySelectorAll("li.preset-card")].find((li) => li.querySelector(".preset-name")?.textContent.trim() === ${JSON.stringify(name)})`;
+    const headerOf = (name) => `(${cardOf(name)})?.querySelector("button.preset-header")`;
+
+    const P = playable[playable.length - 1];
+    await waitFor(() => ev(`Boolean(${headerOf(P.name)})`), { what: `the ${P.name} card` });
+    await ev(`${headerOf(P.name)}.click()`);
+    await waitFor(() => ev(`(${headerOf(P.name)})?.getAttribute("aria-expanded") === "true"`), {
+      what: `${P.name} to open`,
+    });
+    const drillNames = playableOf(P).map((d) => d.name);
+    await waitFor(
+      async () =>
+        JSON.stringify(
+          await ev(
+            `[...(${cardOf(P.name)}).querySelectorAll(".drill-name")].map((e) => e.textContent.trim())`,
+          ),
+        ) === JSON.stringify(drillNames),
+      { what: `drill list of ${P.name}: ${drillNames.join(" | ")}` },
+    );
+    // Earlier steps saved sets, so the expected text comes from the stored attempts.
+    const expectedScores = [];
+    for (const d of playableOf(P)) {
+      const bests = (await invoke("list_attempts", { drillId: d.id, limit: 100 }))
+        .filter((a) => a.presetId === P.id && a.best !== null)
+        .map((a) => a.best);
+      expectedScores.push(bests.length > 0 ? `Best ${Math.round(Math.max(...bests))}` : "Best —");
+    }
+    assert(
+      expectedScores.some((s) => s !== "Best —"),
+      "no saved attempt for this preset, so the best scores go untested",
+    );
+    // The scores load after the drill list, so poll for them.
+    let scores = [];
+    await waitFor(
+      async () => {
+        scores = await ev(
+          `[...(${cardOf(P.name)}).querySelectorAll(".drill-score")].map((e) => e.textContent.trim())`,
+        );
+        return JSON.stringify(scores) === JSON.stringify(expectedScores);
+      },
+      { what: `drill scores ${expectedScores.join(" | ")}` },
+    ).catch((e) => {
+      throw new Error(`${e.message} (shown: ${scores.join(" | ")})`);
+    });
+    log(`      scores: ${scores.join(" | ")}`);
+    await shot("home-picker");
+
+    // The last playable drill, not the first, so the selection is really tested.
+    const D = playableOf(P).at(-1);
+    await ev(
+      `[...(${cardOf(P.name)}).querySelectorAll("button.drill")].find((b) => b.querySelector(".drill-name")?.textContent.trim() === ${JSON.stringify(D.name)}).click()`,
+    );
+    const query = `preset=${encodeURIComponent(P.id)}`;
+    const drillQuery = `drill=${encodeURIComponent(D.id)}`;
+    await waitFor(
+      () =>
+        ev(
+          `location.pathname.endsWith("/drill") && location.search.includes(${JSON.stringify(query)}) && location.search.includes(${JSON.stringify(drillQuery)})`,
+        ),
+      { what: `the drill screen for ${P.id} / ${D.id}` },
+    );
+    await waitFor(
+      async () => {
+        const sel = await ev(`[0, 1].map((i) => {
+          const s = document.querySelectorAll(".picker-controls select")[i];
+          return s?.options[s.selectedIndex]?.textContent.trim() ?? null;
+        })`);
+        return sel[0] === P.name && sel[1] === `${D.name} (${D.reps} reps)`;
+      },
+      { what: `preset ${P.name} and drill ${D.name} selected` },
+    );
+    await shot("drill-from-picker");
+
+    // The last preset is remembered: the home page opens it again.
+    await go("/");
+    await waitFor(() => ev(`(${headerOf(P.name)})?.getAttribute("aria-expanded") === "true"`), {
+      what: `${P.name} to be open again on the home page`,
+    });
+  });
 }
 
 // ---------------------------------------------------------------- run

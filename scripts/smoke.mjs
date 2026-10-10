@@ -923,10 +923,14 @@ async function main() {
       what: "lead-in-info element",
     });
     const infoText = await ev(
-      `document.querySelector('[data-testid="lead-in-info"]')?.textContent ?? ""`,
+      `document.querySelector('[data-testid="lead-in-info"]')?.textContent.replace(/\\s+/g, " ") ?? ""`,
     );
     assert(
       infoText.includes("Starts from throttle:"),
+      `lead-in-info missing expected text, got ${JSON.stringify(infoText)}`,
+    );
+    assert(
+      infoText.includes("before the brake point"),
       `lead-in-info missing expected text, got ${JSON.stringify(infoText)}`,
     );
 
@@ -974,12 +978,12 @@ async function main() {
     });
     await shot("lead-in-lift");
 
-    // Then setPedals(0.3, 0.7, 0) (deliberate overlap), wait ~300 ms, setPedals(0, 0.7, 0)
-    await setPedals(0.3, 0.7, 0);
-    await sleep(300);
+    // Play coast technique: release throttle, brief gap, then brake
+    await setPedals(0, 0, 0);
+    await sleep(150);
     await setPedals(0, 0.7, 0);
 
-    // Wait for [data-testid="overlap"] and assert overlap > 0 ms and peak throttle > 0%
+    // Wait for [data-testid="overlap"] and assert coast > 0 ms
     const overlapText = await waitFor(
       async () => {
         const text = await ev(
@@ -989,15 +993,11 @@ async function main() {
       },
       { timeout: 15_000, interval: 50, what: "the overlap block to appear" },
     );
-    const overlapMatch = overlapText.match(/Overlap\s*(\d+)\s*ms/);
-    const peakMatch = overlapText.match(/Peak throttle while braking\s*(\d+)%/);
-    assert(overlapMatch, `could not parse overlap ms from ${JSON.stringify(overlapText)}`);
-    assert(peakMatch, `could not parse peak throttle from ${JSON.stringify(overlapText)}`);
-    const overlapMs = Number(overlapMatch[1]);
-    const peakThrottle = Number(peakMatch[1]);
-    assert(overlapMs > 0, `expected overlap > 0 ms, got ${overlapMs}`);
-    assert(peakThrottle > 0, `expected peak throttle > 0%, got ${peakThrottle}`);
-    log(`      overlap: ${overlapMs} ms, peak throttle: ${peakThrottle}%`);
+    const coastMatch = overlapText.match(/Coast\s*(\d+)\s*ms/);
+    assert(coastMatch, `could not parse coast ms from ${JSON.stringify(overlapText)}`);
+    const coastMs = Number(coastMatch[1]);
+    assert(coastMs > 0, `expected coast > 0 ms, got ${coastMs}`);
+    log(`      coast: ${coastMs} ms`);
 
     // Abort Set and wait for finished overlay
     await click("button", "Abort Set");

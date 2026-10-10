@@ -17,6 +17,7 @@
     applyDrillEvent,
     playableDrills,
     toleranceOf,
+    liftWindowMs,
     IDLE_VIEW,
     type Preset,
     type Drill,
@@ -57,8 +58,11 @@
   let stopSource: (() => void) | null = null;
 
   let view = $state<RunView>({ ...IDLE_VIEW });
+  let lifting = $state(false);
   const throttleTarget = $derived(
-    Boolean(leadIn && (view.runState === "countdown" || view.runState === "throttle")),
+    Boolean(
+      leadIn && (view.runState === "countdown" || (view.runState === "throttle" && !lifting)),
+    ),
   );
   let countdownMs = $state(0);
   let throttleRemainingSec = $state(0);
@@ -162,9 +166,12 @@
         holdRemainingMs = Math.ceil(ms / 100) * 100;
       }
 
+      lifting =
+        view.runState === "throttle" && view.throttleLiftUs > 0 && nowUs >= view.throttleLiftUs;
+
       if (view.runState === "throttle") {
-        if (view.throttleHoldEndsUs > 0) {
-          throttleRemainingSec = Math.max(0, (view.throttleHoldEndsUs - nowUs) / 1e6);
+        if (view.throttleLiftUs > 0) {
+          throttleRemainingSec = Math.max(0, (view.throttleLiftUs - nowUs) / 1e6);
         } else {
           throttleRemainingSec = 0;
         }
@@ -172,9 +179,8 @@
 
       showLiftCue = Boolean(
         leadIn &&
-        view.runState === "active" &&
-        view.repStartUs > 0 &&
-        nowUs - view.repStartUs < 800_000,
+        (lifting ||
+          (view.runState === "active" && view.repStartUs > 0 && nowUs - view.repStartUs < 800_000)),
       );
 
       const goCountingDown = leadIn
@@ -399,7 +405,8 @@
             {#if leadIn}
               <p data-testid="lead-in-info">
                 <strong>Starts from throttle:</strong>
-                {leadIn.level}% for {leadIn.holdMs / 1000}s, then lift and brake
+                {leadIn.level}% for {leadIn.holdMs / 1000}s, lift {liftWindowMs(leadIn)} ms before the
+                brake point
               </p>
             {/if}
             <p><strong>Reps:</strong> {selectedDrill.reps}</p>
@@ -421,13 +428,11 @@
                   <p class="countdown-number">{countdownText}</p>
                 {/key}
               </div>
-            {:else if view.runState === "throttle"}
+            {:else if view.runState === "throttle" && !lifting}
               <div class="overlay" aria-live="assertive" data-testid="throttle-cue">
                 <p class="countdown-label">Throttle to {leadIn?.level}%</p>
-                <p class="countdown-number" class:text-cue={view.throttleHoldEndsUs <= 0}>
-                  {view.throttleHoldEndsUs > 0
-                    ? throttleRemainingSec.toFixed(1)
-                    : "Press the throttle"}
+                <p class="countdown-number" class:text-cue={view.throttleLiftUs <= 0}>
+                  {view.throttleLiftUs > 0 ? throttleRemainingSec.toFixed(1) : "Press the throttle"}
                 </p>
               </div>
             {:else if view.runState === "finished"}
@@ -662,18 +667,30 @@
 </div>
 
 {#snippet overlapBlock(overlap: Overlap)}
-  <div
-    class="overlap"
-    class:clean={Math.round(overlap.overlapMs) === 0 &&
-      Math.round(overlap.peakThrottle * 100) === 0}
-    data-testid="overlap"
-  >
-    <small title="Time both pedals were pressed at once, during the throttle hold and the rep."
-      >Overlap {Math.round(overlap.overlapMs)} ms</small
-    >
-    <small title="Highest throttle while the brake was pressed."
-      >Peak throttle while braking {Math.round(overlap.peakThrottle * 100)}%</small
-    >
+  {@const coast = overlap.coastMs !== undefined && Math.round(overlap.coastMs) > 0}
+  {@const hasOverlap = Math.round(overlap.overlapMs) > 0}
+  <div class="overlap" data-testid="overlap">
+    {#if coast}
+      <small data-testid="coast" title="Time from throttle release to brake application."
+        >Coast {Math.round(overlap.coastMs!)} ms</small
+      >
+    {/if}
+    {#if hasOverlap}
+      <small
+        data-testid="overlap-time"
+        title="Time both pedals were pressed at once, and the highest throttle while braking."
+        >Overlap {Math.round(overlap.overlapMs)} ms, peak throttle {Math.round(
+          overlap.peakThrottle * 100,
+        )}%</small
+      >
+    {/if}
+    {#if !coast && !hasOverlap}
+      {#if overlap.coastMs !== undefined}
+        <small>No gap, no overlap</small>
+      {:else}
+        <small>No brake input</small>
+      {/if}
+    {/if}
   </div>
 {/snippet}
 
@@ -1041,9 +1058,6 @@
   }
   .overlap small {
     white-space: nowrap;
-  }
-  .overlap.clean {
-    color: var(--throttle);
   }
   .panel > .overlap:only-child {
     margin-top: 0;

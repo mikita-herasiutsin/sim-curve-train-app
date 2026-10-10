@@ -715,11 +715,47 @@ describe("Drill page", () => {
     expect(localStorage.getItem("sct:last_preset")).toBe("advanced");
   });
 
-  it("shows lead-in-info in the drill details for a lead-in drill", async () => {
+  const explicitLiftPreset: Preset = {
+    schemaVersion: 1,
+    id: "lead-in-explicit",
+    name: "Lead-In Explicit Drills",
+    description: "",
+    drills: [
+      {
+        id: "brake-hold-explicit",
+        name: "Brake hold with explicit lift",
+        type: "hold",
+        pedal: "brake",
+        reps: 3,
+        leadInMs: 1000,
+        tolerance: 5,
+        target: 70,
+        holdMs: 2000,
+        throttleLeadIn: {
+          level: 80,
+          holdMs: 1500,
+          liftMs: 500,
+        },
+      },
+    ],
+  };
+
+  it("shows lead-in-info with default lift time (300 ms) in drill details", async () => {
     presetsList = [leadInHoldPreset];
     render(DrillPage);
     const info = await screen.findByTestId("lead-in-info");
-    expect(info).toHaveTextContent("Starts from throttle: 80% for 1.5s, then lift and brake");
+    expect(info).toHaveTextContent(
+      "Starts from throttle: 80% for 1.5s, lift 300 ms before the brake point",
+    );
+  });
+
+  it("shows lead-in-info with explicit liftMs in drill details", async () => {
+    presetsList = [explicitLiftPreset];
+    render(DrillPage);
+    const info = await screen.findByTestId("lead-in-info");
+    expect(info).toHaveTextContent(
+      "Starts from throttle: 80% for 1.5s, lift 500 ms before the brake point",
+    );
   });
 
   it("shows throttle cue with 'Press the throttle' on throttleWait and seconds on throttleHoldStarted", async () => {
@@ -739,64 +775,108 @@ describe("Drill page", () => {
       event: "throttleHoldStarted",
       rep: 0,
       startUs: 1_000_000,
-      endsUs: 2_500_000,
+      liftUs: 2_500_000,
+      endsUs: 2_800_000,
     });
     await waitFor(() => expect(cue).toHaveTextContent("1.5"));
     expect(cue).not.toHaveTextContent("Press the throttle");
   });
 
-  it("renders overlap block after repScored and has class clean only when both numbers round to 0", async () => {
+  it("hides throttle cue and shows lift cue once clock passes liftUs", async () => {
+    let nowUs = 1_000_000;
+    vi.spyOn(pedalStream, "dataNowUs").mockImplementation(() => nowUs);
     presetsList = [leadInHoldPreset];
     render(DrillPage);
     await startDrill();
     await waitFor(() => expect(drillChannel).not.toBeNull());
 
-    // Both non-zero: not clean
     drillChannel!.onmessage({
-      event: "repScored",
+      event: "throttleHoldStarted",
       rep: 0,
-      score: holdScore,
-      overlap: { overlapMs: 25, peakThrottle: 0.15 },
+      startUs: 1_000_000,
+      liftUs: 2_200_000,
+      endsUs: 2_500_000,
     });
-    let overlapEl = await screen.findByTestId("overlap");
-    expect(overlapEl).toHaveTextContent("Overlap 25 ms");
-    expect(overlapEl).toHaveTextContent("Peak throttle while braking 15%");
-    expect(overlapEl).not.toHaveClass("clean");
+    expect(await screen.findByTestId("throttle-cue")).toBeInTheDocument();
+    expect(screen.queryByTestId("lift-cue")).toBeNull();
 
-    // overlapMs rounds to 0, peakThrottle does not: not clean
-    drillChannel!.onmessage({
-      event: "repScored",
-      rep: 0,
-      score: holdScore,
-      overlap: { overlapMs: 0.4, peakThrottle: 0.1 },
-    });
-    overlapEl = await screen.findByTestId("overlap");
-    expect(overlapEl).toHaveTextContent("Overlap 0 ms");
-    expect(overlapEl).toHaveTextContent("Peak throttle while braking 10%");
-    expect(overlapEl).not.toHaveClass("clean");
+    nowUs = 2_250_000;
+    await waitFor(() => expect(screen.queryByTestId("throttle-cue")).not.toBeInTheDocument());
+    expect(await screen.findByTestId("lift-cue")).toBeInTheDocument();
+  });
 
-    // peakThrottle rounds to 0, overlapMs does not: not clean
-    drillChannel!.onmessage({
-      event: "repScored",
-      rep: 0,
-      score: holdScore,
-      overlap: { overlapMs: 14, peakThrottle: 0.002 },
-    });
-    overlapEl = await screen.findByTestId("overlap");
-    expect(overlapEl).toHaveTextContent("Overlap 14 ms");
-    expect(overlapEl).toHaveTextContent("Peak throttle while braking 0%");
-    expect(overlapEl).not.toHaveClass("clean");
+  it("renders coast line when coastMs > 0", async () => {
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
 
-    // Both round to 0: clean
     drillChannel!.onmessage({
       event: "repScored",
       rep: 0,
       score: holdScore,
-      overlap: { overlapMs: 0.2, peakThrottle: 0.003 },
+      overlap: { overlapMs: 0, peakThrottle: 0, coastMs: 180 },
     });
-    overlapEl = await screen.findByTestId("overlap");
-    expect(overlapEl).toHaveTextContent("Overlap 0 ms");
-    expect(overlapEl).toHaveTextContent("Peak throttle while braking 0%");
-    expect(overlapEl).toHaveClass("clean");
+    const overlapEl = await screen.findByTestId("overlap");
+    const coastEl = within(overlapEl).getByTestId("coast");
+    expect(coastEl).toHaveTextContent("Coast 180 ms");
+    expect(coastEl).toHaveAttribute("title", "Time from throttle release to brake application.");
+    expect(within(overlapEl).queryByTestId("overlap-time")).toBeNull();
+  });
+
+  it("renders overlap line when overlapMs > 0 and coastMs is 0", async () => {
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({
+      event: "repScored",
+      rep: 0,
+      score: holdScore,
+      overlap: { overlapMs: 60, peakThrottle: 0.4, coastMs: 0 },
+    });
+    const overlapEl = await screen.findByTestId("overlap");
+    const overlapTimeEl = within(overlapEl).getByTestId("overlap-time");
+    expect(overlapTimeEl).toHaveTextContent("Overlap 60 ms, peak throttle 40%");
+    expect(overlapTimeEl).toHaveAttribute(
+      "title",
+      "Time both pedals were pressed at once, and the highest throttle while braking.",
+    );
+    expect(within(overlapEl).queryByTestId("coast")).toBeNull();
+  });
+
+  it("renders 'No gap, no overlap' when both coastMs and overlapMs are 0", async () => {
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({
+      event: "repScored",
+      rep: 0,
+      score: holdScore,
+      overlap: { overlapMs: 0, peakThrottle: 0, coastMs: 0 },
+    });
+    const overlapEl = await screen.findByTestId("overlap");
+    expect(overlapEl).toHaveTextContent("No gap, no overlap");
+    expect(within(overlapEl).queryByTestId("coast")).toBeNull();
+    expect(within(overlapEl).queryByTestId("overlap-time")).toBeNull();
+  });
+
+  it("renders 'No brake input' when neither line renders and coastMs is undefined", async () => {
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({
+      event: "repScored",
+      rep: 0,
+      score: holdScore,
+      overlap: { overlapMs: 0, peakThrottle: 0 },
+    });
+    const overlapEl = await screen.findByTestId("overlap");
+    expect(overlapEl).toHaveTextContent("No brake input");
   });
 });

@@ -30,7 +30,7 @@ Every drill shares a set of common fields, plus specific fields determined by th
 | `leadInMs` | integer | Optional (default: `3000`) | `1000` to `10000` | Lead-in preparation countdown before each repetition in milliseconds. GO shows for its last 1000 ms. |
 | `tolerance` | number | Optional (default: `10`, D-17) | `0.5` to `50.0` | Half-width of the tolerance band in percentage points: `5` means the target ±5%. |
 | `decimals` | integer | Optional (default: `0`) | `0` or `1` | Digits after the decimal point when the UI shows percentages for this drill. |
-| `throttleLeadIn` | object | Optional | `level`: `20` to `100`, `holdMs`: `500` to `5000` | Requires holding the throttle at a set level before starting a brake repetition (see [Throttle lead-in](#throttle-lead-in)). |
+| `throttleLeadIn` | object | Optional | `level`: `20` to `100`, `holdMs`: `500` to `5000`, `liftMs` (optional, default `300`): `0` to `3000` | Requires holding the throttle at a set level before starting a brake repetition (see [Throttle lead-in](#throttle-lead-in)). |
 
 ### Hold Drill Fields (`"type": "hold"`)
 
@@ -67,13 +67,13 @@ A trace drill specifies an array of two-element arrays `[t, value]`, where:
 
 The optional `throttleLeadIn` object configures a throttle hold that must be satisfied before a brake repetition begins. It is allowed only on drills with `"pedal": "brake"`, supporting both hold and trace drills. Starting such a drill needs the throttle pedal assigned on the Devices page.
 
-The object accepts two properties: `level` (target throttle percentage to hold, from `20` to `100`) and `holdMs` (required hold duration in milliseconds, from `500` to `5000`). Unknown keys inside `throttleLeadIn` are rejected.
+The object accepts three properties: `level` (target throttle percentage to hold, from `20` to `100`), `holdMs` (required hold duration in milliseconds, from `500` to `5000`) and `liftMs` (optional lift window in milliseconds, from `0` to `3000`, default `300`). Unknown keys inside `throttleLeadIn` are rejected.
 
 After the `leadInMs` preparation countdown completes, the drill waits until the throttle is at `level - 10` percentage points or above. There is no timeout while waiting. The user then holds the throttle for `holdMs`. If the throttle falls below `level - 15` points during the hold, the drill waits again and the hold restarts. The 5-point gap between the two thresholds keeps a throttle resting near `level - 10` from restarting the hold on every sample.
 
-When the hold completes, the UI shows LIFT and the brake rep starts, with hold or trace timing counting from that moment. While the drill waits and during the hold, the audio tone beeps when the throttle is below the accepted range; during the rep it beeps against the brake target as usual.
+When the hold completes, the UI shows LIFT. The brake point comes `liftMs` later, and the brake rep starts there, with hold or trace timing counting from the brake point. The driver may lift any time in this lift window, and lifting inside it never restarts the hold. A short gap between lifting and braking is normal in iRacing, so a coast before the brake point costs no score. While the drill waits and during the hold, the audio tone beeps when the throttle is below the accepted range. It is silent in the lift window, and during the rep it beeps against the brake target as usual.
 
-After each rep of such a drill the app shows overlap: the time both pedals were above 5 % at once (during the hold and the rep), and the peak throttle while both pedals were above 5 %. The score does not change.
+After each rep of such a drill the app shows overlap: the time both pedals were above 5 % at once (during the hold, the lift window and the rep), and the peak throttle while both pedals were above 5 %. Each rep also reports the coast time, from the last time the throttle dropped to 5 % or below to the first sample with the brake above 5 %. The coast is 0 if the throttle was still above 5 % when the brake went on, and absent if the brake never went on. The score does not change.
 
 Here is an example of a brake trace drill configured with a throttle lead-in:
 
@@ -103,6 +103,12 @@ Here is an example of a brake trace drill configured with a throttle lead-in:
 }
 ```
 
+Endurance drivers lift about a second early and coast to save fuel. This lead-in gives a 1.2 s lift window before the brake point:
+
+```json
+"throttleLeadIn": { "level": 100, "holdMs": 2000, "liftMs": 1200 }
+```
+
 ## Validation Rules
 
 The parser validates all presets strictly upon loading:
@@ -121,7 +127,7 @@ The parser validates all presets strictly upon loading:
     - Timestamps must be strictly increasing (`t[n] > t[n - 1]`).
     - Every value must be finite and between `0.0` and `100.0`.
     - The total duration (the final point timestamp) must be between `500` and `15000` ms. The ±150 ms band needs a trace well over 300 ms, and 15 s plus the 1 s GO fits the UI's 20 s pedal history.
-11. `throttleLeadIn` (if present) is allowed only on drills with `pedal` set to `"brake"`. The `level` value must be finite and between `20` and `100`. The `holdMs` value must be an integer between `500` and `5000`. Unknown keys inside `throttleLeadIn` are rejected.
+11. `throttleLeadIn` (if present) is allowed only on drills with `pedal` set to `"brake"`. The `level` value must be finite and between `20` and `100`. The `holdMs` value must be an integer between `500` and `5000`. The `liftMs` value (if present) must be an integer between `0` and `3000`. Unknown keys inside `throttleLeadIn` are rejected.
 12. Unknown fields are rejected at both the preset and drill level.
 13. Directories loaded via the directory loader must not contain duplicate preset IDs across different files.
 

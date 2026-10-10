@@ -446,7 +446,8 @@ impl Stream {
         }
         if let Some(audio) = &drill.audio {
             // Beeps while a rep is active, and against the throttle level while a lead-in drill
-            // waits for or holds the throttle: silent in the countdown and the rest pause.
+            // waits for or holds the throttle: silent in the countdown, the lift window (the
+            // brake has no target before the rep) and the rest pause.
             // In a rep the target is the nearest point of the band, so the tone measures the
             // distance outside the timing-window envelope. `max`/`min` never panic, unlike
             // `clamp`.
@@ -458,7 +459,7 @@ impl Stream {
                 Phase::ThrottleWait { .. } | Phase::ThrottleHold { .. } => (
                     drill
                         .run
-                        .throttle_target_at()
+                        .throttle_target_at(sample.t_us)
                         .map(|level| throttle.max(level)),
                     throttle,
                     THROTTLE_ARM_MARGIN / (1.0 - BAND_HYSTERESIS),
@@ -1166,12 +1167,13 @@ mod tests {
     }
 
     /// A brake drill (1 s countdown, 1 s hold at 70 %) that starts from the throttle held at
-    /// 80 % for 1 s.
+    /// 80 % for 1 s, with the default 300 ms lift window.
     fn lead_in_drill() -> Drill {
         Drill {
             throttle_lead_in: Some(ThrottleLeadIn {
                 level: 80.0,
                 hold_ms: 1000,
+                lift_ms: None,
             }),
             ..drill(Pedal::Brake)
         }
@@ -1293,10 +1295,29 @@ mod tests {
         );
         assert_eq!(audio.pulse_rate(), 0.0);
 
-        // Full throttle stays silent.
-        for ms in 1_211..1_300 {
+        // Full throttle stays silent up to the LIFT cue at 2.21 s.
+        for ms in 1_211..2_210 {
             stream.step_drill(&pedals_at(ms * 1000, 0.0, 1.0));
         }
+        assert_eq!(audio.pulse_rate(), 0.0);
+
+        // Throttle off in the lift window (2.21 s to the brake point at 2.51 s): the hold
+        // goes on and the tone stays silent.
+        for ms in 2_210..2_500 {
+            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.0));
+        }
+        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
+        assert!(
+            matches!(
+                phase,
+                Some(Phase::ThrottleHold {
+                    lift_us: 2_210_000,
+                    ends_us: 2_510_000,
+                    ..
+                })
+            ),
+            "{phase:?}"
+        );
         assert_eq!(audio.pulse_rate(), 0.0);
     }
 }

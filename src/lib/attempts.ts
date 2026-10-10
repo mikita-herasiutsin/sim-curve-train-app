@@ -132,6 +132,8 @@ export function bestTotals(presetId: string): Promise<Record<string, number>> {
 /** One step of a warm-up run, in run order. Mirrors `sct_core::attempts::WarmUpStepResult`. */
 export interface WarmUpStepResult {
   drillId: string;
+  /** Planned rep count of the step. */
+  reps: number;
   skipped: boolean;
   attemptId: number | null;
   score: number | null;

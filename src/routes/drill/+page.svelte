@@ -146,23 +146,14 @@
             const playable = playableDrills(preset);
             selectedPreset = preset;
 
-            const fromParam = params.get("preset");
-            const matchedPreset = fromParam ? presets.find((pr) => pr.id === fromParam) : undefined;
-            const isWarmUpMode =
-              params.get("warmup") === "1" &&
-              matchedPreset !== undefined &&
-              hasWarmUp(matchedPreset);
-            if (isWarmUpMode && matchedPreset) {
-              const plan = warmUpPlan(matchedPreset, new Date().toISOString());
+            if (params.get("warmup") === "1" && hasWarmUp(preset)) {
+              const plan = warmUpPlan(preset, new Date().toISOString());
               if (plan) {
                 warmUp = startWarmUp(plan);
                 selectedDrill = currentDrill(warmUp);
-              } else {
-                warmUp = null;
-                selectedDrill =
-                  playable.find((d) => d.id === params.get("drill")) ?? playable[0] ?? null;
               }
-            } else {
+            }
+            if (!selectedDrill) {
               warmUp = null;
               selectedDrill =
                 playable.find((d) => d.id === params.get("drill")) ?? playable[0] ?? null;
@@ -235,7 +226,7 @@
   });
 
   $effect(() => {
-    if (view.runState === "idle" && warmUp && isDone(warmUp) && savedWarmUp !== warmUp) {
+    if (warmUp && isDone(warmUp) && savedWarmUp !== warmUp) {
       savedWarmUp = warmUp;
       warmUpSaveStatus = "saving";
       warmUpSaveError = null;
@@ -325,6 +316,9 @@
     abortDrillRun(sourceStatus.token).catch((e) => {
       console.error(e);
       aborting = false;
+      if (activeRecord) {
+        activeRecord.skipped = false;
+      }
       errorMessage = `Failed to abort drill: ${e}`;
     });
   }
@@ -589,7 +583,11 @@
                       if (warmUp) selectedDrill = currentDrill(warmUp);
                     }}
                   >
-                    {isDone(warmUp) ? "See Summary" : "Next Drill"}
+                    {(
+                      stepFinishing ? warmUp.index >= warmUp.plan.drills.length - 1 : isDone(warmUp)
+                    )
+                      ? "See Summary"
+                      : "Next Drill"}
                   </button>
                 {:else}
                   <button class="btn-primary mt" onclick={restart}>Play Again</button>

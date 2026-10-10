@@ -158,7 +158,10 @@ describe("warm-up execution flow", () => {
     // Step 1: Complete
     const step1 = completeStep(initial, { attemptId: 10, score: 85.5 });
     expect(step1.index).toBe(1);
-    expect(step1.results).toEqual([{ drillId: "hb", skipped: false, attemptId: 10, score: 85.5 }]);
+    expect(step1.results).toEqual([
+      { drillId: "hb", reps: 2, skipped: false, attemptId: 10, score: 85.5 },
+    ]);
+    expect(step1.results[0].reps).toBe(2);
     expect(isDone(step1)).toBe(false);
     expect(currentDrill(step1)).toEqual({ ...traceThrottle, reps: 3 });
 
@@ -166,9 +169,10 @@ describe("warm-up execution flow", () => {
     const step2 = skipStep(step1, 11);
     expect(step2.index).toBe(2);
     expect(step2.results).toEqual([
-      { drillId: "hb", skipped: false, attemptId: 10, score: 85.5 },
-      { drillId: "tt", skipped: true, attemptId: 11, score: null },
+      { drillId: "hb", reps: 2, skipped: false, attemptId: 10, score: 85.5 },
+      { drillId: "tt", reps: 3, skipped: true, attemptId: 11, score: null },
     ]);
+    expect(step2.results[1].reps).toBe(3);
     expect(isDone(step2)).toBe(false);
     expect(currentDrill(step2)).toEqual({ ...holdThrottle, reps: 1 });
 
@@ -176,10 +180,11 @@ describe("warm-up execution flow", () => {
     const step3 = completeStep(step2, { attemptId: 12, score: 92 });
     expect(step3.index).toBe(3);
     expect(step3.results).toEqual([
-      { drillId: "hb", skipped: false, attemptId: 10, score: 85.5 },
-      { drillId: "tt", skipped: true, attemptId: 11, score: null },
-      { drillId: "ht", skipped: false, attemptId: 12, score: 92 },
+      { drillId: "hb", reps: 2, skipped: false, attemptId: 10, score: 85.5 },
+      { drillId: "tt", reps: 3, skipped: true, attemptId: 11, score: null },
+      { drillId: "ht", reps: 1, skipped: false, attemptId: 12, score: 92 },
     ]);
+    expect(step3.results[2].reps).toBe(1);
     expect(isDone(step3)).toBe(true);
     expect(currentDrill(step3)).toBeNull();
 
@@ -212,10 +217,10 @@ describe("warmUpScore", () => {
 
   it("calculates mean with skipped and null scoring 0", () => {
     const results: WarmUpStepResult[] = [
-      { drillId: "d1", skipped: false, attemptId: 1, score: 80 },
-      { drillId: "d2", skipped: true, attemptId: 2, score: 90 }, // skipped: score ignored
-      { drillId: "d3", skipped: false, attemptId: 3, score: 60 },
-      { drillId: "d4", skipped: false, attemptId: null, score: null },
+      { drillId: "d1", reps: 5, skipped: false, attemptId: 1, score: 80 },
+      { drillId: "d2", reps: 5, skipped: true, attemptId: 2, score: 90 }, // skipped: score ignored
+      { drillId: "d3", reps: 5, skipped: false, attemptId: 3, score: 60 },
+      { drillId: "d4", reps: 5, skipped: false, attemptId: null, score: null },
     ];
     // (80 + 0 + 60 + 0) / 4 = 35
     expect(warmUpScore(results)).toBe(35);

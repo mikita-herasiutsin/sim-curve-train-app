@@ -106,12 +106,14 @@ Unknown keys inside `warmUp` or a step are strictly rejected.
 The warm-up estimate predicts total drill run time. It leaves out the time spent on screen between drills (such as transition screens and reviewing rep scores).
 
 Each drill step duration is calculated as:
-`set_ms(reps) = lead_in_ms + reps * rep_ms + (reps - 1) * DEFAULT_REST_MS`
+`set_ms(reps) = lead_in_ms + reps * rep_ms + (reps - 1) * DEFAULT_REST_MS` for hold drills, and
+`set_ms(reps) = lead_in_ms + reps * rep_ms + (reps - 1) * DEFAULT_REST_MS + reps * TRACE_LAG_MARGIN_MS` for trace drills.
 
 Where:
 - `lead_in_ms` is the drill lead-in countdown duration in milliseconds (`1000` to `10000` ms, default `3000` ms).
 - `rep_ms` is the duration of a single repetition in milliseconds: `holdMs` for hold drills, or the timestamp of the last control point for trace drills (0 if no points).
 - `DEFAULT_REST_MS` is the standard pause between repetitions (2000 ms).
+- `TRACE_LAG_MARGIN_MS` is the time the engine keeps each trace repetition running after its last point, before the rest starts (300 ms). Hold drills add nothing for it.
 - If `reps` is 0, the set duration equals `lead_in_ms`.
 
 The total warm-up estimate is the sum of `set_ms` across all warm-up steps.
@@ -124,6 +126,14 @@ Consider a warm-up step with drill `gt3-brake-hold-80` (`leadInMs`: 3000, `holdM
 - Reps time: 8 * 1500 ms = 12000 ms
 - Lead-in: 3000 ms
 - Step set length: 3000 + 12000 + 14000 = 29000 ms (29.0 s)
+
+A trace drill step adds the margin to each rep. Consider a step with drill `hairpin` (`leadInMs`: 2000, last point at 1500 ms) configured for 30 reps:
+- Rep duration: 1500 ms
+- Rest pauses: (30 - 1) * 2000 ms = 58000 ms
+- Reps time: 30 * 1500 ms = 45000 ms
+- Trace margin: 30 * 300 ms = 9000 ms
+- Lead-in: 2000 ms
+- Step set length: 2000 + 45000 + 58000 + 9000 = 114000 ms (114.0 s)
 
 Summing this set duration for all steps in the preset yields the total warm-up duration estimate.
 
@@ -197,7 +207,39 @@ Here is the complete `presets/sample.json` file included with the repository:
         [1000, 40],
         [1500, 0]
       ]
+    },
+    {
+      "id": "throttle-rolling-start-35",
+      "name": "Rolling start: throttle hold 35%",
+      "type": "hold",
+      "pedal": "throttle",
+      "target": 35,
+      "tolerance": 2,
+      "decimals": 1,
+      "holdMs": 10000,
+      "reps": 3,
+      "leadInMs": 3000
     }
-  ]
+  ],
+  "warmUp": {
+    "steps": [
+      {
+        "drill": "brake-hold-70",
+        "reps": 12
+      },
+      {
+        "drill": "throttle-hold-50",
+        "reps": 12
+      },
+      {
+        "drill": "hairpin",
+        "reps": 12
+      },
+      {
+        "drill": "throttle-rolling-start-35",
+        "reps": 4
+      }
+    ]
+  }
 }
 ```

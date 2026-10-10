@@ -129,7 +129,9 @@ impl Drill {
     /// Returns the estimated duration of a set of `reps` repetitions in milliseconds.
     ///
     /// Calculated as `lead_in_ms + reps * rep_ms() + (reps - 1) * DEFAULT_REST_MS`
-    /// using saturating arithmetic. When `reps` is 0, this returns `lead_in_ms`.
+    /// using saturating arithmetic. For [`DrillKind::Trace`] drills, each rep also adds
+    /// [`crate::drill_engine::TRACE_LAG_MARGIN_MS`], because the engine ends a trace rep that
+    /// many milliseconds after its last point. When `reps` is 0, this returns `lead_in_ms`.
     #[must_use]
     pub fn set_ms(&self, reps: u32) -> u32 {
         if reps == 0 {
@@ -139,9 +141,15 @@ impl Drill {
         let rest_duration = reps
             .saturating_sub(1)
             .saturating_mul(crate::drill_engine::DEFAULT_REST_MS);
+        let margin_duration = if matches!(self.kind, DrillKind::Trace { .. }) {
+            reps.saturating_mul(crate::drill_engine::TRACE_LAG_MARGIN_MS)
+        } else {
+            0
+        };
         self.lead_in_ms
             .saturating_add(reps_duration)
             .saturating_add(rest_duration)
+            .saturating_add(margin_duration)
     }
 }
 
@@ -1886,9 +1894,9 @@ mod tests {
         let trace = valid_trace_drill(); // duration = 1500, lead_in_ms = 2000
         assert_eq!(trace.rep_ms(), 1500);
         assert_eq!(trace.set_ms(0), 2000);
-        assert_eq!(trace.set_ms(1), 2000 + 1500);
-        // reps 4: 2000 + 4 * 1500 + 3 * 2000 = 14000
-        assert_eq!(trace.set_ms(4), 14000);
+        assert_eq!(trace.set_ms(1), 2000 + 1500 + 300);
+        // reps 4: 2000 + 4 * 1500 + 3 * 2000 + 4 * 300 = 15200
+        assert_eq!(trace.set_ms(4), 15200);
     }
 
     #[test]
@@ -1952,9 +1960,9 @@ mod tests {
         assert!(preset.warm_up.is_some());
         // Hand-computed:
         // brake-hold-70: 3000 + 20 * 2000 + 19 * 2000 = 81_000 ms
-        // hairpin: 2000 + 30 * 1500 + 29 * 2000 = 105_000 ms
-        // Total: 81_000 + 105_000 = 186_000 ms
-        assert_eq!(preset.warm_up_estimate_ms(), Some(186_000));
+        // hairpin: 2000 + 30 * 1500 + 29 * 2000 + 30 * 300 = 114_000 ms
+        // Total: 81_000 + 114_000 = 195_000 ms
+        assert_eq!(preset.warm_up_estimate_ms(), Some(195_000));
     }
 
     #[test]
@@ -2112,6 +2120,52 @@ mod tests {
                 ref message
             } if message.starts_with("warmUp: ") && message.contains("estimated duration") && message.contains("180s and 300s")
         ));
+    }
+
+    /// A preset whose only drill is a brake hold with a 1000 ms lead-in, and whose warm-up
+    /// runs that drill `reps` times.
+    fn single_hold_warm_up(hold_ms: u32, reps: u32) -> Preset {
+        let mut preset = valid_preset();
+        preset.drills = vec![Drill {
+            lead_in_ms: 1000,
+            kind: DrillKind::Hold {
+                target: 70.0,
+                hold_ms,
+            },
+            ..valid_hold_drill()
+        }];
+        preset.warm_up = Some(WarmUp {
+            steps: vec![WarmUpStep {
+                drill: "brake-hold-70".to_string(),
+                reps,
+            }],
+        });
+        preset
+    }
+
+    #[test]
+    fn warm_up_estimate_boundaries_are_inclusive() {
+        // Estimate with lead-in 1000 ms: 1000 + reps * (hold_ms + 2000) - 2000.
+        let cases = [
+            // (reps, hold_ms, estimate_ms, valid)
+            (9, 18_111, 179_999, false),
+            (4, 43_250, 180_000, true),
+            (5, 58_200, 300_000, true),
+            (23, 11_087, 300_001, false),
+        ];
+        for (reps, hold_ms, estimate_ms, valid) in cases {
+            let preset = single_hold_warm_up(hold_ms, reps);
+            assert_eq!(preset.warm_up_estimate_ms(), Some(estimate_ms));
+            let result = preset.validate();
+            assert_eq!(result.is_ok(), valid, "estimate {estimate_ms} ms");
+            if !valid {
+                assert!(matches!(
+                    result,
+                    Err(PresetError::Invalid { drill: None, ref message })
+                        if message.contains("estimated duration")
+                ));
+            }
+        }
     }
 
     #[test]

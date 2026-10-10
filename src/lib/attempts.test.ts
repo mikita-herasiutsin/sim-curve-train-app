@@ -116,6 +116,7 @@ describe("attempts IPC wrappers", () => {
       steps: [
         {
           drillId: "hold-brake-70",
+          reps: 5,
           skipped: false,
           attemptId: 42,
           score: 88.5,

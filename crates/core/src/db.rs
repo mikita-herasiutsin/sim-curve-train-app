@@ -58,11 +58,14 @@ pub const MIGRATIONS: &[&str] = &[
         run_id INTEGER NOT NULL REFERENCES warm_up_run (id) ON DELETE CASCADE, \
         step_index INTEGER NOT NULL, \
         drill_id TEXT NOT NULL, \
+        reps INTEGER NOT NULL, \
         skipped INTEGER NOT NULL, \
         attempt_id INTEGER REFERENCES attempt (id) ON DELETE SET NULL, \
         score REAL, \
         PRIMARY KEY (run_id, step_index)\
-    );",
+    ); \
+    CREATE INDEX idx_warm_up_step_attempt ON warm_up_step (attempt_id); \
+    CREATE INDEX idx_warm_up_run_preset_started ON warm_up_run (preset_id, started_at DESC, id DESC);",
 ];
 
 /// Applies pending schema migrations inside a transaction.
@@ -184,6 +187,24 @@ mod tests {
             )
             .unwrap();
         assert!(warm_up_step_exists);
+    }
+
+    #[test]
+    fn fresh_db_has_warm_up_indexes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure_connection(&conn).unwrap();
+        apply_migrations(&mut conn).unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(names.iter().any(|n| n == "idx_warm_up_step_attempt"));
+        assert!(names.iter().any(|n| n == "idx_warm_up_run_preset_started"));
     }
 
     #[test]

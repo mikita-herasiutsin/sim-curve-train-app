@@ -18,13 +18,7 @@ export interface WarmUpProgress {
 
 /** True when warmUp has at least one step whose drill exists and isPlayable. */
 export function hasWarmUp(preset: Preset): boolean {
-  if (!preset.warmUp?.steps) {
-    return false;
-  }
-  return preset.warmUp.steps.some((step) => {
-    const drill = preset.drills.find((d) => d.id === step.drill);
-    return drill !== undefined && isPlayable(drill);
-  });
+  return warmUpPlan(preset, "") !== null;
 }
 
 /** Null without a usable warm-up; steps naming a missing or unplayable drill are dropped. */
@@ -87,6 +81,7 @@ export function completeStep(
       ...p.results,
       {
         drillId: drill.id,
+        reps: drill.reps,
         skipped: false,
         ...r,
       },
@@ -107,6 +102,7 @@ export function skipStep(p: WarmUpProgress, attemptId: number | null = null): Wa
       ...p.results,
       {
         drillId: drill.id,
+        reps: drill.reps,
         skipped: true,
         attemptId,
         score: null,

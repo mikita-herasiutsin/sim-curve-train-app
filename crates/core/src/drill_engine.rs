@@ -411,8 +411,8 @@ impl DrillRun {
     /// Target band `(lo, hi)` as fractions at timestamp `t_us`, with the same phase rules as
     /// [`Self::target_at`]. A hold drill gives `(target, target)`; a trace drill gives the
     /// range of the curve within ±[`RAMP_WINDOW_MS`], looked up at the nearest millisecond in
-    /// a table built once per run (this runs on the input thread). The tolerance is not
-    /// included.
+    /// a table built once per run (this runs per sample on the drill thread). The tolerance is
+    /// not included.
     #[must_use]
     pub fn band_at(&self, t_us: u64) -> Option<(f32, f32)> {
         match self.phase {

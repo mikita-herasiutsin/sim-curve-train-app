@@ -994,6 +994,61 @@ mod tests {
     }
 
     #[test]
+    fn bundled_presets_score_a_perfect_follow_and_punish_a_late_one() {
+        // Every drill in presets/ loads and scores: an exact follow earns an S, and a trace
+        // followed 250 ms late loses at least 5 points.
+        use crate::preset::DrillKind;
+        use crate::scoring::{HoldParams, score_hold};
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets");
+        let presets = crate::preset::load_dir(&dir).expect("presets/ loads");
+        let mut checked = Vec::new();
+        for preset in &presets {
+            for drill in &preset.drills {
+                let who = format!("{} / {}", preset.id, drill.id);
+                let (total, grade) = match &drill.kind {
+                    DrillKind::Trace { .. } => {
+                        let curve = drill.trace_curve().unwrap();
+                        let params = TraceParams::new(&curve, drill.tolerance_fraction());
+                        let exact =
+                            generate_synthetic_samples(&curve, START_US, 0.0, |_n, val| val);
+                        let score = score_trace(&exact, START_US, &params).unwrap();
+                        assert!(score.lag_ms.abs() < 1.0, "{who}: lag was {}", score.lag_ms);
+                        let late =
+                            generate_synthetic_samples(&curve, START_US, 250.0, |_n, val| val);
+                        let late = score_trace(&late, START_US, &params).unwrap();
+                        assert!(
+                            late.total <= score.total - 5.0,
+                            "{who}: 250 ms late scored {} against {}",
+                            late.total,
+                            score.total
+                        );
+                        (score.total, score.grade)
+                    }
+                    DrillKind::Hold { hold_ms, .. } => {
+                        let target = drill.target_fraction().unwrap();
+                        let params = HoldParams::new(target, drill.tolerance_fraction(), *hold_ms);
+                        let samples: Vec<ValueSample> = (0..=u64::from(*hold_ms) + 1000)
+                            .map(|ms| ValueSample::new(START_US - 500_000 + ms * 1000, target))
+                            .collect();
+                        let score = score_hold(&samples, START_US, &params).unwrap();
+                        (score.total, score.grade)
+                    }
+                };
+                assert!(
+                    total.is_finite() && total >= 95.0 && grade == Grade::S,
+                    "{who}: total {total} grade {grade:?}"
+                );
+                checked.push(format!("{}/{}", preset.id, drill.id));
+            }
+        }
+        assert!(
+            checked.iter().filter(|id| id.starts_with("gt3/")).count() == 6,
+            "expected the six GT3 drills, checked {checked:?}"
+        );
+    }
+
+    #[test]
     fn test_14_low_plateau_leaves_the_band() {
         let target = second_curve();
         let params = TraceParams::new(&target, 0.10);

@@ -1,5 +1,5 @@
 import { bandColor } from "./barsDraw";
-import { getGraphY } from "./geometry";
+import { formatPercentValue, getGraphY } from "./geometry";
 import { computeHorizontalGridLines } from "./graphDraw";
 import type { AppThemeColors } from "./theme";
 
@@ -217,6 +217,8 @@ export interface TraceViewState {
   user: [number, number][];
   /** Whether the user's latest value is inside the band at the playhead (colours the band). */
   inBand: boolean;
+  /** Number of decimals for the target % label at the now-line (default 0). */
+  decimals?: number;
 }
 
 export interface TracePhaseInput {
@@ -259,19 +261,155 @@ export function traceViewPhase(i: TracePhaseInput): TracePhase {
   };
 }
 
-/**
- * Draws the trace drill view: time axis from -GO_LEAD_MS to the duration with grid lines,
- * the t=0 line marking rep start, the envelope tolerance band, the target curve,
- * the user line, and the playhead.
- */
-export function drawTrace(
+export type TimeToX = (tMs: number) => number;
+export type ValueToY = (fraction: number) => number;
+
+/** Fills the ±150 ms envelope band (D-21): upper min(1, hi + tolerance), lower max(0, lo - tolerance) from curve.envelopeAt(t), at each time in `times` (ascending). Sets ctx.fillStyle = color. No-op when times.length < 2. */
+export function drawTraceBand(
+  ctx: CanvasRenderingContext2D,
+  curve: TraceCurve,
+  tolerance: number,
+  times: number[],
+  color: string,
+  xOf: TimeToX,
+  yOf: ValueToY,
+): void {
+  if (times.length < 2) return;
+
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  for (let i = 0; i < times.length; i++) {
+    const t = times[i];
+    const [, hi] = curve.envelopeAt(t);
+    const topVal = Math.min(1, hi + tolerance);
+    const x = xOf(t);
+    const y = yOf(topVal);
+    if (i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  for (let i = times.length - 1; i >= 0; i--) {
+    const t = times[i];
+    const [lo] = curve.envelopeAt(t);
+    const botVal = Math.max(0, lo - tolerance);
+    const x = xOf(t);
+    const y = yOf(botVal);
+    ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.fill();
+}
+
+/** Dashed (4,4) 2 px line in `color` of curve.valueAt sampled every 5 ms from fromMs to toMs, plus a final sample at toMs when (toMs - fromMs) % 5 !== 0. Resets line dash after. */
+export function drawTargetLine(
+  ctx: CanvasRenderingContext2D,
+  curve: TraceCurve,
+  fromMs: number,
+  toMs: number,
+  color: string,
+  xOf: TimeToX,
+  yOf: ValueToY,
+): void {
+  if (fromMs >= toMs) return;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([4, 4]);
+  ctx.beginPath();
+  let first = true;
+  for (let t = fromMs; t <= toMs; t += 5) {
+    const val = curve.valueAt(t);
+    const x = xOf(t);
+    const y = yOf(val);
+    if (first) {
+      ctx.moveTo(x, y);
+      first = false;
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  if ((toMs - fromMs) % 5 !== 0) {
+    const val = curve.valueAt(toMs);
+    const x = xOf(toMs);
+    const y = yOf(val);
+    ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+/** Solid 2.5 px round-joined, round-capped line in `color` through user points [tMs, fraction]. No-op when empty. */
+export function drawUserLine(
+  ctx: CanvasRenderingContext2D,
+  user: [number, number][],
+  color: string,
+  xOf: TimeToX,
+  yOf: ValueToY,
+): void {
+  if (user.length === 0) return;
+
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.5;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  for (let i = 0; i < user.length; i++) {
+    const [userT, userVal] = user[i];
+    const x = xOf(userT);
+    const y = yOf(userVal);
+    if (i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.stroke();
+}
+
+/** Rep-time ms visible left of the now-line. */
+export const GHOST_PAST_MS = 1000;
+/** Rep-time ms visible right of the now-line. */
+export const GHOST_FUTURE_MS = 3000;
+/** The now-line sits at this fraction of the width. Define it as GHOST_PAST_MS / (GHOST_PAST_MS + GHOST_FUTURE_MS), which is 0.25. */
+export const GHOST_NOW_FRAC: number = GHOST_PAST_MS / (GHOST_PAST_MS + GHOST_FUTURE_MS);
+
+/** X of the now-line: width * GHOST_NOW_FRAC. */
+export function ghostNowX(width: number): number {
+  return width * GHOST_NOW_FRAC;
+}
+
+/** X pixel for rep time tMs when the now-line shows rep time nowMs. Not clamped.
+ * ghostNowX(width) + (tMs - nowMs) * width / (GHOST_PAST_MS + GHOST_FUTURE_MS). Returns 0 when width <= 0. */
+export function ghostX(tMs: number, nowMs: number, width: number): number {
+  if (width <= 0) return 0;
+  return ghostNowX(width) + ((tMs - nowMs) * width) / (GHOST_PAST_MS + GHOST_FUTURE_MS);
+}
+
+/** Rep time shown at the now-line: playheadMs when not null; otherwise durationMs when hasUser (a rep just finished, freeze at its end), else -GO_LEAD_MS (idle before the first rep, the curve waits right of the line). */
+export function ghostNowMs(
+  playheadMs: number | null,
+  hasUser: boolean,
+  durationMs: number,
+): number {
+  if (playheadMs !== null) {
+    return playheadMs;
+  }
+  if (hasUser) {
+    return durationMs;
+  }
+  return -GO_LEAD_MS;
+}
+
+function drawGridBackground(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  state: TraceViewState,
   theme: AppThemeColors,
-  paddingTop = 18,
-  paddingBottom = 26,
+  paddingTop: number,
+  paddingBottom: number,
 ): void {
   // Clear canvas
   ctx.clearRect(0, 0, width, height);
@@ -301,6 +439,23 @@ export function drawTrace(
     // The 100% label goes below its line so it stays inside the plot.
     ctx.fillText(line.label, 8, line.fraction === 1 ? line.y + 9 : line.y - 7);
   }
+}
+
+/**
+ * Draws the trace drill view: time axis from -GO_LEAD_MS to the duration with grid lines,
+ * the t=0 line marking rep start, the envelope tolerance band, the target curve,
+ * the user line, and the playhead.
+ */
+export function drawTrace(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  state: TraceViewState,
+  theme: AppThemeColors,
+  paddingTop = 18,
+  paddingBottom = 26,
+): void {
+  drawGridBackground(ctx, width, height, theme, paddingTop, paddingBottom);
 
   const durationMs = state.curve.durationMs;
 
@@ -338,85 +493,31 @@ export function drawTrace(
     ctx.setLineDash([]);
   }
 
-  // Tolerance band as a filled polygon
-  // Band polygon: upper min(1, hi + tolerance), lower max(0, lo - tolerance) from envelopeAt,
-  // sampled every 10 ms across the domain plus at each point time.
-  if (state.curve.points.length >= 2 && durationMs > 0) {
-    const sampleTimes = state.curve.sampleTimes;
+  const xOf: TimeToX = (t) => traceX(t, durationMs, width, 0, 0, -GO_LEAD_MS);
+  const yOf: ValueToY = (v) => getGraphY(v, height, paddingTop, paddingBottom);
 
-    ctx.fillStyle = bandColor(state.inBand, theme);
-    ctx.beginPath();
-    for (let i = 0; i < sampleTimes.length; i++) {
-      const t = sampleTimes[i];
-      const [, hi] = state.curve.envelopeAt(t);
-      const topVal = Math.min(1, hi + state.tolerance);
-      const x = traceX(t, durationMs, width, 0, 0, -GO_LEAD_MS);
-      const y = getGraphY(topVal, height, paddingTop, paddingBottom);
-      if (i === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    }
-    for (let i = sampleTimes.length - 1; i >= 0; i--) {
-      const t = sampleTimes[i];
-      const [lo] = state.curve.envelopeAt(t);
-      const botVal = Math.max(0, lo - state.tolerance);
-      const x = traceX(t, durationMs, width, 0, 0, -GO_LEAD_MS);
-      const y = getGraphY(botVal, height, paddingTop, paddingBottom);
-      ctx.lineTo(x, y);
-    }
-    ctx.closePath();
-    ctx.fill();
+  // Tolerance band as a filled polygon
+  if (state.curve.points.length >= 2 && durationMs > 0) {
+    drawTraceBand(
+      ctx,
+      state.curve,
+      state.tolerance,
+      state.curve.sampleTimes,
+      bandColor(state.inBand, theme),
+      xOf,
+      yOf,
+    );
   }
 
   // Target curve: dashed line sampled from valueAt every 5 ms across the domain
   if (state.curve.points.length > 0 && durationMs > 0) {
-    ctx.strokeStyle = theme.text;
-    ctx.lineWidth = 2;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    let first = true;
-    for (let t = -GO_LEAD_MS; t <= durationMs; t += 5) {
-      const val = state.curve.valueAt(t);
-      const x = traceX(t, durationMs, width, 0, 0, -GO_LEAD_MS);
-      const y = getGraphY(val, height, paddingTop, paddingBottom);
-      if (first) {
-        ctx.moveTo(x, y);
-        first = false;
-      } else {
-        ctx.lineTo(x, y);
-      }
-    }
-    if (durationMs % 5 !== 0) {
-      const val = state.curve.valueAt(durationMs);
-      const x = traceX(durationMs, durationMs, width, 0, 0, -GO_LEAD_MS);
-      const y = getGraphY(val, height, paddingTop, paddingBottom);
-      ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
+    drawTargetLine(ctx, state.curve, -GO_LEAD_MS, durationMs, theme.text, xOf, yOf);
   }
 
   // User trace as a 2.5 px solid line in pedal colour
   if (state.user.length > 0 && durationMs > 0) {
-    ctx.strokeStyle = state.pedal === "brake" ? theme.brake : theme.throttle;
-    ctx.lineWidth = 2.5;
-    ctx.lineJoin = "round";
-    ctx.lineCap = "round";
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    for (let i = 0; i < state.user.length; i++) {
-      const [userT, userVal] = state.user[i];
-      const x = traceX(userT, durationMs, width, 0, 0, -GO_LEAD_MS);
-      const y = getGraphY(userVal, height, paddingTop, paddingBottom);
-      if (i === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
-      }
-    }
-    ctx.stroke();
+    const color = state.pedal === "brake" ? theme.brake : theme.throttle;
+    drawUserLine(ctx, state.user, color, xOf, yOf);
   }
 
   // Playhead as a 2 px vertical line in theme.accent
@@ -429,5 +530,138 @@ export function drawTrace(
     ctx.moveTo(x, paddingTop);
     ctx.lineTo(x, height - paddingBottom);
     ctx.stroke();
+  }
+}
+
+/**
+ * Draws the scrolling ghost trace view: curve scrolls right-to-left towards a fixed
+ * vertical now-line, with the target percentage drawn at the line.
+ */
+export function drawGhostTrace(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  state: TraceViewState,
+  theme: AppThemeColors,
+  paddingTop = 18,
+  paddingBottom = 26,
+): void {
+  // 1. clearRect + theme.surface background, horizontal grid lines and % labels
+  drawGridBackground(ctx, width, height, theme, paddingTop, paddingBottom);
+
+  const durationMs = state.curve.durationMs;
+
+  // 2. nowMs and coordinate mapping functions
+  const nowMs = ghostNowMs(state.playheadMs, state.user.length > 0, durationMs);
+  const xOf: TimeToX = (t) => ghostX(t, nowMs, width);
+  const yOf: ValueToY = (v) => getGraphY(v, height, paddingTop, paddingBottom);
+
+  // 3. When durationMs > 0: solid t=0 line, dashed 500 ms grid lines, solid t=durationMs line
+  if (durationMs > 0 && width > 0) {
+    const x0 = xOf(0);
+    if (x0 >= 0 && x0 <= width) {
+      ctx.strokeStyle = theme.textMuted;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(x0, paddingTop);
+      ctx.lineTo(x0, height - paddingBottom);
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = theme.border;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillStyle = theme.textMuted;
+
+    for (let tMs = 500; tMs <= durationMs; tMs += 500) {
+      const x = xOf(tMs);
+      if (x < 0 || x > width) continue;
+      ctx.beginPath();
+      ctx.moveTo(x, paddingTop);
+      ctx.lineTo(x, height - paddingBottom);
+      ctx.stroke();
+
+      if (x >= 16 && x <= width - 16) {
+        ctx.fillText(`${tMs / 1000} s`, x, height - 6);
+      }
+    }
+    ctx.setLineDash([]);
+
+    const xEnd = xOf(durationMs);
+    if (xEnd >= 0 && xEnd <= width) {
+      ctx.strokeStyle = theme.textMuted;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.moveTo(xEnd, paddingTop);
+      ctx.lineTo(xEnd, height - paddingBottom);
+      ctx.stroke();
+    }
+  }
+
+  const hasPoints = state.curve.points.length > 0 && durationMs > 0;
+
+  // 4. Band via drawTraceBand
+  if (state.curve.points.length >= 2 && durationMs > 0) {
+    const minBandT = nowMs - GHOST_PAST_MS - 10;
+    const maxBandT = nowMs + GHOST_FUTURE_MS + 10;
+    const times = state.curve.sampleTimes.filter((t) => t >= minBandT && t <= maxBandT);
+    drawTraceBand(
+      ctx,
+      state.curve,
+      state.tolerance,
+      times,
+      bandColor(state.inBand, theme),
+      xOf,
+      yOf,
+    );
+  }
+
+  // 5. Target line via drawTargetLine
+  if (hasPoints) {
+    const fromMs = Math.max(-GO_LEAD_MS, nowMs - GHOST_PAST_MS);
+    const toMs = Math.min(durationMs, nowMs + GHOST_FUTURE_MS);
+    if (fromMs < toMs) {
+      drawTargetLine(ctx, state.curve, fromMs, toMs, theme.text, xOf, yOf);
+    }
+  }
+
+  // 6. User line via drawUserLine
+  if (hasPoints && state.user.length > 0) {
+    const minUserT = nowMs - GHOST_PAST_MS - 50;
+    const userPoints = state.user.filter(([t]) => t >= minUserT);
+    const color = state.pedal === "brake" ? theme.brake : theme.throttle;
+    drawUserLine(ctx, userPoints, color, xOf, yOf);
+  }
+
+  // 7. Now-line: 2 px solid theme.accent vertical line at ghostNowX(width)
+  const nowX = ghostNowX(width);
+  ctx.strokeStyle = theme.accent;
+  ctx.lineWidth = 2;
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(nowX, paddingTop);
+  ctx.lineTo(nowX, height - paddingBottom);
+  ctx.stroke();
+
+  // 8. Target % label at the now-line
+  if (hasPoints) {
+    const v = state.curve.valueAt(nowMs);
+    const targetY = yOf(v);
+
+    ctx.fillStyle = theme.accent;
+    ctx.beginPath();
+    ctx.arc(nowX, targetY, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    const clampedY = Math.max(paddingTop + 8, Math.min(height - paddingBottom - 8, targetY));
+    ctx.font = 'bold 13px "Inter", system-ui, sans-serif';
+    ctx.fillStyle = theme.text;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(`${formatPercentValue(v, state.decimals ?? 0)}%`, nowX + 8, clampedY);
   }
 }

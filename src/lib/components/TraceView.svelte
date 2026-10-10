@@ -2,10 +2,11 @@
   import { onMount, onDestroy } from "svelte";
   import { pedalStream, type PedalStream } from "$lib/pedals/stream";
   import { readThemeColors, type AppThemeColors } from "$lib/pedals/theme";
-  import { onThemeChange } from "$lib/settings";
+  import { onThemeChange, type TraceViewMode } from "$lib/settings";
   import { toleranceOf, type TraceDrill } from "$lib/drill";
   import {
     drawTrace,
+    drawGhostTrace,
     TraceCurve,
     GO_LEAD_MS,
     traceViewPhase,
@@ -20,6 +21,8 @@
     active: boolean;
     countdownEndsUs?: number;
     countingDown?: boolean;
+    /** Playhead (whole rep, moving line) or ghost (curve scrolls to a fixed now-line). */
+    mode?: TraceViewMode;
   }
 
   let {
@@ -30,6 +33,7 @@
     active,
     countdownEndsUs = 0,
     countingDown = false,
+    mode = "playhead",
   }: Props = $props();
 
   let lastShownStartUs = 0;
@@ -110,9 +114,14 @@
       playheadMs,
       user,
       inBand,
+      decimals: drill.decimals ?? 0,
     };
 
-    drawTrace(ctx, width, height, state, theme, 18, 26);
+    if (mode === "ghost") {
+      drawGhostTrace(ctx, width, height, state, theme, 18, 26);
+    } else {
+      drawTrace(ctx, width, height, state, theme, 18, 26);
+    }
     ctx.restore();
   }
 
@@ -171,7 +180,7 @@
   });
 </script>
 
-<div class="trace-view-container" data-testid="trace-view" bind:this={containerEl}>
+<div class="trace-view-container" data-testid="trace-view" data-mode={mode} bind:this={containerEl}>
   <canvas
     bind:this={canvasEl}
     aria-label="Trace drill target curve"

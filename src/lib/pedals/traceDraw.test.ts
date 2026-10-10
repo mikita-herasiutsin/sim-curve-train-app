@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  drawGhostTrace,
   drawTrace,
+  drawTraceBand,
+  ghostNowMs,
+  ghostNowX,
+  ghostX,
+  GHOST_NOW_FRAC,
   GO_LEAD_MS,
   TraceCurve,
   traceDurationMs,
@@ -232,42 +238,43 @@ describe("traceX", () => {
   });
 });
 
+function makeMockContext(): CanvasRenderingContext2D {
+  return {
+    clearRect: vi.fn(),
+    fillRect: vi.fn(),
+    fillText: vi.fn(),
+    beginPath: vi.fn(),
+    moveTo: vi.fn(),
+    lineTo: vi.fn(),
+    stroke: vi.fn(),
+    fill: vi.fn(),
+    closePath: vi.fn(),
+    setLineDash: vi.fn(),
+    save: vi.fn(),
+    restore: vi.fn(),
+    arc: vi.fn(),
+  } as unknown as CanvasRenderingContext2D;
+}
+
+const baseState: TraceViewState = {
+  curve: new TraceCurve([
+    [0, 0],
+    [500, 100],
+    [1000, 50],
+    [1500, 0],
+  ]),
+  pedal: "brake",
+  tolerance: 0.06,
+  playheadMs: 500,
+  user: [
+    [0, 0],
+    [250, 0.4],
+    [500, 0.95],
+  ],
+  inBand: true,
+};
+
 describe("drawTrace", () => {
-  function makeMockContext(): CanvasRenderingContext2D {
-    return {
-      clearRect: vi.fn(),
-      fillRect: vi.fn(),
-      fillText: vi.fn(),
-      beginPath: vi.fn(),
-      moveTo: vi.fn(),
-      lineTo: vi.fn(),
-      stroke: vi.fn(),
-      fill: vi.fn(),
-      closePath: vi.fn(),
-      setLineDash: vi.fn(),
-      save: vi.fn(),
-      restore: vi.fn(),
-    } as unknown as CanvasRenderingContext2D;
-  }
-
-  const baseState: TraceViewState = {
-    curve: new TraceCurve([
-      [0, 0],
-      [500, 100],
-      [1000, 50],
-      [1500, 0],
-    ]),
-    pedal: "brake",
-    tolerance: 0.06,
-    playheadMs: 500,
-    user: [
-      [0, 0],
-      [250, 0.4],
-      [500, 0.95],
-    ],
-    inBand: true,
-  };
-
   it("renders background, grids, tolerance band, target curve, user trace, and playhead", () => {
     const ctx = makeMockContext();
     drawTrace(ctx, 600, 400, baseState, theme);
@@ -385,5 +392,92 @@ describe("traceViewPhase", () => {
       shownStartUs: 3_000_000,
       playheadMs: null,
     });
+  });
+});
+
+describe("ghost geometry", () => {
+  it("computes ghostNowX and GHOST_NOW_FRAC", () => {
+    expect(GHOST_NOW_FRAC).toBe(0.25);
+    expect(ghostNowX(800)).toBe(200);
+  });
+
+  it("projects tMs to ghostX", () => {
+    const width = 800;
+    const nowMs = 1200;
+    expect(ghostX(nowMs, nowMs, width)).toBe(0.25 * width);
+    expect(ghostX(nowMs - 1000, nowMs, width)).toBe(0);
+    expect(ghostX(nowMs + 3000, nowMs, width)).toBe(width);
+    expect(ghostX(nowMs + 1500, nowMs, width)).toBe(0.625 * width);
+    expect(ghostX(nowMs, nowMs, 0)).toBe(0);
+  });
+
+  it("determines ghostNowMs based on playhead and user history", () => {
+    const durationMs = 1500;
+    expect(ghostNowMs(420, false, durationMs)).toBe(420);
+    expect(ghostNowMs(null, true, durationMs)).toBe(durationMs);
+    expect(ghostNowMs(null, false, durationMs)).toBe(-GO_LEAD_MS);
+    expect(ghostNowMs(-500, false, durationMs)).toBe(-500);
+  });
+});
+
+describe("drawGhostTrace", () => {
+  it("renders band, now-line, target % label, and grid lines on baseState", () => {
+    const ctx = makeMockContext();
+    drawGhostTrace(ctx, 600, 400, baseState, theme);
+
+    // fills the band (closePath and fill called)
+    expect(ctx.closePath).toHaveBeenCalled();
+    expect(ctx.fill).toHaveBeenCalled();
+
+    // strokes the now-line at x = 150 for width 600 (moveTo(150, 18) and lineTo(150, 374))
+    expect(ctx.moveTo).toHaveBeenCalledWith(150, 18);
+    expect(ctx.lineTo).toHaveBeenCalledWith(150, 374);
+
+    // with playheadMs 500 (curve value 100% there) calls fillText("100%", 158, any number)
+    expect(ctx.fillText).toHaveBeenCalledWith("100%", 158, expect.any(Number));
+
+    // calls fillText("0.5 s", ...) when that grid line is in view
+    expect(ctx.fillText).toHaveBeenCalledWith("0.5 s", expect.any(Number), expect.any(Number));
+  });
+
+  it("formats target % label with decimals", () => {
+    const ctx = makeMockContext();
+    drawGhostTrace(ctx, 600, 400, { ...baseState, decimals: 1 }, theme);
+    expect(ctx.fillText).toHaveBeenCalledWith("100.0%", 158, expect.any(Number));
+  });
+});
+
+describe("drawTraceBand", () => {
+  it("on a flat curve: every moveTo/lineTo y equals yOf(value + tolerance) or yOf(value - tolerance)", () => {
+    const flatCurve = new TraceCurve([
+      [0, 50],
+      [1000, 50],
+    ]);
+    const ctx = makeMockContext();
+    const tolerance = 0.08;
+    const yOf = (v: number) => 400 - v * 300;
+    const xOf = (t: number) => t;
+
+    drawTraceBand(
+      ctx,
+      flatCurve,
+      tolerance,
+      flatCurve.sampleTimes,
+      "rgba(255, 255, 255, 0.2)",
+      xOf,
+      yOf,
+    );
+
+    const expectedUpperY = yOf(0.5 + tolerance);
+    const expectedLowerY = yOf(0.5 - tolerance);
+
+    const moveCalls = vi.mocked(ctx.moveTo).mock.calls;
+    const lineCalls = vi.mocked(ctx.lineTo).mock.calls;
+    const allCalls = [...moveCalls, ...lineCalls];
+
+    expect(allCalls.length).toBeGreaterThan(0);
+    for (const [, y] of allCalls) {
+      expect(y === expectedUpperY || y === expectedLowerY).toBe(true);
+    }
   });
 });

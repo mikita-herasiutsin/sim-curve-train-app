@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/core", "crates/telemetry-extract", "src-tauri"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-only"

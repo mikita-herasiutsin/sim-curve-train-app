@@ -6,7 +6,9 @@
 //!
 //! While a stream is active the thread polls the selected device at about 1 kHz, stamps every
 //! sample with a monotonic timestamp (`Instant`, which is QPC on Windows), keeps the last few
-//! seconds in a ring buffer and sends batches to the UI over a Tauri `Channel`.
+//! seconds in a ring buffer and sends batches to the UI over a Tauri `Channel`. A running drill
+//! gets each sample over a queue and runs on its own thread (`drill_thread`), so scoring a rep
+//! never delays a poll.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -17,7 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioFeedback;
-use sct_core::audio_map::{BAND_HYSTERESIS, ToneTracker};
+use crate::drill_thread::DrillThread;
 use sct_core::axis_detect::{AxisDetector, Detection};
 use sct_core::calibration::RangeCapture;
 use sct_core::device::{DeviceInfo, DevicesSnapshot, usb_ids_from_guid};
@@ -26,7 +28,7 @@ use sct_core::profile::{DeviceKey, DeviceProfile, Pedal, ProfileStore};
 use sct_core::ring_buffer::RingBuffer;
 use sct_core::stream::{PedalFrame, RateMeter, SampleBatch, StreamStats};
 
-use sct_core::drill_engine::{DrillEvent, DrillRun, Phase, THROTTLE_ARM_MARGIN};
+use sct_core::drill_engine::{DEFAULT_REST_MS, DrillEvent, DrillRun};
 use sct_core::preset::Drill;
 use sct_core::scoring::ValueSample;
 
@@ -81,33 +83,13 @@ enum Command {
 /// How long `start_drill` waits for the input thread to answer.
 const DRILL_REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// A drill running on the input thread.
-///
-/// Dropping it ends the UI's run: unless the engine already sent its own `SetFinished`, the
-/// drop sends one with the summary of the reps scored so far. That covers every way a stream
-/// can end, panics and unwinding included.
+/// A drill started on a stream. It runs on its own thread (see `drill_thread`); this side
+/// maps each sample to the drill's pedal and queues it.
 struct ActiveDrill {
-    run: DrillRun,
-    channel: Channel<DrillEvent>,
+    thread: DrillThread,
     /// Profile copied when the drill started, so the per-sample path takes no lock.
     profile: DeviceProfile,
-    /// The UI already got the terminal `SetFinished`.
-    finished: bool,
-    /// Audio feedback output; `None` when the app runs without it (and in tests).
-    audio: Option<AudioFeedback>,
-    tone: ToneTracker,
-}
-
-impl Drop for ActiveDrill {
-    fn drop(&mut self) {
-        if let Some(audio) = &self.audio {
-            audio.set_pulse_rate(0.0);
-        }
-        if !self.finished {
-            let summary = self.run.abort();
-            let _ = self.channel.send(DrillEvent::SetFinished { summary });
-        }
-    }
+    pedal: Pedal,
 }
 
 /// The stream the UI last asked for, shared with the input thread.
@@ -425,61 +407,23 @@ impl Stream {
         }
     }
 
-    /// Ends the running drill, if any. Dropping it tells the UI with a final `SetFinished`.
+    /// Ends the running drill, if any. Its thread then sends the UI a final `SetFinished`.
     fn finish_drill(&mut self) {
         self.active_drill = None;
     }
 
-    /// Feeds one sample to the running drill and forwards its events.
+    /// Queues one sample of the drill pedal, with the throttle for a lead-in, for the running
+    /// drill. Ends the drill once its thread stops taking samples.
     fn step_drill(&mut self, sample: &RawSample) {
-        let Some(drill) = self.active_drill.as_mut() else {
+        let Some(drill) = self.active_drill.as_ref() else {
             return;
         };
         let frame = PedalFrame::from_sample(&drill.profile, sample);
-        let value = pedal_value(&frame, drill.run.drill().pedal);
-        let throttle = frame.throttle;
-        for event in drill
-            .run
-            .push_pedals(ValueSample::new(sample.t_us, value), throttle)
+        let value = pedal_value(&frame, drill.pedal);
+        if !drill
+            .thread
+            .send(ValueSample::new(sample.t_us, value), frame.throttle)
         {
-            let _ = drill.channel.send(event);
-        }
-        if let Some(audio) = &drill.audio {
-            // Beeps while a rep is active, and against the throttle level while a lead-in drill
-            // waits for or holds the throttle: silent in the countdown, the lift window (the
-            // brake has no target before the rep) and the rest pause.
-            // In a rep the target is the nearest point of the band, so the tone measures the
-            // distance outside the timing-window envelope. `max`/`min` never panic, unlike
-            // `clamp`.
-            let (target, tone_value, tolerance) = match drill.run.phase() {
-                // Any throttle from the level up to full counts, as in the engine: the
-                // target is the nearest point of that range. The tolerance makes the tracker's
-                // re-entry limit `tolerance * (1 - BAND_HYSTERESIS)` equal the engine's arm
-                // margin, so the tone goes silent on the sample that arms the hold.
-                Phase::ThrottleWait { .. } | Phase::ThrottleHold { .. } => (
-                    drill
-                        .run
-                        .throttle_target_at(sample.t_us)
-                        .map(|level| throttle.max(level)),
-                    throttle,
-                    THROTTLE_ARM_MARGIN / (1.0 - BAND_HYSTERESIS),
-                ),
-                Phase::Active { .. } => (
-                    drill
-                        .run
-                        .band_at(sample.t_us)
-                        .map(|(lo, hi)| value.max(lo).min(hi)),
-                    value,
-                    drill.run.drill().tolerance_fraction(),
-                ),
-                _ => (None, value, drill.run.drill().tolerance_fraction()),
-            };
-            let rate = drill.tone.step(target, tone_value, tolerance);
-            audio.set_pulse_rate(rate);
-        }
-        if matches!(drill.run.phase(), Phase::Finished) {
-            // The engine sent `SetFinished` itself.
-            drill.finished = true;
             self.active_drill = None;
         }
     }
@@ -527,7 +471,8 @@ fn check_start<'a>(
 /// Starts `drill` on `stream`, replacing a running one, and answers on `reply`.
 ///
 /// The answer goes out before any event. If nobody is waiting for it any more (the caller
-/// timed out), the drill is not installed and no event is sent.
+/// timed out), the drill is not installed and no event is sent. A drill thread that can't be
+/// spawned is an error answer, and the running drill keeps going.
 fn start_drill(
     stream: Option<&mut Stream>,
     profile: Option<DeviceProfile>,
@@ -544,21 +489,25 @@ fn start_drill(
             return;
         }
     };
+    let pedal = drill.pedal;
+    let run = DrillRun::new(drill, DEFAULT_REST_MS);
+    let mut thread = match DrillThread::spawn(run, t_us, channel, audio) {
+        Ok(thread) => thread,
+        Err(error) => {
+            let _ = reply.send(Err(format!("failed to start the drill: {error}")));
+            return;
+        }
+    };
+    // Returning drops the parked thread, which then ends without an event.
     if reply.send(Ok(())).is_err() {
         return;
     }
     stream.finish_drill();
-    let mut run = DrillRun::new(drill, sct_core::drill_engine::DEFAULT_REST_MS);
-    for event in run.start(t_us) {
-        let _ = channel.send(event);
-    }
+    thread.start();
     stream.active_drill = Some(ActiveDrill {
-        run,
-        channel,
+        thread,
         profile,
-        finished: false,
-        audio,
-        tone: ToneTracker::default(),
+        pedal,
     });
 }
 
@@ -851,31 +800,13 @@ fn key_of(device: &DeviceInfo) -> DeviceKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drill_thread::tests::{drain, event_channel, so_far};
     use sct_core::calibration::AxisCalibration;
     use sct_core::preset::{DrillKind, ThrottleLeadIn};
     use sct_core::profile::PedalAxis;
-    use tauri::ipc::InvokeResponseBody;
 
-    type Log = Arc<Mutex<Vec<String>>>;
-
-    fn event_channel() -> (Channel<DrillEvent>, Log) {
-        let log: Log = Arc::default();
-        let sink = Arc::clone(&log);
-        let channel = Channel::new(move |body| {
-            if let InvokeResponseBody::Json(json) = body {
-                sink.lock().unwrap().push(json);
-            }
-            Ok(())
-        });
-        (channel, log)
-    }
-
-    fn finished_count(log: &Log) -> usize {
-        log.lock()
-            .unwrap()
-            .iter()
-            .filter(|e| e.contains("setFinished"))
-            .count()
+    fn finished_count(events: &[String]) -> usize {
+        events.iter().filter(|e| e.contains("setFinished")).count()
     }
 
     fn stream() -> Stream {
@@ -911,15 +842,15 @@ mod tests {
         }
     }
 
-    /// Starts a drill and returns its event log and whether the caller got `Ok`.
-    fn start(stream: &mut Stream, pedal: Pedal) -> (Log, Result<(), String>) {
+    /// Starts `drill` and returns its event log and whether the caller got `Ok`.
+    fn start_this(stream: &mut Stream, drill: Drill) -> (Receiver<String>, Result<(), String>) {
         let (channel, log) = event_channel();
         let (reply, answer) = mpsc::channel();
         start_drill(
             Some(stream),
             Some(brake_profile()),
             0,
-            drill(pedal),
+            drill,
             channel,
             None,
             &reply,
@@ -927,16 +858,23 @@ mod tests {
         (log, answer.recv().unwrap())
     }
 
+    /// Starts a drill on `pedal` and returns its event log and whether the caller got `Ok`.
+    fn start(stream: &mut Stream, pedal: Pedal) -> (Receiver<String>, Result<(), String>) {
+        start_this(stream, drill(pedal))
+    }
+
     #[test]
     fn abort_sends_one_terminal_event() {
         let mut stream = stream();
         let (log, result) = start(&mut stream, Pedal::Brake);
         assert_eq!(result, Ok(()));
-        assert!(log.lock().unwrap()[0].contains("countdownStarted"));
         stream.finish_drill();
         stream.finish_drill();
         drop(stream);
-        assert_eq!(finished_count(&log), 1);
+        let events = drain(&log);
+        assert!(events[0].contains("countdownStarted"));
+        assert_eq!(finished_count(&events), 1);
+        assert!(events.last().unwrap().contains("setFinished"), "{events:?}");
     }
 
     #[test]
@@ -945,11 +883,12 @@ mod tests {
         let (first, _) = start(&mut stream, Pedal::Brake);
         let (second, result) = start(&mut stream, Pedal::Brake);
         assert_eq!(result, Ok(()));
-        assert_eq!(finished_count(&first), 1);
-        assert_eq!(finished_count(&second), 0);
+        assert_eq!(finished_count(&drain(&first)), 1);
+        let mut second_events = so_far(&second);
+        assert_eq!(finished_count(&second_events), 0);
         drop(stream);
-        assert_eq!(finished_count(&first), 1);
-        assert_eq!(finished_count(&second), 1);
+        second_events.extend(drain(&second));
+        assert_eq!(finished_count(&second_events), 1);
     }
 
     #[test]
@@ -958,7 +897,7 @@ mod tests {
         let (log, _) = start(slot.as_mut().unwrap(), Pedal::Brake);
         end_stream(&mut slot);
         assert!(slot.is_none());
-        assert_eq!(finished_count(&log), 1);
+        assert_eq!(finished_count(&drain(&log)), 1);
     }
 
     #[test]
@@ -970,8 +909,9 @@ mod tests {
             result,
             Err("the throttle pedal isn't assigned; set it up on the Devices page".to_owned())
         );
-        assert!(rejected.lock().unwrap().is_empty());
-        assert_eq!(finished_count(&running), 0);
+        assert_eq!(drain(&rejected), Vec::<String>::new());
+        assert_eq!(finished_count(&so_far(&running)), 0);
+        assert!(stream.active_drill.is_some());
     }
 
     #[test]
@@ -993,7 +933,7 @@ mod tests {
             &reply,
         );
         assert!(answer.recv().unwrap().is_err());
-        assert!(log.lock().unwrap().is_empty());
+        assert_eq!(drain(&log), Vec::<String>::new());
         assert!(stream.active_drill.is_none());
     }
 
@@ -1013,7 +953,7 @@ mod tests {
             &reply,
         );
         assert!(stream.active_drill.is_none());
-        assert!(log.lock().unwrap().is_empty());
+        assert_eq!(drain(&log), Vec::<String>::new());
     }
 
     /// A brake sample at `fraction` of full travel on axis 0.
@@ -1032,138 +972,77 @@ mod tests {
         }
     }
 
-    /// Starts a brake drill (1 s countdown, then a 1 s hold at 70 % ±5 %) with a detached audio
-    /// output.
-    fn start_with_audio(stream: &mut Stream) -> AudioFeedback {
-        let audio = AudioFeedback::detached();
-        let (channel, _) = event_channel();
-        let (reply, answer) = mpsc::channel();
-        start_drill(
-            Some(stream),
-            Some(brake_profile()),
-            0,
-            drill(Pedal::Brake),
-            channel,
-            Some(audio.clone()),
-            &reply,
-        );
-        assert_eq!(answer.recv().unwrap(), Ok(()));
-        audio
-    }
-
-    /// Feeds one sample per millisecond over `[from_ms, to_ms)` at `fraction` and returns the
-    /// pulse rate after the last one.
-    fn feed(
-        stream: &mut Stream,
-        audio: &AudioFeedback,
-        from_ms: u64,
-        to_ms: u64,
-        fraction: f32,
-    ) -> f32 {
-        for ms in from_ms..to_ms {
-            stream.step_drill(&sample_at(ms * 1000, fraction));
-        }
-        audio.pulse_rate()
-    }
-
     #[test]
-    fn beeps_while_off_target_and_silent_in_band() {
+    fn a_finished_drill_leaves_the_stream() {
         let mut stream = stream();
-        let audio = start_with_audio(&mut stream);
-        // Active rep, too light: beeping.
-        assert!(feed(&mut stream, &audio, 1_001, 1_010, 0.2) > 0.0);
-        // Held in the band: silent.
-        assert_eq!(feed(&mut stream, &audio, 1_010, 1_300, 0.70), 0.0);
-        // Leaving the band: beeping again on the first sample.
-        assert!(feed(&mut stream, &audio, 1_300, 1_301, 0.2) > 0.0);
-    }
-
-    #[test]
-    fn beeps_faster_the_further_off() {
-        let mut stream = stream();
-        let audio = start_with_audio(&mut stream);
-        let near = feed(&mut stream, &audio, 1_001, 1_010, 0.62);
-        let far = feed(&mut stream, &audio, 1_010, 1_020, 0.20);
-        assert!(near >= 3.0 && far > near, "near {near}, far {far}");
-        assert!(far <= 11.0);
-    }
-
-    #[test]
-    fn trace_scoring_phase_is_silent() {
-        let mut stream = stream();
-        let audio = AudioFeedback::detached();
-        let (channel, _) = event_channel();
-        let (reply, answer) = mpsc::channel();
-        // A 600 ms trace after a 1 s countdown: active from 1.0 s to 1.6 s, then scoring until
-        // 1.9 s (TRACE_LAG_MARGIN_MS after the active window).
-        let trace = Drill {
-            id: "t".into(),
-            name: "T".into(),
-            pedal: Pedal::Brake,
+        let hold = Drill {
             reps: 1,
-            lead_in_ms: 1000,
-            tolerance: Some(6.0),
-            decimals: None,
-            throttle_lead_in: None,
-            kind: DrillKind::Trace {
-                points: vec![(0, 0.0), (150, 90.0), (600, 0.0)],
+            lead_in_ms: 100,
+            kind: DrillKind::Hold {
+                target: 70.0,
+                hold_ms: 200,
             },
+            ..drill(Pedal::Brake)
         };
+        let (log, result) = start_this(&mut stream, hold);
+        assert_eq!(result, Ok(()));
+        for ms in 1..400 {
+            stream.step_drill(&sample_at(ms * 1000, 0.70));
+        }
+        let events = drain(&log);
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|e| {
+                let (_, rest) = e.split_once("\"event\":\"").unwrap();
+                rest.split('"').next().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["countdownStarted", "repStarted", "repScored", "setFinished"]
+        );
+        stream.step_drill(&sample_at(400_000, 0.70));
+        assert!(stream.active_drill.is_none());
+    }
+
+    #[test]
+    fn start_drill_hands_the_audio_to_the_drill_thread() {
+        let audio = AudioFeedback::detached();
+        let mut stream = stream();
+        let hold = Drill {
+            reps: 1,
+            lead_in_ms: 100,
+            kind: DrillKind::Hold {
+                target: 70.0,
+                hold_ms: 200,
+            },
+            ..drill(Pedal::Brake)
+        };
+        let (channel, log) = event_channel();
+        let (reply, answer) = mpsc::channel();
         start_drill(
             Some(&mut stream),
             Some(brake_profile()),
             0,
-            trace,
+            hold,
             channel,
             Some(audio.clone()),
             &reply,
         );
         assert_eq!(answer.recv().unwrap(), Ok(()));
-        // At 80% in the first 100 ms of the ramp the pedal is 14 to 80 points above the
-        // instant target (tolerance 6) but inside the ±150 ms band, which reaches the 90%
-        // peak. Silent, so the cue follows the band and not the instant target.
-        assert_eq!(feed(&mut stream, &audio, 1_001, 1_100, 0.80), 0.0);
-        // Above the whole timing-window band during the active window: beeping.
-        assert!(feed(&mut stream, &audio, 1_100, 1_500, 1.0) > 0.0);
-        // Off target in the scoring phase, where the target is no longer shown: silent.
-        assert_eq!(feed(&mut stream, &audio, 1_500, 1_700, 1.0), 0.0);
-        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
-        assert!(matches!(phase, Some(Phase::Scoring { .. })), "{phase:?}");
-    }
-
-    #[test]
-    fn no_beeps_outside_the_active_phase() {
-        let mut stream = stream();
-        let audio = start_with_audio(&mut stream);
-        // Countdown: far off target, still silent.
-        assert_eq!(feed(&mut stream, &audio, 100, 900, 0.2), 0.0);
-        assert_eq!(feed(&mut stream, &audio, 900, 1_000, 0.70), 0.0);
-    }
-
-    #[test]
-    fn every_drill_end_silences_the_beeps() {
-        // Abort (finish_drill).
-        let mut stream = stream();
-        let audio = start_with_audio(&mut stream);
-        assert!(feed(&mut stream, &audio, 1_001, 1_100, 0.2) > 0.0);
-        stream.finish_drill();
-        assert_eq!(audio.pulse_rate(), 0.0);
-
-        // Drop (replaced by a new drill, or the stream ending).
-        let mut stream = Stream::new(1, 1, Channel::new(|_| Ok(())));
-        let audio = start_with_audio(&mut stream);
-        assert!(feed(&mut stream, &audio, 1_001, 1_100, 0.2) > 0.0);
-        stream.active_drill = None;
-        assert_eq!(audio.pulse_rate(), 0.0);
-
-        // Finish: run the whole drill off target (1 s countdown, 1 s hold).
-        let mut stream = Stream::new(1, 1, Channel::new(|_| Ok(())));
-        let audio = start_with_audio(&mut stream);
-        for ms in 1_001..10_000 {
-            stream.step_drill(&sample_at(ms * 1000, 0.2));
+        // Off target inside the active rep.
+        for ms in 1..150 {
+            stream.step_drill(&sample_at(ms * 1000, 0.20));
         }
-        assert!(stream.active_drill.is_none(), "drill should have finished");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while audio.pulse_rate() <= 0.0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(audio.pulse_rate() > 0.0, "the drill thread never beeped");
+        stream.finish_drill();
+        let events = drain(&log);
         assert_eq!(audio.pulse_rate(), 0.0);
+        assert_eq!(finished_count(&events), 1, "{events:?}");
     }
 
     /// A brake drill (1 s countdown, 1 s hold at 70 %) that starts from the throttle held at
@@ -1199,7 +1078,7 @@ mod tests {
                 "the throttle pedal isn't assigned; this drill starts from the throttle".to_owned()
             )
         );
-        assert!(log.lock().unwrap().is_empty());
+        assert_eq!(drain(&log), Vec::<String>::new());
         assert!(stream.active_drill.is_none());
     }
 
@@ -1212,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn lead_in_beeps_against_the_throttle_level() {
+    fn the_throttle_reaches_the_drill_thread() {
         let mut profile = brake_profile();
         profile.set(
             Pedal::Throttle,
@@ -1222,8 +1101,7 @@ mod tests {
             }),
         );
         let mut stream = stream();
-        let audio = AudioFeedback::detached();
-        let (channel, _) = event_channel();
+        let (channel, log) = event_channel();
         let (reply, answer) = mpsc::channel();
         start_drill(
             Some(&mut stream),
@@ -1231,93 +1109,35 @@ mod tests {
             0,
             lead_in_drill(),
             channel,
-            Some(audio.clone()),
+            None,
             &reply,
         );
         assert_eq!(answer.recv().unwrap(), Ok(()));
-
-        // Countdown: silent.
-        for ms in 100..1_000 {
+        // Countdown over with the throttle off: waiting. Then the throttle at the level, read
+        // from axis 1, starts the hold.
+        for ms in 1..1_050 {
             stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.0));
         }
-        assert_eq!(audio.pulse_rate(), 0.0);
-
-        // Countdown over with the throttle off: waiting, beeping against the level.
-        for ms in 1_000..1_010 {
-            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.0));
-        }
-        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
-        assert!(
-            matches!(phase, Some(Phase::ThrottleWait { .. })),
-            "{phase:?}"
-        );
-        assert!(audio.pulse_rate() > 0.0);
-
-        // Throttle at the level: the hold starts and the tone goes silent.
-        for ms in 1_010..1_100 {
+        for ms in 1_050..1_100 {
             stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.80));
         }
-        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
-        assert!(
-            matches!(phase, Some(Phase::ThrottleHold { .. })),
-            "{phase:?}"
+        stream.finish_drill();
+        let events = drain(&log);
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|e| {
+                let (_, rest) = e.split_once("\"event\":\"").unwrap();
+                rest.split('"').next().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "countdownStarted",
+                "throttleWait",
+                "throttleHoldStarted",
+                "setFinished"
+            ]
         );
-        assert_eq!(audio.pulse_rate(), 0.0);
-
-        // Full throttle is above the level but still accepted, so the tone stays silent.
-        for ms in 1_100..1_200 {
-            stream.step_drill(&pedals_at(ms * 1000, 0.0, 1.0));
-        }
-        assert_eq!(audio.pulse_rate(), 0.0);
-
-        // Throttle released: the hold drops and the tone beeps again.
-        for ms in 1_200..1_210 {
-            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.0));
-        }
-        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
-        assert!(
-            matches!(phase, Some(Phase::ThrottleWait { .. })),
-            "{phase:?}"
-        );
-        assert!(audio.pulse_rate() > 0.0);
-
-        // Coming from 0, a throttle just above the arm edge (level - 0.10 + 0.001) arms the
-        // hold and the tone goes silent on the same sample.
-        stream.step_drill(&pedals_at(
-            1_210_000,
-            0.0,
-            0.80 - THROTTLE_ARM_MARGIN + 0.001,
-        ));
-        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
-        assert!(
-            matches!(phase, Some(Phase::ThrottleHold { .. })),
-            "{phase:?}"
-        );
-        assert_eq!(audio.pulse_rate(), 0.0);
-
-        // Full throttle stays silent up to the LIFT cue at 2.21 s.
-        for ms in 1_211..2_210 {
-            stream.step_drill(&pedals_at(ms * 1000, 0.0, 1.0));
-        }
-        assert_eq!(audio.pulse_rate(), 0.0);
-
-        // Throttle off in the lift window (2.21 s to the brake point at 2.51 s): the hold
-        // goes on and the tone stays silent.
-        for ms in 2_210..2_500 {
-            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.0));
-        }
-        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
-        assert!(
-            matches!(
-                phase,
-                Some(Phase::ThrottleHold {
-                    lift_us: 2_210_000,
-                    ends_us: 2_510_000,
-                    ..
-                })
-            ),
-            "{phase:?}"
-        );
-        assert_eq!(audio.pulse_rate(), 0.0);
     }
 }

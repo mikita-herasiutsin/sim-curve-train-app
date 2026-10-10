@@ -634,6 +634,45 @@ mod tests {
         samples
     }
 
+    /// Wall time of `score_trace` for a 3.6 s and a `MAX_TRACE_MS` trace. Run with
+    /// `cargo test --release -p sct-core score_trace_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing harness, run by hand in a release build"]
+    fn score_trace_timing() {
+        use std::time::Instant;
+        for d in [3600_u32, crate::preset::MAX_TRACE_MS] {
+            let curve = TraceCurve::from_points(&[
+                (0, 0.0),
+                (d / 20, 95.0),
+                (d / 3, 70.0),
+                (d * 2 / 3, 30.0),
+                (d, 0.0),
+            ]);
+            let params = standard_params(&curve);
+            #[expect(clippy::cast_precision_loss, reason = "test noise")]
+            let samples = generate_synthetic_samples(&curve, START_US, 60.0, |n, v| {
+                v + 0.01 * ((n as f32) * 0.37).sin()
+            });
+            let mut times: Vec<f64> = (0..50)
+                .map(|_| {
+                    let started = Instant::now();
+                    let score = score_trace(&samples, START_US, &params);
+                    let elapsed = started.elapsed().as_secs_f64() * 1e3;
+                    assert!(score.is_some());
+                    elapsed
+                })
+                .collect();
+            times.sort_by(f64::total_cmp);
+            println!(
+                "{d} ms trace, {} samples: min {:.2} ms, median {:.2} ms, max {:.2} ms",
+                samples.len(),
+                times[0],
+                times[25],
+                times[49]
+            );
+        }
+    }
+
     #[test]
     fn test_1_exact_copy() {
         let curve = standard_curve();

@@ -1,4 +1,5 @@
 mod audio;
+mod drill_thread;
 mod input;
 #[cfg(debug_assertions)]
 mod sim_pedals;

@@ -24,7 +24,19 @@
     type RunView,
     type SetSummary,
   } from "$lib/drill";
-  import { buildAttempt, saveAttempt, type ScoredRep } from "$lib/attempts";
+  import { buildAttempt, saveAttempt, saveWarmUpRun, type ScoredRep } from "$lib/attempts";
+  import {
+    hasWarmUp,
+    warmUpPlan,
+    startWarmUp,
+    currentDrill,
+    isDone,
+    completeStep,
+    skipStep,
+    warmUpScore,
+    buildWarmUpRun,
+    type WarmUpProgress,
+  } from "$lib/warmup";
   import { pedalStream } from "$lib/pedals/stream";
   import { startRealSource, type SourceStatus } from "$lib/pedals/realSource";
   import AudioControls from "$lib/components/AudioControls.svelte";
@@ -38,6 +50,11 @@
   let presets = $state<Preset[]>([]);
   let selectedPreset = $state<Preset | null>(null);
   let selectedDrill = $state<Drill | null>(null);
+  let warmUp = $state<WarmUpProgress | null>(null);
+  let stepFinishing = $state(false);
+  let warmUpSaveStatus = $state<"saving" | "saved" | "error" | null>(null);
+  let warmUpSaveError = $state<string | null>(null);
+  let savedWarmUp: WarmUpProgress | null = null;
   let traceView = $state<TraceViewMode>(loadTraceView());
 
   function setTraceView(mode: TraceViewMode): void {
@@ -96,7 +113,13 @@
     /** Reps that ended, failed ones included. */
     ended: number;
     saved: boolean;
+    /** Set by Skip Drill during a warm-up set. */
+    skipped: boolean;
+    /** The warm-up progress when the set started; null outside a warm-up. */
+    warmUp: WarmUpProgress | null;
   }
+
+  let activeRecord: RunRecord | null = null;
 
   let rafId: number | null = null;
 
@@ -115,15 +138,26 @@
           // Only presets with something this screen can run are offered.
           presets = p.filter((preset) => playableDrills(preset).length > 0);
           if (presets.length > 0) {
-            // The home picker opens this screen with ?preset=<id>&drill=<id>.
+            // The home picker opens this screen with ?preset=<id>&drill=<id> or ?preset=<id>&warmup=1.
             const params = page.url.searchParams;
             const preset =
               presets.find((pr) => pr.id === (params.get("preset") ?? loadLastPreset())) ??
               presets[0];
             const playable = playableDrills(preset);
             selectedPreset = preset;
-            selectedDrill =
-              playable.find((d) => d.id === params.get("drill")) ?? playable[0] ?? null;
+
+            if (params.get("warmup") === "1" && hasWarmUp(preset)) {
+              const plan = warmUpPlan(preset, new Date().toISOString());
+              if (plan) {
+                warmUp = startWarmUp(plan);
+                selectedDrill = currentDrill(warmUp);
+              }
+            }
+            if (!selectedDrill) {
+              warmUp = null;
+              selectedDrill =
+                playable.find((d) => d.id === params.get("drill")) ?? playable[0] ?? null;
+            }
           } else {
             presetsError = "No playable drills found.";
           }
@@ -191,6 +225,23 @@
     }
   });
 
+  $effect(() => {
+    if (warmUp && isDone(warmUp) && savedWarmUp !== warmUp) {
+      savedWarmUp = warmUp;
+      warmUpSaveStatus = "saving";
+      warmUpSaveError = null;
+      saveWarmUpRun(buildWarmUpRun(warmUp))
+        .then(() => {
+          warmUpSaveStatus = "saved";
+        })
+        .catch((e: unknown) => {
+          console.error("Failed to save warm-up run", e);
+          warmUpSaveStatus = "error";
+          warmUpSaveError = String(e);
+        });
+    }
+  });
+
   function start() {
     if (!selectedPreset || !selectedDrill) return;
     saveLastPreset(selectedPreset.id);
@@ -209,7 +260,10 @@
       scored: [],
       ended: 0,
       saved: false,
+      skipped: false,
+      warmUp,
     };
+    activeRecord = record;
     // The engine ends every run with `setFinished`: after the last rep, on abort, and when the
     // stream stops. The record is saved then, even for a run the screen has given up on.
     const onEvent = (e: DrillEvent) => {
@@ -219,10 +273,22 @@
       } else if (e.event === "repFailed") {
         record.ended++;
       }
-      if (id === runId) view = applyDrillEvent(view, e);
-      if (e.event === "setFinished") persist(record, e.summary);
+      // A set skipped during a warm-up goes straight to the next drill, without the overlay.
+      if (id === runId && !record.skipped) view = applyDrillEvent(view, e);
+      if (e.event === "setFinished") {
+        const persistPromise = persist(record, e.summary);
+        if (record.warmUp) {
+          handleWarmUpFinished(record, e.summary, persistPromise);
+        }
+      }
     };
-    startDrillRun(sourceStatus.token, selectedPreset.id, selectedDrill.id, onEvent).catch((e) => {
+    startDrillRun(
+      sourceStatus.token,
+      selectedPreset.id,
+      selectedDrill.id,
+      onEvent,
+      warmUp !== null,
+    ).catch((e) => {
       if (id !== runId) return;
       console.error(e);
       runId++;
@@ -235,6 +301,9 @@
   }
 
   function abort() {
+    if (warmUp && activeRecord) {
+      activeRecord.skipped = true;
+    }
     if (sourceStatus.kind !== "live") {
       // No stream to ask for a final event, so give the run up here. The engine's own
       // `setFinished` still saves it.
@@ -247,6 +316,9 @@
     abortDrillRun(sourceStatus.token).catch((e) => {
       console.error(e);
       aborting = false;
+      if (activeRecord) {
+        activeRecord.skipped = false;
+      }
       errorMessage = `Failed to abort drill: ${e}`;
     });
   }
@@ -256,8 +328,8 @@
    * unplugged) is saved as aborted; one that ended before any rep is not saved. A failed save
    * is logged and shown, and the drill screen keeps working.
    */
-  function persist(record: RunRecord, summary: SetSummary | null) {
-    if (record.saved || record.ended === 0) return;
+  async function persist(record: RunRecord, summary: SetSummary | null): Promise<number | null> {
+    if (record.saved || record.ended === 0) return null;
     record.saved = true;
     const attempt = buildAttempt({
       drillId: record.drill.id,
@@ -268,10 +340,53 @@
       summary,
       scored: record.scored,
     });
-    saveAttempt(attempt).catch((e) => {
+    try {
+      return await saveAttempt(attempt);
+    } catch (e) {
       console.error("Failed to save attempt", e);
       errorMessage = `This set was not saved: ${e}`;
-    });
+      return null;
+    }
+  }
+
+  async function handleWarmUpFinished(
+    record: RunRecord,
+    summary: SetSummary | null,
+    persistPromise: Promise<number | null>,
+  ) {
+    stepFinishing = true;
+    const attemptId = await persistPromise;
+    stepFinishing = false;
+    // A late set from an earlier warm-up (Run Again, a new page) must not advance this one.
+    if (!warmUp || warmUp !== record.warmUp) return;
+    const partial = record.ended < record.drill.reps || record.skipped;
+    if (partial) {
+      warmUp = skipStep(warmUp, attemptId);
+    } else {
+      warmUp = completeStep(warmUp, { attemptId, score: summary?.average ?? null });
+    }
+    // After a full set the overlay stays up and Next Drill moves on.
+    if (record.skipped) {
+      selectedDrill = currentDrill(warmUp);
+      view = { ...IDLE_VIEW };
+    }
+  }
+
+  function handleIdleSkip() {
+    if (!warmUp) return;
+    warmUp = skipStep(warmUp);
+    selectedDrill = currentDrill(warmUp);
+  }
+
+  function restartWarmUp() {
+    if (!selectedPreset) return;
+    const plan = warmUpPlan(selectedPreset, new Date().toISOString());
+    if (!plan) return;
+    warmUp = startWarmUp(plan);
+    selectedDrill = currentDrill(warmUp);
+    warmUpSaveStatus = null;
+    warmUpSaveError = null;
+    view = { ...IDLE_VIEW };
   }
 
   function restart() {
@@ -298,81 +413,153 @@
 
   <main class="content">
     {#if view.runState === "idle"}
-      <div class="picker-panel panel">
-        <h2>Select a Drill</h2>
+      {#if warmUp && isDone(warmUp)}
+        <div class="picker-panel panel" data-testid="warm-up-summary">
+          <h2>Warm-up complete</h2>
 
-        {#if errorMessage}
-          <p class="error-message" role="alert">{errorMessage}</p>
-        {/if}
+          {#if warmUpSaveStatus === "saved"}
+            <p class="save-status">Saved.</p>
+          {:else if warmUpSaveStatus === "error"}
+            <p class="error-message" role="alert">
+              This warm-up was not saved: {warmUpSaveError}
+            </p>
+          {/if}
 
-        {#if presetsError}
-          <p class="error-message" role="alert">{presetsError}</p>
-        {/if}
-
-        <div class="picker-controls">
-          <label>
-            Preset:
-            <select
-              bind:value={selectedPreset}
-              onchange={() => {
-                if (selectedPreset) {
-                  saveLastPreset(selectedPreset.id);
-                  selectedDrill = playableDrills(selectedPreset)[0] ?? null;
-                } else {
-                  selectedDrill = null;
-                }
-              }}
-            >
-              {#each presets as p (p.id)}
-                <option value={p}>{p.name}</option>
+          <table class="warm-up-table">
+            <thead>
+              <tr>
+                <th>Drill</th>
+                <th>Score</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each warmUp.results as res, i (i)}
+                {@const drillName = warmUp.plan.drills[i]?.name ?? res.drillId}
+                <tr>
+                  <td>{drillName}</td>
+                  <td>
+                    {#if res.skipped}
+                      Skipped
+                    {:else if res.score !== null && res.score !== undefined}
+                      {Math.round(res.score)}
+                    {:else}
+                      —
+                    {/if}
+                  </td>
+                </tr>
               {/each}
-            </select>
-          </label>
+            </tbody>
+          </table>
 
-          {#if selectedPreset}
-            <label>
-              Drill:
-              <select bind:value={selectedDrill}>
-                {#each playableDrills(selectedPreset) as d (d.id)}
-                  <option value={d}>{d.name} ({d.reps} reps)</option>
-                {/each}
-              </select>
-            </label>
+          <div class="warm-up-overall">
+            <span>Overall score:</span>
+            <span class="warm-up-score" data-testid="warm-up-score">
+              {Math.round(warmUpScore(warmUp.results))}
+            </span>
+          </div>
+          <p class="note">Skipped drills count as 0.</p>
+
+          <div class="summary-actions">
+            <button type="button" class="btn-primary" onclick={restartWarmUp}> Run Again </button>
+            <a href={resolve("/")} class="btn-secondary link-button">← Home</a>
+          </div>
+        </div>
+      {:else}
+        <div class="picker-panel panel">
+          {#if warmUp}
+            <h2>Warm-up: {selectedPreset?.name}</h2>
+            <p class="warm-up-drill-step">
+              Drill {warmUp.index + 1} of {warmUp.plan.drills.length}: {selectedDrill?.name}
+            </p>
+          {:else}
+            <h2>Select a Drill</h2>
+          {/if}
+
+          {#if errorMessage}
+            <p class="error-message" role="alert">{errorMessage}</p>
+          {/if}
+
+          {#if presetsError}
+            <p class="error-message" role="alert">{presetsError}</p>
+          {/if}
+
+          {#if !warmUp}
+            <div class="picker-controls">
+              <label>
+                Preset:
+                <select
+                  bind:value={selectedPreset}
+                  onchange={() => {
+                    if (selectedPreset) {
+                      saveLastPreset(selectedPreset.id);
+                      selectedDrill = playableDrills(selectedPreset)[0] ?? null;
+                    } else {
+                      selectedDrill = null;
+                    }
+                  }}
+                >
+                  {#each presets as p (p.id)}
+                    <option value={p}>{p.name}</option>
+                  {/each}
+                </select>
+              </label>
+
+              {#if selectedPreset}
+                <label>
+                  Drill:
+                  <select bind:value={selectedDrill}>
+                    {#each playableDrills(selectedPreset) as d (d.id)}
+                      <option value={d}>{d.name} ({d.reps} reps)</option>
+                    {/each}
+                  </select>
+                </label>
+              {/if}
+            </div>
+          {/if}
+
+          {#if selectedDrill}
+            <div class="drill-info">
+              <p><strong>Type:</strong> {selectedDrill.type}</p>
+              <p><strong>Target Pedal:</strong> {selectedDrill.pedal}</p>
+              {#if selectedDrill.type === "hold"}
+                <p>
+                  <strong>Target:</strong>
+                  {selectedDrill.target.toFixed(selectedDrill.decimals ?? 0)}%
+                </p>
+                <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
+                <p><strong>Hold Time:</strong> {selectedDrill.holdMs} ms</p>
+              {:else if selectedDrill.type === "trace"}
+                {@const peak = selectedDrill.points.reduce((max, p) => Math.max(max, p[1]), 0)}
+                <p>
+                  <strong>Duration:</strong>
+                  {(traceDurationMs(selectedDrill.points) / 1000).toFixed(1)} s
+                </p>
+                <p>
+                  <strong>Peak:</strong>
+                  {formatPercentValue(peak / 100, selectedDrill.decimals ?? 0)}%
+                </p>
+                <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
+                <p class="view-row"><strong>View:</strong> {@render traceViewToggle()}</p>
+              {/if}
+              <p><strong>Reps:</strong> {selectedDrill.reps}</p>
+            </div>
+
+            <button class="btn-primary" onclick={start} disabled={sourceStatus.kind !== "live"}
+              >Start Drill</button
+            >
+            {#if warmUp}
+              <button
+                type="button"
+                class="btn-secondary mt"
+                data-testid="warm-up-skip"
+                onclick={handleIdleSkip}
+              >
+                Skip Drill
+              </button>
+            {/if}
           {/if}
         </div>
-
-        {#if selectedDrill}
-          <div class="drill-info">
-            <p><strong>Type:</strong> {selectedDrill.type}</p>
-            <p><strong>Target Pedal:</strong> {selectedDrill.pedal}</p>
-            {#if selectedDrill.type === "hold"}
-              <p>
-                <strong>Target:</strong>
-                {selectedDrill.target.toFixed(selectedDrill.decimals ?? 0)}%
-              </p>
-              <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
-              <p><strong>Hold Time:</strong> {selectedDrill.holdMs} ms</p>
-            {:else if selectedDrill.type === "trace"}
-              {@const peak = selectedDrill.points.reduce((max, p) => Math.max(max, p[1]), 0)}
-              <p>
-                <strong>Duration:</strong>
-                {(traceDurationMs(selectedDrill.points) / 1000).toFixed(1)} s
-              </p>
-              <p>
-                <strong>Peak:</strong>
-                {formatPercentValue(peak / 100, selectedDrill.decimals ?? 0)}%
-              </p>
-              <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
-              <p class="view-row"><strong>View:</strong> {@render traceViewToggle()}</p>
-            {/if}
-            <p><strong>Reps:</strong> {selectedDrill.reps}</p>
-          </div>
-
-          <button class="btn-primary" onclick={start} disabled={sourceStatus.kind !== "live"}
-            >Start Drill</button
-          >
-        {/if}
-      </div>
+      {/if}
     {:else}
       <div class="active-workspace">
         <div class="left-col">
@@ -387,10 +574,27 @@
             {:else if view.runState === "finished"}
               <div class="overlay">
                 <h2 class="finished-text">Set Finished!</h2>
-                <button class="btn-primary mt" onclick={restart}>Play Again</button>
-                <button class="btn-secondary mt" onclick={() => (view.runState = "idle")}
-                  >Pick Another Drill</button
-                >
+                {#if warmUp}
+                  <button
+                    class="btn-primary mt"
+                    disabled={stepFinishing}
+                    onclick={() => {
+                      view = { ...IDLE_VIEW };
+                      if (warmUp) selectedDrill = currentDrill(warmUp);
+                    }}
+                  >
+                    {(
+                      stepFinishing ? warmUp.index >= warmUp.plan.drills.length - 1 : isDone(warmUp)
+                    )
+                      ? "See Summary"
+                      : "Next Drill"}
+                  </button>
+                {:else}
+                  <button class="btn-primary mt" onclick={restart}>Play Again</button>
+                  <button class="btn-secondary mt" onclick={() => (view.runState = "idle")}
+                    >Pick Another Drill</button
+                  >
+                {/if}
               </div>
             {/if}
 
@@ -495,7 +699,13 @@
             {/if}
 
             {#if view.runState !== "finished" && !aborting}
-              <button class="btn-abort" onclick={abort}>Abort Set</button>
+              {#if warmUp}
+                <button class="btn-abort" data-testid="warm-up-skip" onclick={abort}>
+                  Skip Drill
+                </button>
+              {:else}
+                <button class="btn-abort" onclick={abort}>Abort Set</button>
+              {/if}
             {/if}
           </div>
 
@@ -1048,5 +1258,64 @@
 
   .mt {
     margin-top: 1rem;
+  }
+
+  .warm-up-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+  }
+
+  .warm-up-table th,
+  .warm-up-table td {
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .warm-up-table th:last-child,
+  .warm-up-table td:last-child {
+    text-align: right;
+  }
+
+  .warm-up-overall {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 1.125rem;
+    font-weight: 700;
+    margin: 1rem 0 0.5rem;
+  }
+
+  .warm-up-score {
+    font-size: 1.5rem;
+    color: var(--accent);
+  }
+
+  .summary-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 1.5rem;
+  }
+
+  .link-button {
+    display: block;
+    text-align: center;
+    text-decoration: none;
+    box-sizing: border-box;
+  }
+
+  .save-status {
+    margin: 0 0 1rem;
+    color: #22c55e;
+    font-size: 0.875rem;
+    font-weight: 600;
+  }
+
+  .warm-up-drill-step {
+    margin: 0 0 1rem;
+    color: var(--text-muted);
+    font-size: 0.9375rem;
   }
 </style>

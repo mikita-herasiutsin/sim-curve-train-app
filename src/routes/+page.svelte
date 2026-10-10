@@ -5,6 +5,7 @@
   import { isTauri } from "@tauri-apps/api/core";
   import AppHeader from "$lib/components/AppHeader.svelte";
   import { listPresets, playableDrills, type Preset, type Drill } from "$lib/drill";
+  import { hasWarmUp } from "$lib/warmup";
   import { bestTotals } from "$lib/attempts";
   import { loadLastPreset, saveLastPreset } from "$lib/settings";
 
@@ -43,6 +44,11 @@
         `/drill?preset=${encodeURIComponent(preset.id)}&drill=${encodeURIComponent(drill.id)}`,
       ),
     );
+  }
+
+  function handleWarmUpClick(preset: Preset) {
+    saveLastPreset(preset.id);
+    goto(resolve(`/drill?preset=${encodeURIComponent(preset.id)}&warmup=1`));
   }
 
   onMount(() => {
@@ -118,6 +124,18 @@
               >
             </button>
             {#if openPresetId === preset.id}
+              {#if hasWarmUp(preset)}
+                <div class="warm-up-container">
+                  <button
+                    type="button"
+                    class="btn-warmup"
+                    data-testid="warm-up-start"
+                    onclick={() => handleWarmUpClick(preset)}
+                  >
+                    Warm-up
+                  </button>
+                </div>
+              {/if}
               <ul class="drill-list">
                 {#each playableDrills(preset) as drill (drill.id)}
                   <li>
@@ -284,6 +302,28 @@
     color: var(--accent);
     font-size: 0.8125rem;
     font-weight: 600;
+  }
+
+  .warm-up-container {
+    padding: 0 1rem 0.5rem;
+  }
+
+  .btn-warmup {
+    width: 100%;
+    padding: 0.625rem 1rem;
+    border: none;
+    border-radius: 0.5rem;
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: center;
+    transition: opacity 0.15s ease;
+  }
+
+  .btn-warmup:hover {
+    opacity: 0.9;
   }
 
   .drill-list {

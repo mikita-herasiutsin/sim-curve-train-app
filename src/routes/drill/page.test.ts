@@ -5,6 +5,7 @@ import DrillPage from "./+page.svelte";
 import type { Preset } from "$lib/drill";
 import type { NewAttempt, NewWarmUpRun } from "$lib/attempts";
 import { pedalStream } from "$lib/pedals/stream";
+import * as barsDrawModule from "$lib/pedals/barsDraw";
 
 let mockUrl = new URL("http://localhost/drill");
 
@@ -803,6 +804,31 @@ describe("Drill page", () => {
     ],
   };
 
+  const zeroLiftPreset: Preset = {
+    schemaVersion: 1,
+    id: "lead-in-zero-lift",
+    name: "Lead-In Zero Lift Drills",
+    description: "",
+    drills: [
+      {
+        id: "brake-hold-zero-lift",
+        name: "Brake hold with zero lift",
+        type: "hold",
+        pedal: "brake",
+        reps: 3,
+        leadInMs: 1000,
+        tolerance: 5,
+        target: 70,
+        holdMs: 2000,
+        throttleLeadIn: {
+          level: 80,
+          holdMs: 1500,
+          liftMs: 0,
+        },
+      },
+    ],
+  };
+
   it("shows lead-in-info with default lift time (300 ms) in drill details", async () => {
     presetsList = [leadInHoldPreset];
     render(DrillPage);
@@ -819,6 +845,13 @@ describe("Drill page", () => {
     expect(info).toHaveTextContent(
       "Starts from throttle: 80% for 1.5s, lift 500 ms before the brake point",
     );
+  });
+
+  it("shows lead-in-info ending with 'then lift and brake' when liftMs is 0", async () => {
+    presetsList = [zeroLiftPreset];
+    render(DrillPage);
+    const info = await screen.findByTestId("lead-in-info");
+    expect(info).toHaveTextContent("Starts from throttle: 80% for 1.5s, then lift and brake");
   });
 
   it("shows throttle cue with 'Press the throttle' on throttleWait and seconds on throttleHoldStarted", async () => {
@@ -868,6 +901,132 @@ describe("Drill page", () => {
     expect(await screen.findByTestId("lift-cue")).toBeInTheDocument();
   });
 
+  it("shows LIFT in the lift window, BRAKE after repStarted, and hides cue 800 ms into the rep for a drill with a lift window", async () => {
+    let nowUs = 1_000_000;
+    vi.spyOn(pedalStream, "dataNowUs").mockImplementation(() => nowUs);
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({
+      event: "throttleHoldStarted",
+      rep: 0,
+      startUs: 1_000_000,
+      liftUs: 2_200_000,
+      endsUs: 2_500_000,
+    });
+
+    // In the lift window: shows LIFT
+    nowUs = 2_250_000;
+    const liftCue = await screen.findByTestId("lift-cue");
+    expect(liftCue).toHaveTextContent("LIFT");
+
+    // After repStarted: shows BRAKE
+    nowUs = 2_500_000;
+    drillChannel!.onmessage({ event: "repStarted", rep: 0, startUs: 2_500_000 });
+    await waitFor(() => expect(screen.getByTestId("lift-cue")).toHaveTextContent("BRAKE"));
+
+    // 800 ms into the rep: cue is gone
+    nowUs = 2_500_000 + 800_000;
+    await waitFor(() => expect(screen.queryByTestId("lift-cue")).toBeNull());
+  });
+
+  it("shows LIFT after repStarted and hides cue 800 ms into the rep for a drill with liftMs: 0", async () => {
+    let nowUs = 1_000_000;
+    vi.spyOn(pedalStream, "dataNowUs").mockImplementation(() => nowUs);
+    presetsList = [zeroLiftPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({
+      event: "throttleHoldStarted",
+      rep: 0,
+      startUs: 1_000_000,
+      liftUs: 2_500_000,
+      endsUs: 2_500_000,
+    });
+
+    nowUs = 2_500_000;
+    drillChannel!.onmessage({ event: "repStarted", rep: 0, startUs: 2_500_000 });
+    const liftCue = await screen.findByTestId("lift-cue");
+    expect(liftCue).toHaveTextContent("LIFT");
+
+    // 800 ms into the rep: cue is gone
+    nowUs = 2_500_000 + 800_000;
+    await waitFor(() => expect(screen.queryByTestId("lift-cue")).toBeNull());
+  });
+
+  it("passes no target props to PedalBars while lifting", async () => {
+    const drawSpy = vi.spyOn(barsDrawModule, "drawPedalBars");
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(function (
+      this: HTMLCanvasElement,
+    ) {
+      if (this.getAttribute("aria-label")?.includes("bars")) {
+        return {
+          clearRect: vi.fn(),
+          fillRect: vi.fn(),
+          beginPath: vi.fn(),
+          moveTo: vi.fn(),
+          lineTo: vi.fn(),
+          stroke: vi.fn(),
+          fillText: vi.fn(),
+          save: vi.fn(),
+          restore: vi.fn(),
+          scale: vi.fn(),
+          arcTo: vi.fn(),
+          closePath: vi.fn(),
+          fill: vi.fn(),
+          clip: vi.fn(),
+        } as unknown as CanvasRenderingContext2D;
+      }
+      return null;
+    });
+
+    let nowUs = 1_000_000;
+    vi.spyOn(pedalStream, "dataNowUs").mockImplementation(() => nowUs);
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({
+      event: "throttleHoldStarted",
+      rep: 0,
+      startUs: 1_000_000,
+      liftUs: 2_200_000,
+      endsUs: 2_500_000,
+    });
+
+    // Before lift: target is throttle 80%
+    nowUs = 1_500_000;
+    await waitFor(() => {
+      const call = drawSpy.mock.calls.at(-1);
+      expect(call?.[6]).toBe("throttle");
+      expect(call?.[7]).toBe(0.8);
+    });
+
+    // In lift window: no target on bars
+    nowUs = 2_250_000;
+    await waitFor(() => {
+      const call = drawSpy.mock.calls.at(-1);
+      expect(call?.[6]).toBeUndefined();
+      expect(call?.[7]).toBeNull();
+      expect(call?.[8]).toBeNull();
+      expect(call?.[10]).toBeNull();
+    });
+
+    // After repStarted: target is brake 70%
+    nowUs = 2_500_000;
+    drillChannel!.onmessage({ event: "repStarted", rep: 0, startUs: 2_500_000 });
+    await waitFor(() => {
+      const call = drawSpy.mock.calls.at(-1);
+      expect(call?.[6]).toBe("brake");
+      expect(call?.[7]).toBe(0.7);
+    });
+  });
+
   it("renders coast line when coastMs > 0", async () => {
     presetsList = [leadInHoldPreset];
     render(DrillPage);
@@ -907,6 +1066,25 @@ describe("Drill page", () => {
       "Time both pedals were pressed at once, and the highest throttle while braking.",
     );
     expect(within(overlapEl).queryByTestId("coast")).toBeNull();
+  });
+
+  it("renders both coast and overlap-time lines for overlap: { overlapMs: 50, peakThrottle: 0.3, coastMs: 120 }", async () => {
+    presetsList = [leadInHoldPreset];
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({
+      event: "repScored",
+      rep: 0,
+      score: holdScore,
+      overlap: { overlapMs: 50, peakThrottle: 0.3, coastMs: 120 },
+    });
+    const overlapEl = await screen.findByTestId("overlap");
+    const coastEl = within(overlapEl).getByTestId("coast");
+    const overlapTimeEl = within(overlapEl).getByTestId("overlap-time");
+    expect(coastEl).toHaveTextContent("Coast 120 ms");
+    expect(overlapTimeEl).toHaveTextContent("Overlap 50 ms, peak throttle 30%");
   });
 
   it("renders 'No gap, no overlap' when both coastMs and overlapMs are 0", async () => {

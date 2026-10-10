@@ -176,13 +176,18 @@ impl Drill {
     /// Calculated as `lead_in_ms + reps * rep_ms() + (reps - 1) * DEFAULT_REST_MS`
     /// using saturating arithmetic. For [`DrillKind::Trace`] drills, each rep also adds
     /// [`crate::drill_engine::TRACE_LAG_MARGIN_MS`], because the engine ends a trace rep that
-    /// many milliseconds after its last point. When `reps` is 0, this returns `lead_in_ms`.
+    /// many milliseconds after its last point. A drill with a [`ThrottleLeadIn`] adds
+    /// `reps * (hold_ms + lift_window_ms())`; the wait for the throttle has no fixed length and
+    /// is not counted. When `reps` is 0, this returns `lead_in_ms`.
     #[must_use]
     pub fn set_ms(&self, reps: u32) -> u32 {
         if reps == 0 {
             return self.lead_in_ms;
         }
         let reps_duration = reps.saturating_mul(self.rep_ms());
+        let throttle_duration = self.throttle_lead_in.as_ref().map_or(0, |l| {
+            reps.saturating_mul(l.hold_ms.saturating_add(l.lift_window_ms()))
+        });
         let rest_duration = reps
             .saturating_sub(1)
             .saturating_mul(crate::drill_engine::DEFAULT_REST_MS);
@@ -195,6 +200,7 @@ impl Drill {
             .saturating_add(reps_duration)
             .saturating_add(rest_duration)
             .saturating_add(margin_duration)
+            .saturating_add(throttle_duration)
     }
 }
 
@@ -2164,6 +2170,25 @@ mod tests {
         assert_eq!(trace.set_ms(1), 2000 + 1500 + 300);
         // reps 4: 2000 + 4 * 1500 + 3 * 2000 + 4 * 300 = 15200
         assert_eq!(trace.set_ms(4), 15200);
+    }
+
+    #[test]
+    fn drill_set_ms_counts_the_throttle_lead_in() {
+        let mut hold = valid_hold_drill(); // hold_ms = 2000, lead_in_ms = 3000
+        hold.throttle_lead_in = Some(ThrottleLeadIn {
+            level: 80.0,
+            hold_ms: 1500,
+            lift_ms: Some(300),
+        });
+        assert_eq!(hold.set_ms(0), 3000);
+        // reps 5: 21000 without the lead-in + 5 * (1500 + 300) = 30000
+        assert_eq!(hold.set_ms(5), 30000);
+
+        // An omitted lift window counts as DEFAULT_LIFT_MS.
+        if let Some(lead_in) = hold.throttle_lead_in.as_mut() {
+            lead_in.lift_ms = None;
+        }
+        assert_eq!(hold.set_ms(1), 3000 + 2000 + 1500 + DEFAULT_LIFT_MS);
     }
 
     #[test]

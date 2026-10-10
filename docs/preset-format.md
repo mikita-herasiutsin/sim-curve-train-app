@@ -74,7 +74,7 @@ After the `leadInMs` preparation countdown completes, the drill waits until the 
 
 When the hold completes, the UI shows LIFT. The brake point comes `liftMs` later, and the brake rep starts there, with hold or trace timing counting from the brake point. The driver may lift any time in this lift window, and lifting inside it never restarts the hold. A short gap between lifting and braking is normal in iRacing, so a coast before the brake point costs no score. While the drill waits and during the hold, the audio tone beeps when the throttle is below the accepted range. It is silent in the lift window, and during the rep it beeps against the brake target as usual.
 
-After each rep of such a drill the app shows overlap: the time both pedals were above 5 % at once (during the hold, the lift window and the rep), and the peak throttle while both pedals were above 5 %. Each rep also reports the coast time, from the last time the throttle dropped to 5 % or below to the first sample with the brake above 5 %. The coast is 0 if the throttle was still above 5 % when the brake went on, and absent if the brake never went on. The score does not change.
+After each rep of such a drill the app shows overlap: the time both pedals were above 5 % at once (during the hold, the lift window and the rep), and the peak throttle while both pedals were above 5 %. Each rep also reports the coast time. A pedal counts as pressed above 5 %. The coast runs from the last throttle release to the first handoff after it. A handoff is either the brake being pressed while the throttle is released, which gives the time between the release and the brake press, or the throttle being released while the brake is pressed, which gives 0 because the pedals overlapped. The first handoff fixes the coast, so a throttle blip while braking (heel-toe) does not change it. Pressing the throttle again before a handoff restarts the count from the next release. A brake press while the throttle is still held, such as a brush of the brake during the hold, gives 0 until a handoff replaces it. The coast is absent if the brake was never pressed, or if the samples stalled for over 100 ms and the release and the brake press first show on the same sample with no earlier brake press. The score does not change.
 
 Here is an example of a brake trace drill configured with a throttle lead-in:
 
@@ -161,6 +161,7 @@ Where:
 - `rep_ms` is the duration of a single repetition in milliseconds: `holdMs` for hold drills, or the timestamp of the last control point for trace drills (0 if no points).
 - `DEFAULT_REST_MS` is the standard pause between repetitions (2000 ms).
 - `TRACE_LAG_MARGIN_MS` is the time the engine keeps each trace repetition running after its last point, before the rest starts (300 ms). Hold drills add nothing for it.
+- A drill with a `throttleLeadIn` adds `reps * (holdMs + liftMs)` from the lead-in, with `liftMs` at its default of 300 ms when omitted. The wait for the throttle to reach the level has no fixed length, so the estimate leaves it out.
 - If `reps` is 0, the set duration equals `lead_in_ms`.
 
 The total warm-up estimate is the sum of `set_ms` across all warm-up steps.

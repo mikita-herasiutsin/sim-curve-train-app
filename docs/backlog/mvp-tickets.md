@@ -170,7 +170,7 @@ These give the total and grade; reps and consistency reuse SCT-033.
 ### SCT-037 · Brake drills start from the throttle ✅ · M
 A brake drill starts with the throttle pressed, as on track: the user holds the throttle, the cue releases it, and the brake trace or hold follows. The drill reports any overlap where both pedals are pressed at once, because that slows the car and is a habit worth breaking.
 - **AC:** an optional throttle lead-in in the preset (level and duration); overlap time and peak overlap are shown after each rep; drills without the lead-in behave as before.
-- **Status:** done (PR #44). The engine waits for the throttle with no timeout, the hold restarts if the throttle drops, and overlap is shown but not yet saved with attempts.
+- **Status:** done (PR #44). The engine waits for the throttle with no timeout, the hold restarts if the throttle drops, and overlap is shown but not yet saved with attempts. The LIFT cue comes `liftMs` (default 300 ms, up to 3 s) before the brake point, the rep starts at the brake point so a coast costs no score, and each rep shows the coast time next to the overlap.
 - **Deps:** SCT-034
 
 ---

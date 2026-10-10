@@ -84,6 +84,9 @@
   let countdownMs = $state(0);
   let throttleRemainingSec = $state(0);
   let showLiftCue = $state(false);
+  const cueText = $derived(
+    view.runState === "active" && leadIn && liftWindowMs(leadIn) > 0 ? "BRAKE" : "LIFT",
+  );
   let isGo = $state(false);
   // Time left to hold in the active rep, in ms (0..holdMs), refreshed every frame.
   let holdRemainingMs = $state(0);
@@ -581,8 +584,9 @@
               {#if leadIn}
                 <p data-testid="lead-in-info">
                   <strong>Starts from throttle:</strong>
-                  {leadIn.level}% for {leadIn.holdMs / 1000}s, lift {liftWindowMs(leadIn)} ms before the
-                  brake point
+                  {leadIn.level}% for {leadIn.holdMs / 1000}s, {liftWindowMs(leadIn) === 0
+                    ? "then lift and brake"
+                    : `lift ${liftWindowMs(leadIn)} ms before the brake point`}
                 </p>
               {/if}
               <p><strong>Reps:</strong> {selectedDrill.reps}</p>
@@ -650,27 +654,57 @@
             {/if}
 
             {#if showLiftCue}
-              <p class="lift-cue" data-testid="lift-cue">LIFT</p>
+              <p class="lift-cue" data-testid="lift-cue">{cueText}</p>
             {/if}
 
             {#if selectedDrill?.type === "hold"}
               <PedalBars
                 stream={pedalStream}
-                targetPedal={throttleTarget ? "throttle" : selectedDrill.pedal}
-                targetVal={throttleTarget && leadIn
-                  ? leadIn.level / 100
-                  : selectedDrill.target / 100}
-                targetTolerance={throttleTarget ? 0.1 : toleranceOf(selectedDrill) / 100}
-                targetRange={throttleTarget && leadIn ? [leadIn.level / 100, 1] : null}
+                targetPedal={lifting
+                  ? undefined
+                  : throttleTarget
+                    ? "throttle"
+                    : selectedDrill.pedal}
+                targetVal={lifting
+                  ? null
+                  : throttleTarget && leadIn
+                    ? leadIn.level / 100
+                    : selectedDrill.target / 100}
+                targetTolerance={lifting
+                  ? null
+                  : throttleTarget
+                    ? 0.1
+                    : toleranceOf(selectedDrill) / 100}
+                targetRange={lifting
+                  ? null
+                  : throttleTarget && leadIn
+                    ? [leadIn.level / 100, 1]
+                    : null}
                 decimals={selectedDrill.decimals ?? 0}
               />
             {:else if selectedDrill?.type === "trace"}
               <PedalBars
                 stream={pedalStream}
-                targetPedal={throttleTarget ? "throttle" : selectedDrill.pedal}
-                targetVal={throttleTarget && leadIn ? leadIn.level / 100 : currentTargetFrac}
-                targetRange={throttleTarget && leadIn ? [leadIn.level / 100, 1] : currentRangeFrac}
-                targetTolerance={throttleTarget ? 0.1 : toleranceOf(selectedDrill) / 100}
+                targetPedal={lifting
+                  ? undefined
+                  : throttleTarget
+                    ? "throttle"
+                    : selectedDrill.pedal}
+                targetVal={lifting
+                  ? null
+                  : throttleTarget && leadIn
+                    ? leadIn.level / 100
+                    : currentTargetFrac}
+                targetRange={lifting
+                  ? null
+                  : throttleTarget && leadIn
+                    ? [leadIn.level / 100, 1]
+                    : currentRangeFrac}
+                targetTolerance={lifting
+                  ? null
+                  : throttleTarget
+                    ? 0.1
+                    : toleranceOf(selectedDrill) / 100}
                 decimals={selectedDrill.decimals ?? 0}
               />
             {/if}

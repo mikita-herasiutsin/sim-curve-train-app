@@ -47,8 +47,13 @@ pub struct Overlap {
     /// Highest throttle (fraction 0..=1) seen while both pedals were above
     /// [`OVERLAP_THRESHOLD`]; 0 if none.
     pub peak_throttle: f32,
-    /// Time from the throttle release to the brake application, in ms; 0 if the pedals
-    /// overlapped when the brake went on, `None` if the brake was never applied in the window.
+    /// Time from the last throttle release to the brake press, in ms, fixed at the first
+    /// handoff of the pedals: the brake pressed with the throttle released, or the throttle
+    /// released with the brake pressed (0, the pedals overlapped). Later throttle blips while
+    /// braking do not change it. A brake press with the throttle still held gives 0 until a
+    /// handoff replaces it. `None` if the brake was never pressed in the window, or if a stalled
+    /// stream hid whether the release or the brake press came first and the brake had not been
+    /// pressed before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coast_ms: Option<f32>,
 }
@@ -236,8 +241,11 @@ pub struct DrillRun {
     overlap_prev: Option<(u64, f32, f32)>,
     /// Time of the last throttle release in the current rep, while the throttle stays released.
     coast_release_us: Option<u64>,
-    /// Coast time of the current rep in microseconds, fixed at the brake application.
+    /// Coast time of the current rep in microseconds: a provisional 0 after a brake press with
+    /// the throttle held, replaced by the first handoff.
     coast_us: Option<u64>,
+    /// Whether the first handoff of the current rep has fixed `coast_us`.
+    coast_fixed: bool,
 }
 
 impl DrillRun {
@@ -277,6 +285,7 @@ impl DrillRun {
             overlap_prev: None,
             coast_release_us: None,
             coast_us: None,
+            coast_fixed: false,
         }
     }
 
@@ -537,37 +546,19 @@ impl DrillRun {
         self.overlap_prev = None;
         self.coast_release_us = None;
         self.coast_us = None;
+        self.coast_fixed = false;
     }
 
     /// Adds one sample of the overlap window (left-rectangle rule: a sample holds until the
     /// next one, each gap capped at [`MAX_OVERLAP_GAP_US`] and at `window_end_us`). A sample at
     /// or past `window_end_us` only closes the previous gap and is not a peak.
     ///
-    /// Also tracks the coast time. The release is the first sample with the throttle at or
-    /// below [`OVERLAP_THRESHOLD`] after one above it, forgotten if the throttle comes back
-    /// before the brake. The first sample in the window with the brake above the threshold fixes
-    /// the coast at `brake_t - release_t`, or at 0 if the throttle is still pressed. A sample at
-    /// or past `window_end_us` does not count. O(1), no allocation.
+    /// Also tracks the coast time with [`Self::track_coast`]; a sample at or past
+    /// `window_end_us` does not count toward it. O(1), no allocation.
     fn accumulate_overlap(&mut self, sample: ValueSample, throttle: f32, window_end_us: u64) {
         let brake = sample.value;
-        if self.coast_us.is_none() && sample.t_us < window_end_us {
-            let throttle_on = throttle > OVERLAP_THRESHOLD;
-            if throttle_on {
-                self.coast_release_us = None;
-            } else if self.coast_release_us.is_none()
-                && self
-                    .overlap_prev
-                    .is_some_and(|(_, _, prev_throttle)| prev_throttle > OVERLAP_THRESHOLD)
-            {
-                self.coast_release_us = Some(sample.t_us);
-            }
-            if brake > OVERLAP_THRESHOLD {
-                let coast_us = match self.coast_release_us {
-                    Some(release_us) if !throttle_on => sample.t_us.saturating_sub(release_us),
-                    _ => 0,
-                };
-                self.coast_us = Some(coast_us);
-            }
+        if !self.coast_fixed && sample.t_us < window_end_us {
+            self.track_coast(sample.t_us, brake, throttle);
         }
         if let Some((prev_t_us, prev_brake, prev_throttle)) = self.overlap_prev
             && prev_brake > OVERLAP_THRESHOLD
@@ -585,6 +576,46 @@ impl DrillRun {
             self.overlap_peak = self.overlap_peak.max(throttle);
         }
         self.overlap_prev = Some((sample.t_us, brake, throttle));
+    }
+
+    /// Updates the coast time with one sample before the window end, until the first handoff.
+    ///
+    /// A pedal is pressed above [`OVERLAP_THRESHOLD`]; presses and releases compare with the
+    /// previous sample of the window, so the first sample has none. The release time is the
+    /// latest throttle release, forgotten when the throttle is pressed again. The first handoff
+    /// after it fixes the coast: the brake pressed with the throttle released gives
+    /// `brake_t - release_t`, and the throttle released with the brake pressed gives 0. A brake
+    /// press with the throttle held, or with no release seen yet, sets a provisional 0 that a
+    /// handoff replaces. If the release and the brake press first show on the same sample after
+    /// a gap over [`MAX_OVERLAP_GAP_US`], the order is unknown and the coast stays as it was
+    /// (the provisional 0, or `None`).
+    fn track_coast(&mut self, t_us: u64, brake: f32, throttle: f32) {
+        let throttle_on = throttle > OVERLAP_THRESHOLD;
+        let brake_on = brake > OVERLAP_THRESHOLD;
+        let (released, brake_pressed, gap_us) = match self.overlap_prev {
+            Some((prev_t_us, prev_brake, prev_throttle)) => (
+                prev_throttle > OVERLAP_THRESHOLD && !throttle_on,
+                prev_brake <= OVERLAP_THRESHOLD && brake_on,
+                t_us.saturating_sub(prev_t_us),
+            ),
+            None => (false, false, 0),
+        };
+        if throttle_on {
+            self.coast_release_us = None;
+        } else if released {
+            self.coast_release_us = Some(t_us);
+        }
+
+        if released && brake_pressed && gap_us > MAX_OVERLAP_GAP_US {
+            self.coast_fixed = true;
+        } else if let Some(release_us) = self.coast_release_us
+            && (brake_pressed || (released && brake_on))
+        {
+            self.coast_us = Some(t_us.saturating_sub(release_us));
+            self.coast_fixed = true;
+        } else if brake_on && self.coast_us.is_none() {
+            self.coast_us = Some(0);
+        }
     }
 
     /// The overlap of the current rep for lead-in drills, `None` otherwise.
@@ -2572,6 +2603,156 @@ mod tests {
         .expect("lead-in drill reports overlap");
         let coast = overlap.coast_ms.expect("brake applied");
         assert!((coast - 150.0).abs() <= 1.0, "coast_ms was {coast}");
+    }
+
+    #[test]
+    fn coast_time_ignores_a_brake_brush_during_the_hold() {
+        // Brake at 10 % for 50 ms at the hold start with the throttle held, then a clean lift at
+        // 2.0 s and the brake at 2.15 s.
+        let overlap = lift_window_overlap(|t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            let brake = if (1_000_000..1_050_000).contains(&t) {
+                0.10
+            } else if t < 2_150_000 {
+                0.0
+            } else {
+                0.70
+            };
+            (brake, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        let coast = overlap.coast_ms.expect("brake applied");
+        assert!((coast - 150.0).abs() <= 1.0, "coast_ms was {coast}");
+    }
+
+    #[test]
+    fn coast_time_is_zero_with_a_resting_brake() {
+        // Brake resting at 10 % through the whole hold, then the lift at 2.0 s.
+        let overlap = lift_window_overlap(|t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            let brake = if t < 2_150_000 { 0.10 } else { 0.70 };
+            (brake, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        assert_eq!(overlap.coast_ms, Some(0.0));
+    }
+
+    #[test]
+    fn coast_time_ignores_a_heel_toe_blip() {
+        // A clean 150 ms coast, then the throttle at 30 % for 50 ms while braking.
+        let overlap = lift_window_overlap(|t| {
+            let throttle = if t < 2_000_000 {
+                0.80
+            } else if (2_200_000..2_250_000).contains(&t) {
+                0.30
+            } else {
+                0.0
+            };
+            let brake = if t < 2_150_000 { 0.0 } else { 0.70 };
+            (brake, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        let coast = overlap.coast_ms.expect("brake applied");
+        assert!((coast - 150.0).abs() <= 1.0, "coast_ms was {coast}");
+    }
+
+    #[test]
+    fn coast_time_is_unknown_after_a_stall() {
+        // The last throttle sample at 80 % is at 1.85 s; the next, 400 ms later at 2.25 s in the
+        // lift window, has the throttle at 0 and the brake at 70 %.
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        let mut events = feed_pedals(&mut run, 0, 1_850_000, |_t| (0.0, 0.80));
+        events.extend(feed_pedals(&mut run, 2_250_000, 2_800_000, |_t| {
+            (0.70, 0.0)
+        }));
+        assert_eq!(run.phase(), Phase::Finished);
+        let overlap = overlap_of(first_scored(&events)).expect("lead-in drill reports overlap");
+        assert_eq!(overlap.coast_ms, None);
+    }
+
+    #[test]
+    fn hold_restart_clears_the_coast() {
+        // A brake brush at the hold start, then a throttle drop at 1.2 s restarts the hold. The
+        // new hold starts at 1.3 s: LIFT at 2.3 s, the brake point at 2.6 s, the end at 3.1 s.
+        let brush_then_drop = |t: u64| {
+            let brake = if (1_000_000..1_050_000).contains(&t) {
+                0.10
+            } else {
+                0.0
+            };
+            let throttle = if (1_200_000..1_300_000).contains(&t) {
+                0.0
+            } else {
+                0.80
+            };
+            (brake, throttle)
+        };
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+
+        // No brake after the restart: no stale provisional coast.
+        let mut run = DrillRun::new(drill.clone(), 300);
+        run.start(0);
+        let mut events = feed_pedals(&mut run, 0, 3_200_000, |t| {
+            if t < 2_300_000 {
+                brush_then_drop(t)
+            } else {
+                (0.0, 0.0)
+            }
+        });
+        assert_eq!(throttle_events(&events), 3, "{events:?}");
+        assert_eq!(run.phase(), Phase::Finished);
+        let rep = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    DrillEvent::RepScored { .. } | DrillEvent::RepFailed { .. }
+                )
+            })
+            .expect("rep ended");
+        assert_eq!(overlap_of(rep).expect("overlap").coast_ms, None);
+
+        // A clean 150 ms coast after the restart.
+        let mut run = DrillRun::new(drill, 300);
+        events = run.start(0);
+        events.extend(feed_pedals(&mut run, 0, 3_200_000, |t| {
+            if t < 2_300_000 {
+                brush_then_drop(t)
+            } else if t < 2_450_000 {
+                (0.0, 0.0)
+            } else {
+                (0.70, 0.0)
+            }
+        }));
+        assert!(events.contains(&DrillEvent::RepStarted {
+            rep: 0,
+            start_us: 2_600_000
+        }));
+        let overlap = overlap_of(first_scored(&events)).expect("overlap");
+        let coast = overlap.coast_ms.expect("brake applied");
+        assert!((coast - 150.0).abs() <= 1.0, "coast_ms was {coast}");
+    }
+
+    #[test]
+    fn stall_across_lift_does_not_restart_the_hold() {
+        // Samples stop at 1.5 s with the throttle at 80 % and resume at 2.1 s, past the LIFT
+        // cue at 2.0 s, with the throttle at 0.
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+        let mut run = DrillRun::new(drill, 300);
+        let mut events = run.start(0);
+        events.extend(feed_pedals(&mut run, 0, 1_500_000, |_t| (0.0, 0.80)));
+        events.extend(feed_pedals(&mut run, 2_100_000, 2_800_000, |t| {
+            let brake = if t < 2_300_000 { 0.0 } else { 0.70 };
+            (brake, 0.0)
+        }));
+        assert_eq!(throttle_events(&events), 1, "{events:?}");
+        assert!(events.contains(&DrillEvent::RepStarted {
+            rep: 0,
+            start_us: 2_300_000
+        }));
+        assert_eq!(run.phase(), Phase::Finished);
     }
 
     #[test]

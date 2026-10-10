@@ -27,7 +27,10 @@ export interface TraceDrill extends BaseDrill {
 
 export type Drill = HoldDrill | TraceDrill;
 
-/** Default lead-in lift window in ms when omitted (SCT-037). */
+/**
+ * Default lead-in lift window in ms when omitted (SCT-037).
+ * Mirrors `DEFAULT_LIFT_MS` in `crates/core/src/preset.rs` and both must change together.
+ */
 export const DEFAULT_LIFT_MS = 300;
 
 /** The lift window in ms for a throttle lead-in. */

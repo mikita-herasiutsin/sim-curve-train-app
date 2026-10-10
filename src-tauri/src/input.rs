@@ -412,15 +412,18 @@ impl Stream {
         self.active_drill = None;
     }
 
-    /// Queues one sample for the running drill. Ends the drill once its thread stops taking
-    /// samples.
+    /// Queues one sample of the drill pedal, with the throttle for a lead-in, for the running
+    /// drill. Ends the drill once its thread stops taking samples.
     fn step_drill(&mut self, sample: &RawSample) {
         let Some(drill) = self.active_drill.as_ref() else {
             return;
         };
         let frame = PedalFrame::from_sample(&drill.profile, sample);
         let value = pedal_value(&frame, drill.pedal);
-        if !drill.thread.send(ValueSample::new(sample.t_us, value)) {
+        if !drill
+            .thread
+            .send(ValueSample::new(sample.t_us, value), frame.throttle)
+        {
             self.active_drill = None;
         }
     }
@@ -442,19 +445,25 @@ fn pedal_value(frame: &PedalFrame, pedal: Pedal) -> f32 {
     }
 }
 
-/// Why a drill can't start on `stream` with `profile`, if it can't.
-fn check_start(
-    stream: Option<&mut Stream>,
+/// Why `drill` can't start on `stream` with `profile`, if it can't.
+fn check_start<'a>(
+    stream: Option<&'a mut Stream>,
     profile: Option<DeviceProfile>,
-    pedal: Pedal,
-) -> Result<(&mut Stream, DeviceProfile), String> {
+    drill: &Drill,
+) -> Result<(&'a mut Stream, DeviceProfile), String> {
     let stream = stream.ok_or("no active pedal stream; connect the pedals first")?;
     let profile = profile.ok_or("the device has no saved profile; calibrate it first")?;
+    let pedal = drill.pedal;
     if profile.get(pedal).is_none() {
         let name = format!("{pedal:?}").to_lowercase();
         return Err(format!(
             "the {name} pedal isn't assigned; set it up on the Devices page"
         ));
+    }
+    if drill.throttle_lead_in.is_some() && profile.get(Pedal::Throttle).is_none() {
+        return Err(
+            "the throttle pedal isn't assigned; this drill starts from the throttle".to_owned(),
+        );
     }
     Ok((stream, profile))
 }
@@ -473,7 +482,7 @@ fn start_drill(
     audio: Option<AudioFeedback>,
     reply: &Sender<Result<(), String>>,
 ) {
-    let (stream, profile) = match check_start(stream, profile, drill.pedal) {
+    let (stream, profile) = match check_start(stream, profile, &drill) {
         Ok(checked) => checked,
         Err(error) => {
             let _ = reply.send(Err(error));
@@ -793,7 +802,7 @@ mod tests {
     use super::*;
     use crate::drill_thread::tests::{drain, event_channel, so_far};
     use sct_core::calibration::AxisCalibration;
-    use sct_core::preset::DrillKind;
+    use sct_core::preset::{DrillKind, ThrottleLeadIn};
     use sct_core::profile::PedalAxis;
 
     fn finished_count(events: &[String]) -> usize {
@@ -825,6 +834,7 @@ mod tests {
             lead_in_ms: 1000,
             tolerance: Some(5.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Hold {
                 target: 70.0,
                 hold_ms: 1000,
@@ -1033,5 +1043,101 @@ mod tests {
         let events = drain(&log);
         assert_eq!(audio.pulse_rate(), 0.0);
         assert_eq!(finished_count(&events), 1, "{events:?}");
+    }
+
+    /// A brake drill (1 s countdown, 1 s hold at 70 %) that starts from the throttle held at
+    /// 80 % for 1 s, with the default 300 ms lift window.
+    fn lead_in_drill() -> Drill {
+        Drill {
+            throttle_lead_in: Some(ThrottleLeadIn {
+                level: 80.0,
+                hold_ms: 1000,
+                lift_ms: None,
+            }),
+            ..drill(Pedal::Brake)
+        }
+    }
+
+    #[test]
+    fn lead_in_drill_needs_the_throttle_assigned() {
+        let mut stream = stream();
+        let (channel, log) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        start_drill(
+            Some(&mut stream),
+            Some(brake_profile()),
+            0,
+            lead_in_drill(),
+            channel,
+            None,
+            &reply,
+        );
+        assert_eq!(
+            answer.recv().unwrap(),
+            Err(
+                "the throttle pedal isn't assigned; this drill starts from the throttle".to_owned()
+            )
+        );
+        assert_eq!(drain(&log), Vec::<String>::new());
+        assert!(stream.active_drill.is_none());
+    }
+
+    /// A sample with the brake on axis 0 and the throttle on axis 1, as fractions of travel.
+    fn pedals_at(t_us: u64, brake: f32, throttle: f32) -> RawSample {
+        let mut sample = sample_at(t_us, brake);
+        sample.axes[1] = sample_at(t_us, throttle).axes[0];
+        sample.axis_count = 2;
+        sample
+    }
+
+    #[test]
+    fn the_throttle_reaches_the_drill_thread() {
+        let mut profile = brake_profile();
+        profile.set(
+            Pedal::Throttle,
+            Some(PedalAxis {
+                axis: 1,
+                calibration: AxisCalibration::default(),
+            }),
+        );
+        let mut stream = stream();
+        let (channel, log) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        start_drill(
+            Some(&mut stream),
+            Some(profile),
+            0,
+            lead_in_drill(),
+            channel,
+            None,
+            &reply,
+        );
+        assert_eq!(answer.recv().unwrap(), Ok(()));
+        // Countdown over with the throttle off: waiting. Then the throttle at the level, read
+        // from axis 1, starts the hold.
+        for ms in 1..1_050 {
+            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.0));
+        }
+        for ms in 1_050..1_100 {
+            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.80));
+        }
+        stream.finish_drill();
+        let events = drain(&log);
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|e| {
+                let (_, rest) = e.split_once("\"event\":\"").unwrap();
+                rest.split('"').next().unwrap()
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "countdownStarted",
+                "throttleWait",
+                "throttleHoldStarted",
+                "setFinished"
+            ]
+        );
     }
 }

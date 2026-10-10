@@ -1082,8 +1082,8 @@ mod tests {
             }
         }
         assert!(
-            checked.iter().filter(|id| id.starts_with("gt3/")).count() == 6,
-            "expected the six GT3 drills, checked {checked:?}"
+            checked.iter().filter(|id| id.starts_with("gt3/")).count() == 7,
+            "expected the seven GT3 drills, checked {checked:?}"
         );
     }
 

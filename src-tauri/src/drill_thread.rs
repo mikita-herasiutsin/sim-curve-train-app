@@ -1,6 +1,7 @@
 //! A drill runs on its own thread, so scoring a rep never delays a poll of the input thread.
 //!
-//! The input thread queues each sample. While a rep is scored, samples wait in the queue.
+//! The input thread queues each sample of the drill pedal with the throttle at the same time,
+//! which a drill with a throttle lead-in needs. While a rep is scored, samples wait in the queue.
 //! `DrillRun` uses sample timestamps only, so handling them late gives the same events and
 //! scores.
 
@@ -9,8 +10,8 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 
 use crate::audio::AudioFeedback;
-use sct_core::audio_map::ToneTracker;
-use sct_core::drill_engine::{DrillEvent, DrillRun, Phase};
+use sct_core::audio_map::{BAND_HYSTERESIS, ToneTracker};
+use sct_core::drill_engine::{DrillEvent, DrillRun, Phase, THROTTLE_ARM_MARGIN};
 use sct_core::scoring::ValueSample;
 use tauri::ipc::Channel;
 
@@ -24,7 +25,8 @@ const QUEUE_CAPACITY: usize = 4_096;
 /// the UI the terminal `SetFinished` (unless the run already finished). A handle dropped before
 /// [`DrillThread::start`] ends the thread without sending anything.
 pub struct DrillThread {
-    samples: SyncSender<ValueSample>,
+    /// Each sample of the drill pedal with the throttle fraction at the same time.
+    samples: SyncSender<(ValueSample, f32)>,
     /// Lets the parked thread start the run; `None` once it has.
     go: Option<SyncSender<()>>,
 }
@@ -49,8 +51,8 @@ impl DrillThread {
                 }
                 let mut drill = RunningDrill::new(run, channel, audio);
                 drill.start(t_us);
-                for sample in queue {
-                    if drill.step(sample) {
+                for (sample, throttle) in queue {
+                    if drill.step(sample, throttle) {
                         return;
                     }
                 }
@@ -69,10 +71,11 @@ impl DrillThread {
         }
     }
 
-    /// Queues `sample` without blocking. Returns `false` once the drill has ended or its queue
+    /// Queues `sample` of the drill pedal and the `throttle` fraction at the same time, without
+    /// blocking. Returns `false` once the drill has ended or its queue
     /// is full; the caller then drops this handle.
-    pub fn send(&self, sample: ValueSample) -> bool {
-        match self.samples.try_send(sample) {
+    pub fn send(&self, sample: ValueSample, throttle: f32) -> bool {
+        match self.samples.try_send((sample, throttle)) {
             Ok(()) => true,
             Err(TrySendError::Disconnected(_)) => false,
             Err(TrySendError::Full(_)) => {
@@ -117,23 +120,41 @@ impl RunningDrill {
         self.forward(events);
     }
 
-    /// Feeds one sample to the run, forwards its events and updates the tone. Returns whether
-    /// the run has finished.
-    fn step(&mut self, sample: ValueSample) -> bool {
+    /// Feeds one sample of the drill pedal and the throttle to the run, forwards its events and
+    /// updates the tone. Returns whether the run has finished.
+    fn step(&mut self, sample: ValueSample, throttle: f32) -> bool {
         let value = sample.value;
-        let events = self.run.push(sample);
+        let events = self.run.push_pedals(sample, throttle);
         self.forward(events);
         if let Some(audio) = &self.audio {
-            // Beeps only while a rep is active: silent in the countdown and the rest pause.
-            // The target is the nearest point of the band, so the tone measures the distance
-            // outside the timing-window envelope. `max`/`min` never panic, unlike `clamp`.
-            let target = matches!(self.run.phase(), Phase::Active { .. })
-                .then(|| self.run.band_at(sample.t_us))
-                .flatten()
-                .map(|(lo, hi)| value.max(lo).min(hi));
-            let rate = self
-                .tone
-                .step(target, value, self.run.drill().tolerance_fraction());
+            // Beeps while a rep is active, and against the throttle level while a lead-in drill
+            // waits for or holds the throttle: silent in the countdown, the lift window (the
+            // brake has no target before the rep), the scoring phase and the rest pause.
+            // In a rep the target is the nearest point of the band, so the tone measures the
+            // distance outside the timing-window envelope. `max`/`min` never panic, unlike
+            // `clamp`.
+            let (target, tone_value, tolerance) = match self.run.phase() {
+                // Any throttle from the level up to full counts, as in the engine: the
+                // target is the nearest point of that range. The tolerance makes the tracker's
+                // re-entry limit `tolerance * (1 - BAND_HYSTERESIS)` equal the engine's arm
+                // margin, so the tone goes silent on the sample that arms the hold.
+                Phase::ThrottleWait { .. } | Phase::ThrottleHold { .. } => (
+                    self.run
+                        .throttle_target_at(sample.t_us)
+                        .map(|level| throttle.max(level)),
+                    throttle,
+                    THROTTLE_ARM_MARGIN / (1.0 - BAND_HYSTERESIS),
+                ),
+                Phase::Active { .. } => (
+                    self.run
+                        .band_at(sample.t_us)
+                        .map(|(lo, hi)| value.max(lo).min(hi)),
+                    value,
+                    self.run.drill().tolerance_fraction(),
+                ),
+                _ => (None, value, self.run.drill().tolerance_fraction()),
+            };
+            let rate = self.tone.step(target, tone_value, tolerance);
             audio.set_pulse_rate(rate);
         }
         self.finished
@@ -166,7 +187,7 @@ impl Drop for RunningDrill {
 pub(crate) mod tests {
     use super::*;
     use sct_core::drill_engine::DEFAULT_REST_MS;
-    use sct_core::preset::{Drill, DrillKind};
+    use sct_core::preset::{Drill, DrillKind, ThrottleLeadIn};
     use sct_core::profile::Pedal;
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::time::Duration;
@@ -222,6 +243,7 @@ pub(crate) mod tests {
             lead_in_ms: 1000,
             tolerance: Some(5.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Hold {
                 target: 70.0,
                 hold_ms: 1000,
@@ -239,6 +261,7 @@ pub(crate) mod tests {
             lead_in_ms: 1000,
             tolerance: Some(6.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Trace {
                 points: vec![(0, 0.0), (150, 90.0), (600, 0.0)],
             },
@@ -268,7 +291,7 @@ pub(crate) mod tests {
         fraction: f32,
     ) -> f32 {
         for ms in from_ms..to_ms {
-            drill.step(ValueSample::new(ms * 1000, fraction));
+            drill.step(ValueSample::new(ms * 1000, fraction), 0.0);
         }
         audio.pulse_rate()
     }
@@ -328,10 +351,93 @@ pub(crate) mod tests {
 
         // Finish: run the whole drill off target (1 s countdown, 1 s hold).
         let (mut drill, audio) = start_with_audio(hold_drill());
-        let finished = (1_001..10_000).any(|ms| drill.step(ValueSample::new(ms * 1000, 0.2)));
+        let finished = (1_001..10_000).any(|ms| drill.step(ValueSample::new(ms * 1000, 0.2), 0.0));
         assert!(finished, "drill should have finished");
         drop(drill);
         assert_eq!(audio.pulse_rate(), 0.0);
+    }
+
+    /// A brake drill (1 s countdown, 1 s hold at 70 %) that starts from the throttle held at
+    /// 80 % for 1 s, with the default 300 ms lift window.
+    fn lead_in_drill() -> Drill {
+        Drill {
+            throttle_lead_in: Some(ThrottleLeadIn {
+                level: 80.0,
+                hold_ms: 1000,
+                lift_ms: None,
+            }),
+            ..hold_drill()
+        }
+    }
+
+    /// Feeds one sample per millisecond over `[from_ms, to_ms)` with the brake off and the
+    /// throttle at `throttle`, and returns the pulse rate after the last one.
+    fn feed_throttle(
+        drill: &mut RunningDrill,
+        audio: &AudioFeedback,
+        from_ms: u64,
+        to_ms: u64,
+        throttle: f32,
+    ) -> f32 {
+        for ms in from_ms..to_ms {
+            drill.step(ValueSample::new(ms * 1000, 0.0), throttle);
+        }
+        audio.pulse_rate()
+    }
+
+    #[test]
+    fn lead_in_beeps_against_the_throttle_level() {
+        let (mut drill, audio) = start_with_audio(lead_in_drill());
+
+        // Countdown: silent.
+        assert_eq!(feed_throttle(&mut drill, &audio, 100, 1_000, 0.0), 0.0);
+
+        // Countdown over with the throttle off: waiting, beeping against the level.
+        assert!(feed_throttle(&mut drill, &audio, 1_000, 1_010, 0.0) > 0.0);
+        let phase = drill.run.phase();
+        assert!(matches!(phase, Phase::ThrottleWait { .. }), "{phase:?}");
+
+        // Throttle at the level: the hold starts and the tone goes silent.
+        assert_eq!(feed_throttle(&mut drill, &audio, 1_010, 1_100, 0.80), 0.0);
+        let phase = drill.run.phase();
+        assert!(matches!(phase, Phase::ThrottleHold { .. }), "{phase:?}");
+
+        // Full throttle is above the level but still accepted, so the tone stays silent.
+        assert_eq!(feed_throttle(&mut drill, &audio, 1_100, 1_200, 1.0), 0.0);
+
+        // Throttle released: the hold drops and the tone beeps again.
+        assert!(feed_throttle(&mut drill, &audio, 1_200, 1_210, 0.0) > 0.0);
+        let phase = drill.run.phase();
+        assert!(matches!(phase, Phase::ThrottleWait { .. }), "{phase:?}");
+
+        // Coming from 0, a throttle just above the arm edge (level - 0.10 + 0.001) arms the
+        // hold and the tone goes silent on the same sample.
+        drill.step(
+            ValueSample::new(1_210_000, 0.0),
+            0.80 - THROTTLE_ARM_MARGIN + 0.001,
+        );
+        let phase = drill.run.phase();
+        assert!(matches!(phase, Phase::ThrottleHold { .. }), "{phase:?}");
+        assert_eq!(audio.pulse_rate(), 0.0);
+
+        // Full throttle stays silent up to the LIFT cue at 2.21 s.
+        assert_eq!(feed_throttle(&mut drill, &audio, 1_211, 2_210, 1.0), 0.0);
+
+        // Throttle off in the lift window (2.21 s to the brake point at 2.51 s): the hold
+        // goes on and the tone stays silent.
+        assert_eq!(feed_throttle(&mut drill, &audio, 2_210, 2_500, 0.0), 0.0);
+        let phase = drill.run.phase();
+        assert!(
+            matches!(
+                phase,
+                Phase::ThrottleHold {
+                    lift_us: 2_210_000,
+                    ends_us: 2_510_000,
+                    ..
+                }
+            ),
+            "{phase:?}"
+        );
     }
 
     #[test]
@@ -346,7 +452,7 @@ pub(crate) mod tests {
         .unwrap();
         thread.start();
         for ms in 1..=2_000 {
-            if !thread.send(ValueSample::new(ms * 1000, 0.5)) {
+            if !thread.send(ValueSample::new(ms * 1000, 0.5), 0.0) {
                 break;
             }
         }
@@ -356,7 +462,7 @@ pub(crate) mod tests {
             ["countdownStarted", "repStarted", "repScored", "setFinished"]
         );
         assert!(!events[3].contains("\"summary\":null"), "{}", events[3]);
-        assert!(!thread.send(ValueSample::new(2_001_000, 0.5)));
+        assert!(!thread.send(ValueSample::new(2_001_000, 0.5), 0.0));
     }
 
     #[test]
@@ -371,9 +477,15 @@ pub(crate) mod tests {
         )
         .unwrap();
         for ms in 1..=QUEUE_CAPACITY as u64 {
-            assert!(thread.send(ValueSample::new(ms * 1000, 0.5)), "sample {ms}");
+            assert!(
+                thread.send(ValueSample::new(ms * 1000, 0.5), 0.0),
+                "sample {ms}"
+            );
         }
-        assert!(!thread.send(ValueSample::new((QUEUE_CAPACITY as u64 + 1) * 1000, 0.5)));
+        assert!(!thread.send(
+            ValueSample::new((QUEUE_CAPACITY as u64 + 1) * 1000, 0.5),
+            0.0
+        ));
         // Started and dropped: the thread handles the queued samples, then ends the drill.
         thread.start();
         drop(thread);
@@ -395,7 +507,7 @@ pub(crate) mod tests {
         .unwrap();
         for ms in 1..=10 {
             assert!(
-                thread.send(ValueSample::new(ms * 1000, 0.70)),
+                thread.send(ValueSample::new(ms * 1000, 0.70), 0.0),
                 "sample {ms}"
             );
         }
@@ -430,7 +542,7 @@ pub(crate) mod tests {
         .unwrap();
         thread.start();
         for ms in 1..=1_100 {
-            if !thread.send(ValueSample::new(ms * 1000, 0.70)) {
+            if !thread.send(ValueSample::new(ms * 1000, 0.70), 0.0) {
                 break;
             }
         }
@@ -440,6 +552,6 @@ pub(crate) mod tests {
             kinds(&events),
             ["countdownStarted", "repStarted", "setFinished"]
         );
-        assert!(!thread.send(ValueSample::new(1_101_000, 0.70)));
+        assert!(!thread.send(ValueSample::new(1_101_000, 0.70), 0.0));
     }
 }

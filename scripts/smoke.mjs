@@ -902,9 +902,115 @@ async function main() {
     );
   });
 
+  await step("lead-in-drill-runs", async () => {
+    await click("button", "Pick Another Drill");
+    await waitFor(() => hasText("Select a Drill"), { what: "the drill picker" });
+    await selectOption(0, "Sample");
+    await waitFor(
+      async () => (await optionTexts(1)).some((t) => t.startsWith("Hairpin from the throttle")),
+      { what: "the hairpin from the throttle drill" },
+    );
+    await selectOption(1, "Hairpin from the throttle");
+    await waitFor(() => hasText("Duration:"), { what: "trace drill details" });
+    const drill = findDrill("sample", "hairpin-from-throttle");
+    assert(
+      drill.reps > 0 && drill.throttleLeadIn?.level === 80 && drill.throttleLeadIn?.holdMs === 1500,
+      "unexpected drill config",
+    );
+
+    await waitFor(() => ev(`Boolean(document.querySelector('[data-testid="lead-in-info"]'))`), {
+      timeout: 5000,
+      what: "lead-in-info element",
+    });
+    const infoText = await ev(
+      `document.querySelector('[data-testid="lead-in-info"]')?.textContent.replace(/\\s+/g, " ") ?? ""`,
+    );
+    assert(
+      infoText.includes("Starts from throttle:"),
+      `lead-in-info missing expected text, got ${JSON.stringify(infoText)}`,
+    );
+    assert(
+      infoText.includes("before the brake point"),
+      `lead-in-info missing expected text, got ${JSON.stringify(infoText)}`,
+    );
+
+    await setPedals(0, 0, 0);
+    await click("button", "Start Drill");
+
+    // Wait for countdown text THROTTLE
+    await waitFor(
+      () => ev(`document.querySelector(".countdown-number")?.textContent.trim() === "THROTTLE"`),
+      { timeout: 15_000, interval: 50, what: "THROTTLE in the countdown overlay" },
+    );
+
+    // Then wait for [data-testid="throttle-cue"] with text containing Press the throttle
+    await waitFor(
+      () =>
+        ev(
+          `document.querySelector('[data-testid="throttle-cue"]')?.textContent.includes("Press the throttle")`,
+        ),
+      { timeout: 15_000, interval: 50, what: "throttle cue with Press the throttle" },
+    );
+
+    // setPedals(0.9, 0, 0) and wait for the cue to show a decimal seconds number
+    await setPedals(0.9, 0, 0);
+    const liveThr = await livePedal("throttle");
+    if (liveThr !== null && liveThr < 0.7) {
+      log("      calibrated throttle at 0.9 was under 70%, raising to 1.0");
+      await setPedals(1.0, 0, 0);
+    }
+
+    await waitFor(
+      () =>
+        ev(`(() => {
+          const cue = document.querySelector('[data-testid="throttle-cue"]');
+          return Boolean(cue && /\\d+\\.\\d+/.test(cue.textContent));
+        })()`),
+      { timeout: 15_000, interval: 50, what: "decimal seconds number in throttle cue" },
+    );
+    await shot("lead-in-throttle-hold");
+
+    // Wait for lift cue banner
+    await waitFor(() => ev(`Boolean(document.querySelector('[data-testid="lift-cue"]'))`), {
+      timeout: 15_000,
+      interval: 50,
+      what: "the lift cue banner",
+    });
+    await shot("lead-in-lift");
+
+    // Play coast technique: release throttle, brief gap, then brake
+    await setPedals(0, 0, 0);
+    await sleep(150);
+    await setPedals(0, 0.7, 0);
+
+    // Wait for [data-testid="overlap"] and assert coast > 0 ms
+    const overlapText = await waitFor(
+      async () => {
+        const text = await ev(
+          `document.querySelector('[data-testid="overlap"]')?.textContent ?? null`,
+        );
+        return text;
+      },
+      { timeout: 15_000, interval: 50, what: "the overlap block to appear" },
+    );
+    const coastMatch = overlapText.match(/Coast\s*(\d+)\s*ms/);
+    assert(coastMatch, `could not parse coast ms from ${JSON.stringify(overlapText)}`);
+    const coastMs = Number(coastMatch[1]);
+    assert(coastMs > 0, `expected coast > 0 ms, got ${coastMs}`);
+    log(`      coast: ${coastMs} ms`);
+
+    // Abort Set and wait for finished overlay
+    await click("button", "Abort Set");
+    await waitFor(async () => (await drillSnap()).finished, {
+      timeout: 15_000,
+      what: "the finished overlay after abort",
+    });
+  });
+
   await step("abort-and-play-again", async () => {
     await click("button", "Pick Another Drill");
     await waitFor(() => hasText("Select a Drill"), { what: "the drill picker" });
+    await selectOption(1, "Brake hold 70%");
     const drill = findDrill("sample", "brake-hold-70");
     await setPedals(0, 0, 0);
     // Abort during the countdown: nothing was scored.

@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
   applyDrillEvent,
+  DEFAULT_LIFT_MS,
   DEFAULT_TOLERANCE,
   IDLE_VIEW,
   isPlayable,
+  liftWindowMs,
   playableDrills,
   toleranceOf,
   type HoldDrill,
+  type Overlap,
   type Preset,
   type SetSummary,
   type TraceDrill,
@@ -40,8 +43,11 @@ const summary: SetSummary = {
 };
 
 describe("applyDrillEvent", () => {
-  it("initializes repStartUs to 0", () => {
+  it("initializes repStartUs to 0, throttleLiftUs to 0, throttleHoldEndsUs to 0, and lastOverlap to null", () => {
     expect(IDLE_VIEW.repStartUs).toBe(0);
+    expect(IDLE_VIEW.throttleLiftUs).toBe(0);
+    expect(IDLE_VIEW.throttleHoldEndsUs).toBe(0);
+    expect(IDLE_VIEW.lastOverlap).toBeNull();
   });
 
   it("sets repStartUs when a rep starts", () => {
@@ -57,6 +63,186 @@ describe("applyDrillEvent", () => {
       endsUs: 3010,
     });
     expect(view).toMatchObject({ runState: "countdown", currentRep: 2, countdownEndsUs: 3010 });
+  });
+
+  it("handles throttleWait", () => {
+    const view = applyDrillEvent(IDLE_VIEW, {
+      event: "throttleWait",
+      rep: 1,
+      sinceUs: 2000,
+    });
+    expect(view).toMatchObject({
+      runState: "throttle",
+      currentRep: 1,
+      throttleLiftUs: 0,
+      throttleHoldEndsUs: 0,
+    });
+  });
+
+  it("handles throttleHoldStarted", () => {
+    const view = applyDrillEvent(IDLE_VIEW, {
+      event: "throttleHoldStarted",
+      rep: 1,
+      startUs: 2000,
+      liftUs: 3200,
+      endsUs: 3500,
+    });
+    expect(view).toMatchObject({
+      runState: "throttle",
+      currentRep: 1,
+      throttleLiftUs: 3200,
+      throttleHoldEndsUs: 3500,
+    });
+  });
+
+  it("resets throttleHoldEndsUs and throttleLiftUs to 0 on countdownStarted", () => {
+    const holdingView = applyDrillEvent(IDLE_VIEW, {
+      event: "throttleHoldStarted",
+      rep: 0,
+      startUs: 1000,
+      liftUs: 3200,
+      endsUs: 3500,
+    });
+    expect(holdingView.throttleLiftUs).toBe(3200);
+    expect(holdingView.throttleHoldEndsUs).toBe(3500);
+
+    const view = applyDrillEvent(holdingView, {
+      event: "countdownStarted",
+      rep: 1,
+      startUs: 4000,
+      endsUs: 6000,
+    });
+    expect(view.throttleLiftUs).toBe(0);
+    expect(view.throttleHoldEndsUs).toBe(0);
+  });
+
+  it("resets throttleHoldEndsUs and throttleLiftUs to 0 on throttleWait", () => {
+    const holdingView = applyDrillEvent(IDLE_VIEW, {
+      event: "throttleHoldStarted",
+      rep: 0,
+      startUs: 1000,
+      liftUs: 3200,
+      endsUs: 3500,
+    });
+    expect(holdingView.throttleLiftUs).toBe(3200);
+    expect(holdingView.throttleHoldEndsUs).toBe(3500);
+
+    const view = applyDrillEvent(holdingView, {
+      event: "throttleWait",
+      rep: 1,
+      sinceUs: 4000,
+    });
+    expect(view.throttleLiftUs).toBe(0);
+    expect(view.throttleHoldEndsUs).toBe(0);
+  });
+
+  it("resets throttleHoldEndsUs and throttleLiftUs to 0 on repStarted", () => {
+    const holdingView = applyDrillEvent(IDLE_VIEW, {
+      event: "throttleHoldStarted",
+      rep: 0,
+      startUs: 1000,
+      liftUs: 3200,
+      endsUs: 3500,
+    });
+    expect(holdingView.throttleLiftUs).toBe(3200);
+    expect(holdingView.throttleHoldEndsUs).toBe(3500);
+
+    const view = applyDrillEvent(holdingView, {
+      event: "repStarted",
+      rep: 0,
+      startUs: 3500,
+    });
+    expect(view.throttleLiftUs).toBe(0);
+    expect(view.throttleHoldEndsUs).toBe(0);
+  });
+
+  it("clears lastOverlap when repStarted fires", () => {
+    const overlap: Overlap = { overlapMs: 45, peakThrottle: 0.3 };
+    let view = applyDrillEvent(IDLE_VIEW, {
+      event: "repScored",
+      rep: 0,
+      score: traceScore(90, "A"),
+      overlap,
+    });
+    expect(view.lastOverlap).toEqual(overlap);
+
+    view = applyDrillEvent(view, { event: "repStarted", rep: 1, startUs: 4000 });
+    expect(view.lastOverlap).toBeNull();
+  });
+
+  it("records overlap on repScored", () => {
+    const overlap: Overlap = { overlapMs: 50, peakThrottle: 0.4 };
+    const view = applyDrillEvent(IDLE_VIEW, {
+      event: "repScored",
+      rep: 0,
+      score: traceScore(95, "S"),
+      overlap,
+    });
+    expect(view.lastOverlap).toEqual(overlap);
+  });
+
+  it("sets lastOverlap to null on repScored when omitted", () => {
+    const view = applyDrillEvent(IDLE_VIEW, {
+      event: "repScored",
+      rep: 0,
+      score: traceScore(95, "S"),
+    });
+    expect(view.lastOverlap).toBeNull();
+  });
+
+  it("records overlap on repFailed", () => {
+    const overlap: Overlap = { overlapMs: 120, peakThrottle: 0.8 };
+    const view = applyDrillEvent(IDLE_VIEW, {
+      event: "repFailed",
+      rep: 0,
+      overlap,
+    });
+    expect(view.lastOverlap).toEqual(overlap);
+  });
+
+  it("sets lastOverlap to null on repFailed when omitted", () => {
+    const view = applyDrillEvent(IDLE_VIEW, {
+      event: "repFailed",
+      rep: 0,
+    });
+    expect(view.lastOverlap).toBeNull();
+  });
+
+  it("keeps lastOverlap null throughout a no-lead-in event sequence", () => {
+    let view = applyDrillEvent(IDLE_VIEW, {
+      event: "countdownStarted",
+      rep: 0,
+      startUs: 0,
+      endsUs: 2000,
+    });
+    expect(view.lastOverlap).toBeNull();
+
+    view = applyDrillEvent(view, { event: "repStarted", rep: 0, startUs: 2000 });
+    expect(view.lastOverlap).toBeNull();
+
+    view = applyDrillEvent(view, {
+      event: "repScored",
+      rep: 0,
+      score: traceScore(88, "A"),
+    });
+    expect(view.lastOverlap).toBeNull();
+
+    view = applyDrillEvent(view, {
+      event: "countdownStarted",
+      rep: 1,
+      startUs: 3500,
+      endsUs: 5500,
+    });
+    expect(view.lastOverlap).toBeNull();
+
+    view = applyDrillEvent(view, { event: "repStarted", rep: 1, startUs: 5500 });
+    expect(view.lastOverlap).toBeNull();
+
+    view = applyDrillEvent(view, { event: "repFailed", rep: 1 });
+    expect(view.lastOverlap).toBeNull();
+
+    view = applyDrillEvent(view, { event: "setFinished", summary });
+    expect(view.lastOverlap).toBeNull();
   });
 
   it("keeps the rep score through the rest countdown and clears it when the next rep starts", () => {
@@ -203,5 +389,17 @@ describe("isPlayable and playableDrills", () => {
       drills: [holdBrake, traceThrottle, traceClutch, holdClutch],
     };
     expect(playableDrills(preset)).toEqual([holdBrake, traceThrottle]);
+  });
+});
+
+describe("liftWindowMs", () => {
+  it("defaults to DEFAULT_LIFT_MS (300) when liftMs is omitted", () => {
+    expect(DEFAULT_LIFT_MS).toBe(300);
+    expect(liftWindowMs({})).toBe(300);
+  });
+
+  it("returns explicit liftMs when specified", () => {
+    expect(liftWindowMs({ liftMs: 450 })).toBe(450);
+    expect(liftWindowMs({ liftMs: 0 })).toBe(0);
   });
 });

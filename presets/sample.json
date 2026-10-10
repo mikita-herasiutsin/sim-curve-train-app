@@ -54,6 +54,27 @@
       "holdMs": 10000,
       "reps": 3,
       "leadInMs": 3000
+    },
+    {
+      "id": "hairpin-from-throttle",
+      "name": "Hairpin from the throttle",
+      "type": "trace",
+      "pedal": "brake",
+      "tolerance": 6,
+      "reps": 5,
+      "leadInMs": 2000,
+      "throttleLeadIn": {
+        "level": 80,
+        "holdMs": 1500
+      },
+      "points": [
+        [0, 0],
+        [150, 100],
+        [300, 95],
+        [600, 70],
+        [1000, 40],
+        [1500, 0]
+      ]
     }
   ],
   "warmUp": {

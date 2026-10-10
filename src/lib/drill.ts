@@ -10,6 +10,8 @@ export interface BaseDrill {
   tolerance?: number;
   /** Decimal places (0 or 1) when showing percentages; omitted means 0. */
   decimals?: number;
+  /** Brake drills only: throttle held before each rep. LIFT comes liftMs before the brake point; the rep starts at the brake point (SCT-037). */
+  throttleLeadIn?: { level: number; holdMs: number; liftMs?: number };
 }
 
 export interface HoldDrill extends BaseDrill {
@@ -24,6 +26,17 @@ export interface TraceDrill extends BaseDrill {
 }
 
 export type Drill = HoldDrill | TraceDrill;
+
+/**
+ * Default lead-in lift window in ms when omitted (SCT-037).
+ * Mirrors `DEFAULT_LIFT_MS` in `crates/core/src/preset.rs` and both must change together.
+ */
+export const DEFAULT_LIFT_MS = 300;
+
+/** The lift window in ms for a throttle lead-in. */
+export function liftWindowMs(leadIn: { liftMs?: number }): number {
+  return leadIn.liftMs ?? DEFAULT_LIFT_MS;
+}
 
 /** Tolerance used when a drill omits it (D-17), matching `DEFAULT_TOLERANCE` in Rust. */
 export const DEFAULT_TOLERANCE = 10;
@@ -106,11 +119,20 @@ export interface SetSummary {
   stdDev: number;
 }
 
+// Mirrors sct_core::drill_engine::Overlap (camelCase); only lead-in drills report it.
+export interface Overlap {
+  overlapMs: number;
+  peakThrottle: number;
+  coastMs?: number;
+}
+
 export type DrillEvent =
   | { event: "countdownStarted"; rep: number; startUs: number; endsUs: number }
+  | { event: "throttleWait"; rep: number; sinceUs: number }
+  | { event: "throttleHoldStarted"; rep: number; startUs: number; liftUs: number; endsUs: number }
   | { event: "repStarted"; rep: number; startUs: number }
-  | { event: "repScored"; rep: number; score: RepScore }
-  | { event: "repFailed"; rep: number }
+  | { event: "repScored"; rep: number; score: RepScore; overlap?: Overlap }
+  | { event: "repFailed"; rep: number; overlap?: Overlap }
   | { event: "setFinished"; summary: SetSummary | null };
 
 export async function listPresets(): Promise<Preset[]> {
@@ -133,7 +155,7 @@ export async function abortDrillRun(token: number): Promise<void> {
   return invoke<void>("abort_drill_run", { token });
 }
 
-export type RunState = "idle" | "countdown" | "active" | "scored" | "finished";
+export type RunState = "idle" | "countdown" | "throttle" | "active" | "scored" | "finished";
 
 /** The outcome of one rep, numbered like the engine's `rep` (zero-based). `total` is null for a failed rep. */
 export interface RepResult {
@@ -148,7 +170,12 @@ export interface RunView {
   countdownEndsUs: number;
   /** Sample-clock start of the active rep (µs); 0 until a rep starts. */
   repStartUs: number;
+  /** Sample-clock µs of the LIFT cue; 0 while waiting. */
+  throttleLiftUs: number;
+  /** Sample-clock µs of the brake point; 0 while waiting. */
+  throttleHoldEndsUs: number;
   lastScore: RepScore | null;
+  lastOverlap: Overlap | null;
   /** Set summary; `null` after a finished set means no rep was scored. */
   summary: SetSummary | null;
   /** Every rep that ended, failed ones included. */
@@ -160,7 +187,10 @@ export const IDLE_VIEW: RunView = {
   currentRep: 0,
   countdownEndsUs: 0,
   repStartUs: 0,
+  throttleLiftUs: 0,
+  throttleHoldEndsUs: 0,
   lastScore: null,
+  lastOverlap: null,
   summary: null,
   reps: [],
 };
@@ -182,6 +212,24 @@ export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
         runState: "countdown",
         currentRep: e.rep,
         countdownEndsUs: e.endsUs,
+        throttleLiftUs: 0,
+        throttleHoldEndsUs: 0,
+      };
+    case "throttleWait":
+      return {
+        ...view,
+        runState: "throttle",
+        currentRep: e.rep,
+        throttleLiftUs: 0,
+        throttleHoldEndsUs: 0,
+      };
+    case "throttleHoldStarted":
+      return {
+        ...view,
+        runState: "throttle",
+        currentRep: e.rep,
+        throttleLiftUs: e.liftUs,
+        throttleHoldEndsUs: e.endsUs,
       };
     case "repStarted":
       return {
@@ -189,7 +237,10 @@ export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
         runState: "active",
         currentRep: e.rep,
         repStartUs: e.startUs,
+        throttleLiftUs: 0,
+        throttleHoldEndsUs: 0,
         lastScore: null,
+        lastOverlap: null,
       };
     case "repScored":
       return {
@@ -197,6 +248,7 @@ export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
         runState: "scored",
         currentRep: e.rep,
         lastScore: e.score,
+        lastOverlap: e.overlap ?? null,
         reps: withRep(view.reps, { rep: e.rep, total: e.score.total }),
       };
     case "repFailed":
@@ -205,6 +257,7 @@ export function applyDrillEvent(view: RunView, e: DrillEvent): RunView {
         runState: "scored",
         currentRep: e.rep,
         lastScore: null,
+        lastOverlap: e.overlap ?? null,
         reps: withRep(view.reps, { rep: e.rep, total: null }),
       };
     case "setFinished":

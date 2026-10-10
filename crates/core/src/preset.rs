@@ -28,6 +28,19 @@ pub const MIN_TRACE_MS: u32 = 500;
 pub const MAX_TRACE_MS: u32 = 15000;
 /// Most points a trace may have.
 pub const MAX_TRACE_POINTS: usize = 64;
+/// Lowest throttle level in percent a throttle lead-in may hold. At 20 the arm threshold
+/// (`level - THROTTLE_ARM_MARGIN`) is 10 %, so a resting throttle never arms the hold.
+pub const MIN_THROTTLE_LEAD_IN_LEVEL: f32 = 20.0;
+/// Highest throttle level in percent a throttle lead-in may hold.
+pub const MAX_THROTTLE_LEAD_IN_LEVEL: f32 = 100.0;
+/// Shortest throttle hold in milliseconds before the lift cue.
+pub const MIN_THROTTLE_HOLD_MS: u32 = 500;
+/// Longest throttle hold in milliseconds before the lift cue.
+pub const MAX_THROTTLE_HOLD_MS: u32 = 5000;
+/// Lift window in milliseconds when a throttle lead-in omits `liftMs`.
+pub const DEFAULT_LIFT_MS: u32 = 300;
+/// Longest allowed lift window in milliseconds.
+pub const MAX_LIFT_MS: u32 = 3000;
 
 const fn default_reps() -> u32 {
     DEFAULT_REPS
@@ -60,6 +73,29 @@ pub enum DrillKind {
     },
 }
 
+/// Throttle held before a brake rep (SCT-037). The LIFT cue comes `lift_ms` before the brake
+/// point, and the rep starts at the brake point.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThrottleLeadIn {
+    /// Throttle level to hold, in percent (`20.0..=100.0`).
+    pub level: f32,
+    /// How long the throttle must stay at the level before the lift cue, in ms (`500..=5000`).
+    pub hold_ms: u32,
+    /// Time from the LIFT cue to the brake point, in ms (`0..=3000`); the driver may lift any
+    /// time in this window. `None` (omitted) means [`DEFAULT_LIFT_MS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lift_ms: Option<u32>,
+}
+
+impl ThrottleLeadIn {
+    /// Returns the lift window in milliseconds, [`DEFAULT_LIFT_MS`] when `lift_ms` is unset.
+    #[must_use]
+    pub fn lift_window_ms(&self) -> u32 {
+        self.lift_ms.unwrap_or(DEFAULT_LIFT_MS)
+    }
+}
+
 /// A single practice drill within a preset.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +120,9 @@ pub struct Drill {
     /// `None` (omitted) means 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decimals: Option<u8>,
+    /// Throttle held before each rep of a brake drill; `None` (omitted) means no lead-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle_lead_in: Option<ThrottleLeadIn>,
     /// Drill type and parameters (flattened in JSON).
     #[serde(flatten)]
     pub kind: DrillKind,
@@ -106,6 +145,12 @@ impl Drill {
             DrillKind::Hold { target, .. } => Some(*target / 100.0),
             DrillKind::Trace { .. } => None,
         }
+    }
+
+    /// Returns the throttle lead-in level as a fraction in `[0.0, 1.0]`, if the drill has one.
+    #[must_use]
+    pub fn throttle_level_fraction(&self) -> Option<f32> {
+        self.throttle_lead_in.as_ref().map(|l| l.level / 100.0)
     }
 
     /// Returns the permissible tolerance as a fraction in `[0.0, 1.0]`.
@@ -131,13 +176,18 @@ impl Drill {
     /// Calculated as `lead_in_ms + reps * rep_ms() + (reps - 1) * DEFAULT_REST_MS`
     /// using saturating arithmetic. For [`DrillKind::Trace`] drills, each rep also adds
     /// [`crate::drill_engine::TRACE_LAG_MARGIN_MS`], because the engine ends a trace rep that
-    /// many milliseconds after its last point. When `reps` is 0, this returns `lead_in_ms`.
+    /// many milliseconds after its last point. A drill with a [`ThrottleLeadIn`] adds
+    /// `reps * (hold_ms + lift_window_ms())`; the wait for the throttle has no fixed length and
+    /// is not counted. When `reps` is 0, this returns `lead_in_ms`.
     #[must_use]
     pub fn set_ms(&self, reps: u32) -> u32 {
         if reps == 0 {
             return self.lead_in_ms;
         }
         let reps_duration = reps.saturating_mul(self.rep_ms());
+        let throttle_duration = self.throttle_lead_in.as_ref().map_or(0, |l| {
+            reps.saturating_mul(l.hold_ms.saturating_add(l.lift_window_ms()))
+        });
         let rest_duration = reps
             .saturating_sub(1)
             .saturating_mul(crate::drill_engine::DEFAULT_REST_MS);
@@ -150,6 +200,7 @@ impl Drill {
             .saturating_add(reps_duration)
             .saturating_add(rest_duration)
             .saturating_add(margin_duration)
+            .saturating_add(throttle_duration)
     }
 }
 
@@ -343,6 +394,51 @@ impl Preset {
     }
 }
 
+/// Checks a drill's throttle lead-in: brake drills only, and every field in range.
+fn validate_throttle_lead_in(
+    lead_in: &ThrottleLeadIn,
+    pedal: Pedal,
+    drill_id: &str,
+) -> Result<(), PresetError> {
+    if pedal != Pedal::Brake {
+        return Err(PresetError::Invalid {
+            drill: Some(drill_id.to_string()),
+            message: "field 'throttleLeadIn' is only allowed on brake drills".to_string(),
+        });
+    }
+    let level = lead_in.level;
+    if !level.is_finite()
+        || !(MIN_THROTTLE_LEAD_IN_LEVEL..=MAX_THROTTLE_LEAD_IN_LEVEL).contains(&level)
+    {
+        return Err(PresetError::Invalid {
+            drill: Some(drill_id.to_string()),
+            message: format!(
+                "field 'throttleLeadIn.level' ({level}) must be finite and between {MIN_THROTTLE_LEAD_IN_LEVEL} and {MAX_THROTTLE_LEAD_IN_LEVEL}"
+            ),
+        });
+    }
+    if !(MIN_THROTTLE_HOLD_MS..=MAX_THROTTLE_HOLD_MS).contains(&lead_in.hold_ms) {
+        return Err(PresetError::Invalid {
+            drill: Some(drill_id.to_string()),
+            message: format!(
+                "field 'throttleLeadIn.holdMs' ({}) must be between {MIN_THROTTLE_HOLD_MS} and {MAX_THROTTLE_HOLD_MS}",
+                lead_in.hold_ms
+            ),
+        });
+    }
+    if let Some(lift_ms) = lead_in.lift_ms
+        && lift_ms > MAX_LIFT_MS
+    {
+        return Err(PresetError::Invalid {
+            drill: Some(drill_id.to_string()),
+            message: format!(
+                "field 'throttleLeadIn.liftMs' ({lift_ms}) must be between 0 and {MAX_LIFT_MS}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn validate_drill(drill: &Drill) -> Result<(), PresetError> {
     let drill_id = &drill.id;
     let drill_ctx = Some(drill_id.clone());
@@ -396,6 +492,10 @@ fn validate_drill(drill: &Drill) -> Result<(), PresetError> {
             drill: drill_ctx,
             message: format!("field 'decimals' ({decimals}) must be 0 or 1"),
         });
+    }
+
+    if let Some(lead_in) = &drill.throttle_lead_in {
+        validate_throttle_lead_in(lead_in, drill.pedal, drill_id)?;
     }
 
     match &drill.kind {
@@ -809,6 +909,7 @@ const HOLD_KEYS: &[&str] = &[
     "leadInMs",
     "tolerance",
     "decimals",
+    "throttleLeadIn",
     "target",
     "holdMs",
 ];
@@ -821,6 +922,7 @@ const TRACE_KEYS: &[&str] = &[
     "leadInMs",
     "tolerance",
     "decimals",
+    "throttleLeadIn",
     "points",
 ];
 
@@ -1020,6 +1122,7 @@ mod tests {
             lead_in_ms: 3000,
             tolerance: Some(5.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Hold {
                 target: 70.0,
                 hold_ms: 2000,
@@ -1036,6 +1139,7 @@ mod tests {
             lead_in_ms: 2000,
             tolerance: Some(6.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Trace {
                 points: vec![(0, 0.0), (150, 92.0), (600, 60.0), (1500, 0.0)],
             },
@@ -1732,6 +1836,175 @@ mod tests {
         assert_eq!(parse_preset(trace).unwrap().drills[0].decimals, Some(1));
     }
 
+    fn lead_in_json(pedal: &str, lead_in: &str) -> String {
+        format!(
+            r#"{{"schemaVersion":1,"id":"p","name":"P","drills":[{{"id":"d","name":"D","type":"hold","pedal":"{pedal}","target":70,"holdMs":2000{lead_in}}}]}}"#
+        )
+    }
+
+    fn assert_lead_in_error(json: &str, needle: &str) {
+        let err = parse_preset(json).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PresetError::Invalid { drill: Some(d), message } if d == "d" && message.contains(needle)
+            ),
+            "unexpected error {err:?}, wanted '{needle}'"
+        );
+    }
+
+    #[test]
+    fn throttle_lead_in_parses_on_hold_and_trace() {
+        let preset = parse_preset(&lead_in_json(
+            "brake",
+            r#","throttleLeadIn":{"level":80,"holdMs":1500}"#,
+        ))
+        .unwrap();
+        let drill = &preset.drills[0];
+        assert_eq!(
+            drill.throttle_lead_in,
+            Some(ThrottleLeadIn {
+                level: 80.0,
+                hold_ms: 1500,
+                lift_ms: None
+            })
+        );
+        assert!((drill.throttle_level_fraction().unwrap() - 0.80).abs() < 1e-6);
+
+        let trace = r#"{"schemaVersion":1,"id":"p","name":"P","drills":[{"id":"t","name":"T","type":"trace","pedal":"brake","throttleLeadIn":{"level":100,"holdMs":500},"points":[[0,0],[1000,50]]}]}"#;
+        let preset = parse_preset(trace).unwrap();
+        assert_eq!(
+            preset.drills[0].throttle_lead_in,
+            Some(ThrottleLeadIn {
+                level: 100.0,
+                hold_ms: 500,
+                lift_ms: None
+            })
+        );
+
+        let none = parse_preset(&lead_in_json("brake", "")).unwrap();
+        assert_eq!(none.drills[0].throttle_lead_in, None);
+        assert_eq!(none.drills[0].throttle_level_fraction(), None);
+    }
+
+    #[test]
+    fn throttle_lead_in_validation() {
+        assert_lead_in_error(
+            &lead_in_json(
+                "throttle",
+                r#","throttleLeadIn":{"level":80,"holdMs":1500}"#,
+            ),
+            "field 'throttleLeadIn' is only allowed on brake drills",
+        );
+        assert_lead_in_error(
+            &lead_in_json("brake", r#","throttleLeadIn":{"level":19.9,"holdMs":1500}"#),
+            "field 'throttleLeadIn.level' (19.9)",
+        );
+        assert!(
+            parse_preset(&lead_in_json(
+                "brake",
+                r#","throttleLeadIn":{"level":20,"holdMs":1500}"#
+            ))
+            .is_ok()
+        );
+        assert_lead_in_error(
+            &lead_in_json(
+                "brake",
+                r#","throttleLeadIn":{"level":100.5,"holdMs":1500}"#,
+            ),
+            "field 'throttleLeadIn.level' (100.5)",
+        );
+        assert_lead_in_error(
+            &lead_in_json("brake", r#","throttleLeadIn":{"level":80,"holdMs":499}"#),
+            "field 'throttleLeadIn.holdMs' (499)",
+        );
+        assert_lead_in_error(
+            &lead_in_json("brake", r#","throttleLeadIn":{"level":80,"holdMs":5001}"#),
+            "field 'throttleLeadIn.holdMs' (5001)",
+        );
+
+        let mut drill = valid_hold_drill();
+        drill.throttle_lead_in = Some(ThrottleLeadIn {
+            level: f32::NAN,
+            hold_ms: 1000,
+            lift_ms: None,
+        });
+        assert!(matches!(
+            validate_drill(&drill),
+            Err(PresetError::Invalid { message, .. }) if message.contains("throttleLeadIn.level")
+        ));
+    }
+
+    #[test]
+    fn throttle_lead_in_rejects_unknown_key() {
+        let err = parse_preset(&lead_in_json(
+            "brake",
+            r#","throttleLeadIn":{"level":80,"holdMs":1500,"lvl":3}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `lvl`"),
+            "unexpected error {err}"
+        );
+    }
+
+    #[test]
+    fn throttle_lead_in_round_trip() {
+        let drill = valid_hold_drill();
+        let json = serde_json::to_value(&drill).unwrap();
+        assert!(json.get("throttleLeadIn").is_none());
+
+        let mut preset = valid_preset();
+        preset.drills[0].throttle_lead_in = Some(ThrottleLeadIn {
+            level: 60.0,
+            hold_ms: 2000,
+            lift_ms: None,
+        });
+        let json = serde_json::to_string(&preset).unwrap();
+        assert!(json.contains(r#""throttleLeadIn":{"level":60.0,"holdMs":2000}"#));
+        assert!(!json[json.find("hairpin").unwrap()..].contains("throttleLeadIn"));
+        assert_eq!(parse_preset(&json).unwrap(), preset);
+
+        preset.drills[0].throttle_lead_in = Some(ThrottleLeadIn {
+            level: 60.0,
+            hold_ms: 2000,
+            lift_ms: Some(1200),
+        });
+        let json = serde_json::to_string(&preset).unwrap();
+        assert!(json.contains(r#""throttleLeadIn":{"level":60.0,"holdMs":2000,"liftMs":1200}"#));
+        assert_eq!(parse_preset(&json).unwrap(), preset);
+    }
+
+    #[test]
+    fn throttle_lead_in_lift_window() {
+        let preset = parse_preset(&lead_in_json(
+            "brake",
+            r#","throttleLeadIn":{"level":80,"holdMs":1500}"#,
+        ))
+        .unwrap();
+        let lead_in = preset.drills[0].throttle_lead_in.as_ref().unwrap();
+        assert_eq!(lead_in.lift_ms, None);
+        assert_eq!(lead_in.lift_window_ms(), DEFAULT_LIFT_MS);
+        assert_eq!(DEFAULT_LIFT_MS, 300);
+
+        for lift_ms in [0, 3000] {
+            let preset = parse_preset(&lead_in_json(
+                "brake",
+                &format!(r#","throttleLeadIn":{{"level":80,"holdMs":1500,"liftMs":{lift_ms}}}"#),
+            ))
+            .unwrap();
+            let lead_in = preset.drills[0].throttle_lead_in.as_ref().unwrap();
+            assert_eq!(lead_in.lift_window_ms(), lift_ms);
+        }
+        assert_lead_in_error(
+            &lead_in_json(
+                "brake",
+                r#","throttleLeadIn":{"level":80,"holdMs":1500,"liftMs":3001}"#,
+            ),
+            "field 'throttleLeadIn.liftMs' (3001)",
+        );
+    }
+
     #[test]
     fn drill_helpers() {
         let hold = valid_hold_drill();
@@ -1751,7 +2024,7 @@ mod tests {
         let json = include_str!("../../../presets/sample.json");
         let preset = parse_preset(json).expect("presets/sample.json must be valid");
         assert_eq!(preset.id, "sample");
-        assert_eq!(preset.drills.len(), 4);
+        assert_eq!(preset.drills.len(), 5);
         assert_eq!(preset.drills[0].pedal, Pedal::Brake);
         assert_eq!(preset.drills[1].pedal, Pedal::Throttle);
         assert_eq!(preset.drills[2].pedal, Pedal::Brake);
@@ -1897,6 +2170,25 @@ mod tests {
         assert_eq!(trace.set_ms(1), 2000 + 1500 + 300);
         // reps 4: 2000 + 4 * 1500 + 3 * 2000 + 4 * 300 = 15200
         assert_eq!(trace.set_ms(4), 15200);
+    }
+
+    #[test]
+    fn drill_set_ms_counts_the_throttle_lead_in() {
+        let mut hold = valid_hold_drill(); // hold_ms = 2000, lead_in_ms = 3000
+        hold.throttle_lead_in = Some(ThrottleLeadIn {
+            level: 80.0,
+            hold_ms: 1500,
+            lift_ms: Some(300),
+        });
+        assert_eq!(hold.set_ms(0), 3000);
+        // reps 5: 21000 without the lead-in + 5 * (1500 + 300) = 30000
+        assert_eq!(hold.set_ms(5), 30000);
+
+        // An omitted lift window counts as DEFAULT_LIFT_MS.
+        if let Some(lead_in) = hold.throttle_lead_in.as_mut() {
+            lead_in.lift_ms = None;
+        }
+        assert_eq!(hold.set_ms(1), 3000 + 2000 + 1500 + DEFAULT_LIFT_MS);
     }
 
     #[test]

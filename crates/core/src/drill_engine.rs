@@ -5,6 +5,13 @@
 //! countdown, an active practice window, and rep evaluation ([`score_hold`] or [`score_trace`]).
 //!
 //! A set summary ([`summarize_set`]) is produced upon set completion or early abort.
+//!
+//! A brake drill with a throttle lead-in (SCT-037) adds two phases between the countdown and
+//! the rep: [`Phase::ThrottleWait`] until the throttle reaches the level, then
+//! [`Phase::ThrottleHold`] for the hold time and the lift window. The LIFT cue comes at the
+//! end of the hold (`lift_us`), and the rep starts at the brake point (`ends_us`), the end of
+//! the lift window. Each rep of such a drill reports an [`Overlap`] of the two pedals and the
+//! coast time from the throttle release to the brake application.
 
 use serde::Serialize;
 
@@ -18,6 +25,38 @@ pub const DEFAULT_REST_MS: u32 = 2000;
 
 /// Extra recording margin in milliseconds after a trace rep ends for reaction lag estimation.
 pub const TRACE_LAG_MARGIN_MS: u32 = 300;
+
+/// The throttle arms the hold at `level - THROTTLE_ARM_MARGIN` or above.
+pub const THROTTLE_ARM_MARGIN: f32 = 0.10;
+/// A started hold restarts only when the throttle falls below `level - THROTTLE_DROP_MARGIN`.
+/// The gap to [`THROTTLE_ARM_MARGIN`] keeps a throttle resting on the arm edge from restarting
+/// the hold on every sample.
+pub const THROTTLE_DROP_MARGIN: f32 = 0.15;
+/// A pedal counts as pressed for overlap above this fraction.
+pub const OVERLAP_THRESHOLD: f32 = 0.05;
+/// Longest gap between two samples counted toward overlap, so a stalled stream doesn't inflate it.
+const MAX_OVERLAP_GAP_US: u64 = 100_000;
+
+/// Pedal overlap and coast time during one rep of a throttle lead-in drill, measured over the
+/// throttle hold, the lift window and the active window.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Overlap {
+    /// Total time both pedals were above [`OVERLAP_THRESHOLD`], in ms.
+    pub overlap_ms: f32,
+    /// Highest throttle (fraction 0..=1) seen while both pedals were above
+    /// [`OVERLAP_THRESHOLD`]; 0 if none.
+    pub peak_throttle: f32,
+    /// Time from the last throttle release to the brake press, in ms, fixed at the first
+    /// handoff of the pedals: the brake pressed with the throttle released, or the throttle
+    /// released with the brake pressed (0, the pedals overlapped). Later throttle blips while
+    /// braking do not change it. A brake press with the throttle still held gives 0 until a
+    /// handoff replaces it. `None` if the brake was never pressed in the window, or if a stalled
+    /// stream hid whether the release or the brake press came first and the brake had not been
+    /// pressed before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coast_ms: Option<f32>,
+}
 
 /// Evaluated repetition score for either a hold or trace drill.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -63,6 +102,27 @@ pub enum Phase {
         /// Monotonic timestamp in microseconds when countdown expires.
         ends_us: u64,
     },
+    /// Lead-in drills only: countdown done, waiting for the throttle to reach the level.
+    ///
+    /// There is no timeout: the engine waits rather than failing the rep, and the user can
+    /// abort.
+    ThrottleWait {
+        /// Zero-based repetition index.
+        rep: u32,
+    },
+    /// Lead-in drills only: throttle held until the LIFT cue at `lift_us`, then the lift
+    /// window; the rep starts at the brake point `ends_us`.
+    #[serde(rename_all = "camelCase")]
+    ThrottleHold {
+        /// Zero-based repetition index.
+        rep: u32,
+        /// Monotonic timestamp in microseconds when the throttle reached the level.
+        start_us: u64,
+        /// Monotonic timestamp in microseconds of the LIFT cue (the hold end).
+        lift_us: u64,
+        /// Monotonic timestamp in microseconds of the brake point (the rep start).
+        ends_us: u64,
+    },
     /// Repetition actively underway.
     #[serde(rename_all = "camelCase")]
     Active {
@@ -98,6 +158,27 @@ pub enum DrillEvent {
         /// Monotonic timestamp in microseconds when countdown expires.
         ends_us: u64,
     },
+    /// Lead-in drills: the engine waits for the throttle (after the countdown, or after it dropped).
+    #[serde(rename_all = "camelCase")]
+    ThrottleWait {
+        /// Zero-based repetition index.
+        rep: u32,
+        /// Monotonic timestamp in microseconds since when the engine waits.
+        since_us: u64,
+    },
+    /// Lead-in drills: the throttle reached the level; the LIFT cue comes at `lift_us` and
+    /// the rep starts at the brake point `ends_us`.
+    #[serde(rename_all = "camelCase")]
+    ThrottleHoldStarted {
+        /// Zero-based repetition index.
+        rep: u32,
+        /// Monotonic timestamp in microseconds when the throttle reached the level.
+        start_us: u64,
+        /// Monotonic timestamp in microseconds of the LIFT cue (the hold end).
+        lift_us: u64,
+        /// Monotonic timestamp in microseconds of the brake point (the rep start).
+        ends_us: u64,
+    },
     /// A repetition has transitioned from countdown to active.
     #[serde(rename_all = "camelCase")]
     RepStarted {
@@ -112,11 +193,17 @@ pub enum DrillEvent {
         rep: u32,
         /// Score breakdown for the repetition.
         score: RepScore,
+        /// Pedal overlap of the rep; `None` for drills without a throttle lead-in.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        overlap: Option<Overlap>,
     },
     /// A repetition completed but scoring returned `None` (e.g. stalled input).
     RepFailed {
         /// Zero-based repetition index.
         rep: u32,
+        /// Pedal overlap of the rep; `None` for drills without a throttle lead-in.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        overlap: Option<Overlap>,
     },
     /// Drill set concluded (all repetitions completed).
     #[serde(rename_all = "camelCase")]
@@ -140,6 +227,25 @@ pub struct DrillRun {
     current_rep_active_ends_us: u64,
     buffer: Vec<ValueSample>,
     results: Vec<Option<RepScore>>,
+    /// Throttle level fraction of the lead-in; `None` for drills without one.
+    throttle_level: Option<f32>,
+    /// Throttle hold of the lead-in in microseconds.
+    throttle_hold_us: u64,
+    /// Lift window of the lead-in (LIFT cue to brake point) in microseconds.
+    throttle_lift_us: u64,
+    /// Overlap time accumulated in the current rep, in microseconds.
+    overlap_us: u64,
+    /// Highest throttle seen with both pedals pressed in the current rep.
+    overlap_peak: f32,
+    /// Previous sample of the overlap window: `(t_us, brake, throttle)`.
+    overlap_prev: Option<(u64, f32, f32)>,
+    /// Time of the last throttle release in the current rep, while the throttle stays released.
+    coast_release_us: Option<u64>,
+    /// Coast time of the current rep in microseconds: a provisional 0 after a brake press with
+    /// the throttle held, replaced by the first handoff.
+    coast_us: Option<u64>,
+    /// Whether the first handoff of the current rep has fixed `coast_us`.
+    coast_fixed: bool,
 }
 
 impl DrillRun {
@@ -151,6 +257,15 @@ impl DrillRun {
     pub fn new(drill: Drill, rest_ms: u32) -> Self {
         let curve = drill.trace_curve();
         let band = curve.as_ref().map(|c| c.envelope_table(RAMP_WINDOW_MS));
+        let throttle_level = drill.throttle_level_fraction();
+        let throttle_hold_us = drill
+            .throttle_lead_in
+            .as_ref()
+            .map_or(0, |l| u64::from(l.hold_ms) * 1_000);
+        let throttle_lift_us = drill
+            .throttle_lead_in
+            .as_ref()
+            .map_or(0, |l| u64::from(l.lift_window_ms()) * 1_000);
         Self {
             drill,
             curve,
@@ -162,6 +277,15 @@ impl DrillRun {
             current_rep_active_ends_us: 0,
             buffer: Vec::new(),
             results: Vec::new(),
+            throttle_level,
+            throttle_hold_us,
+            throttle_lift_us,
+            overlap_us: 0,
+            overlap_peak: 0.0,
+            overlap_prev: None,
+            coast_release_us: None,
+            coast_us: None,
+            coast_fixed: false,
         }
     }
 
@@ -193,16 +317,29 @@ impl DrillRun {
         }]
     }
 
-    /// Advances the state machine with a new timestamped pedal sample.
+    /// Advances the state machine with a new timestamped pedal sample, with the throttle released.
     ///
+    /// Same as [`Self::push_pedals`] with a throttle of `0.0`. On a drill with a throttle
+    /// lead-in the run therefore never leaves [`Phase::ThrottleWait`]; callers must use
+    /// [`Self::push_pedals`] for such drills.
+    pub fn push(&mut self, sample: ValueSample) -> Vec<DrillEvent> {
+        self.push_pedals(sample, 0.0)
+    }
+
+    /// Advances the state machine with a new timestamped sample of the drill pedal and the
+    /// throttle fraction at the same `t_us`.
+    ///
+    /// The throttle only matters for drills with a throttle lead-in; other drills ignore it.
     /// If timestamps jump across multiple phase boundaries, transitions and events
     /// are evaluated sequentially in order until current phase catches up to `sample.t_us`.
-    pub fn push(&mut self, sample: ValueSample) -> Vec<DrillEvent> {
+    pub fn push_pedals(&mut self, sample: ValueSample, throttle: f32) -> Vec<DrillEvent> {
         if matches!(self.phase, Phase::Idle | Phase::Finished | Phase::Aborted) {
             return Vec::new();
         }
 
         let mut events = Vec::new();
+        let is_trace = matches!(self.drill.kind, DrillKind::Trace { .. });
+        let margin_us = u64::from(TRACE_LAG_MARGIN_MS) * 1_000;
 
         loop {
             match self.phase {
@@ -211,37 +348,59 @@ impl DrillRun {
                 }
                 Phase::Countdown { rep, ends_us } => {
                     if sample.t_us < ends_us {
-                        if matches!(self.drill.kind, DrillKind::Trace { .. }) {
-                            let margin_us = u64::from(TRACE_LAG_MARGIN_MS) * 1_000;
-                            if sample.t_us >= ends_us.saturating_sub(margin_us) {
-                                self.buffer.push(sample);
-                            }
+                        if is_trace
+                            && self.throttle_level.is_none()
+                            && sample.t_us >= ends_us.saturating_sub(margin_us)
+                        {
+                            self.buffer.push(sample);
                         }
                         break;
                     }
 
-                    let d_ms = match &self.drill.kind {
-                        DrillKind::Hold { hold_ms, .. } => *hold_ms,
-                        DrillKind::Trace { points } => points.last().map_or(0, |p| p.0),
-                    };
-                    let duration_us = u64::from(d_ms) * 1_000;
-                    let start_us = ends_us;
-                    let active_ends_us = start_us.saturating_add(duration_us);
+                    if let Some(level) = self.throttle_level {
+                        self.leave_countdown_to_throttle(
+                            rep,
+                            ends_us,
+                            sample.t_us,
+                            level,
+                            throttle,
+                            &mut events,
+                        );
+                    } else {
+                        self.enter_active(rep, ends_us, &mut events);
+                    }
+                }
+                Phase::ThrottleWait { rep } => {
+                    let level = self.throttle_level.unwrap_or(0.0);
+                    if throttle < level - THROTTLE_ARM_MARGIN {
+                        break;
+                    }
+                    self.enter_throttle_hold(rep, sample.t_us, &mut events);
+                }
+                Phase::ThrottleHold {
+                    rep,
+                    lift_us,
+                    ends_us,
+                    ..
+                } => {
+                    if sample.t_us >= ends_us {
+                        // The rep starts at the brake point, not at this sample's time.
+                        self.enter_active(rep, ends_us, &mut events);
+                        continue;
+                    }
 
-                    self.current_rep_start_us = start_us;
-                    self.current_rep_active_ends_us = active_ends_us;
-                    self.phase = Phase::Active {
-                        rep,
-                        start_us,
-                        ends_us: active_ends_us,
-                    };
-                    events.push(DrillEvent::RepStarted { rep, start_us });
+                    self.step_throttle_hold(rep, lift_us, ends_us, sample, throttle, &mut events);
+                    break;
                 }
                 Phase::Active {
                     rep,
                     start_us,
                     ends_us,
                 } => {
+                    if self.throttle_level.is_some() {
+                        // The boundary sample (t >= ends_us) closes the last gap at ends_us.
+                        self.accumulate_overlap(sample, throttle, ends_us);
+                    }
                     if sample.t_us < ends_us {
                         self.buffer.push(sample);
                         break;
@@ -257,7 +416,6 @@ impl DrillRun {
                     }
                 }
                 Phase::Scoring { rep } => {
-                    let margin_us = u64::from(TRACE_LAG_MARGIN_MS) * 1_000;
                     let scoring_ends_us = self.current_rep_active_ends_us.saturating_add(margin_us);
 
                     if sample.t_us <= scoring_ends_us {
@@ -279,6 +437,211 @@ impl DrillRun {
         }
 
         events
+    }
+
+    /// Starts the active window of `rep` at `start_us` and emits [`DrillEvent::RepStarted`].
+    fn enter_active(&mut self, rep: u32, start_us: u64, events: &mut Vec<DrillEvent>) {
+        let d_ms = match &self.drill.kind {
+            DrillKind::Hold { hold_ms, .. } => *hold_ms,
+            DrillKind::Trace { points } => points.last().map_or(0, |p| p.0),
+        };
+        let duration_us = u64::from(d_ms) * 1_000;
+        let active_ends_us = start_us.saturating_add(duration_us);
+
+        self.current_rep_start_us = start_us;
+        self.current_rep_active_ends_us = active_ends_us;
+        self.phase = Phase::Active {
+            rep,
+            start_us,
+            ends_us: active_ends_us,
+        };
+        events.push(DrillEvent::RepStarted { rep, start_us });
+    }
+
+    /// Ends the countdown of a lead-in drill at `ends_us`: straight into the throttle hold if
+    /// the boundary sample's throttle is at the level, else into [`Phase::ThrottleWait`].
+    ///
+    /// The hold starts at the boundary sample's time `sample_t_us`, not at `ends_us`, so a late
+    /// sample after a stream stall cannot pass a hold the throttle was never seen holding.
+    fn leave_countdown_to_throttle(
+        &mut self,
+        rep: u32,
+        ends_us: u64,
+        sample_t_us: u64,
+        level: f32,
+        throttle: f32,
+        events: &mut Vec<DrillEvent>,
+    ) {
+        if throttle >= level - THROTTLE_ARM_MARGIN {
+            self.enter_throttle_hold(rep, sample_t_us, events);
+        } else {
+            self.phase = Phase::ThrottleWait { rep };
+            events.push(DrillEvent::ThrottleWait {
+                rep,
+                since_us: ends_us,
+            });
+        }
+    }
+
+    /// Handles a sample before the brake point at `ends_us`. Before the LIFT cue at `lift_us`,
+    /// a throttle below `level - THROTTLE_DROP_MARGIN` sends the rep back to
+    /// [`Phase::ThrottleWait`] and drops the hold's pre-roll and overlap; in the lift window any
+    /// throttle is fine. Otherwise the sample counts toward overlap and, for trace drills in the last
+    /// [`TRACE_LAG_MARGIN_MS`], is buffered as the lag pre-roll (the role the countdown pre-roll
+    /// plays without a lead-in).
+    fn step_throttle_hold(
+        &mut self,
+        rep: u32,
+        lift_us: u64,
+        ends_us: u64,
+        sample: ValueSample,
+        throttle: f32,
+        events: &mut Vec<DrillEvent>,
+    ) {
+        let level = self.throttle_level.unwrap_or(0.0);
+        if sample.t_us < lift_us && throttle < level - THROTTLE_DROP_MARGIN {
+            self.phase = Phase::ThrottleWait { rep };
+            self.buffer.clear();
+            self.reset_overlap();
+            events.push(DrillEvent::ThrottleWait {
+                rep,
+                since_us: sample.t_us,
+            });
+            return;
+        }
+
+        self.accumulate_overlap(sample, throttle, ends_us);
+        let margin_us = u64::from(TRACE_LAG_MARGIN_MS) * 1_000;
+        if matches!(self.drill.kind, DrillKind::Trace { .. })
+            && sample.t_us >= ends_us.saturating_sub(margin_us)
+        {
+            self.buffer.push(sample);
+        }
+    }
+
+    /// Starts the throttle hold of `rep` at `start_us` with a fresh overlap window and emits
+    /// [`DrillEvent::ThrottleHoldStarted`].
+    fn enter_throttle_hold(&mut self, rep: u32, start_us: u64, events: &mut Vec<DrillEvent>) {
+        let lift_us = start_us.saturating_add(self.throttle_hold_us);
+        let ends_us = lift_us.saturating_add(self.throttle_lift_us);
+        self.buffer.clear();
+        self.reset_overlap();
+        self.phase = Phase::ThrottleHold {
+            rep,
+            start_us,
+            lift_us,
+            ends_us,
+        };
+        events.push(DrillEvent::ThrottleHoldStarted {
+            rep,
+            start_us,
+            lift_us,
+            ends_us,
+        });
+    }
+
+    fn reset_overlap(&mut self) {
+        self.overlap_us = 0;
+        self.overlap_peak = 0.0;
+        self.overlap_prev = None;
+        self.coast_release_us = None;
+        self.coast_us = None;
+        self.coast_fixed = false;
+    }
+
+    /// Adds one sample of the overlap window (left-rectangle rule: a sample holds until the
+    /// next one, each gap capped at [`MAX_OVERLAP_GAP_US`] and at `window_end_us`). A sample at
+    /// or past `window_end_us` only closes the previous gap and is not a peak.
+    ///
+    /// Also tracks the coast time with [`Self::track_coast`]; a sample at or past
+    /// `window_end_us` does not count toward it. O(1), no allocation.
+    fn accumulate_overlap(&mut self, sample: ValueSample, throttle: f32, window_end_us: u64) {
+        let brake = sample.value;
+        if !self.coast_fixed && sample.t_us < window_end_us {
+            self.track_coast(sample.t_us, brake, throttle);
+        }
+        if let Some((prev_t_us, prev_brake, prev_throttle)) = self.overlap_prev
+            && prev_brake > OVERLAP_THRESHOLD
+            && prev_throttle > OVERLAP_THRESHOLD
+        {
+            let gap = sample
+                .t_us
+                .min(window_end_us)
+                .saturating_sub(prev_t_us)
+                .min(MAX_OVERLAP_GAP_US);
+            self.overlap_us = self.overlap_us.saturating_add(gap);
+        }
+        if sample.t_us < window_end_us && brake > OVERLAP_THRESHOLD && throttle > OVERLAP_THRESHOLD
+        {
+            self.overlap_peak = self.overlap_peak.max(throttle);
+        }
+        self.overlap_prev = Some((sample.t_us, brake, throttle));
+    }
+
+    /// Updates the coast time with one sample before the window end, until the first handoff.
+    ///
+    /// A pedal is pressed above [`OVERLAP_THRESHOLD`]; presses and releases compare with the
+    /// previous sample of the window, so the first sample has none. The release time is the
+    /// latest throttle release, forgotten when the throttle is pressed again. The first handoff
+    /// after it fixes the coast: the brake pressed with the throttle released gives
+    /// `brake_t - release_t`, and the throttle released with the brake pressed gives 0. A brake
+    /// press with the throttle held, or with no release seen yet, sets a provisional 0 that a
+    /// handoff replaces. If the release and the brake press first show on the same sample after
+    /// a gap over [`MAX_OVERLAP_GAP_US`], the order is unknown and the coast stays as it was
+    /// (the provisional 0, or `None`).
+    fn track_coast(&mut self, t_us: u64, brake: f32, throttle: f32) {
+        let throttle_on = throttle > OVERLAP_THRESHOLD;
+        let brake_on = brake > OVERLAP_THRESHOLD;
+        let (released, brake_pressed, gap_us) = match self.overlap_prev {
+            Some((prev_t_us, prev_brake, prev_throttle)) => (
+                prev_throttle > OVERLAP_THRESHOLD && !throttle_on,
+                prev_brake <= OVERLAP_THRESHOLD && brake_on,
+                t_us.saturating_sub(prev_t_us),
+            ),
+            None => (false, false, 0),
+        };
+        if throttle_on {
+            self.coast_release_us = None;
+        } else if released {
+            self.coast_release_us = Some(t_us);
+        }
+
+        if released && brake_pressed && gap_us > MAX_OVERLAP_GAP_US {
+            self.coast_fixed = true;
+        } else if let Some(release_us) = self.coast_release_us
+            && (brake_pressed || (released && brake_on))
+        {
+            self.coast_us = Some(t_us.saturating_sub(release_us));
+            self.coast_fixed = true;
+        } else if brake_on && self.coast_us.is_none() {
+            self.coast_us = Some(0);
+        }
+    }
+
+    /// The overlap of the current rep for lead-in drills, `None` otherwise.
+    fn current_overlap(&self) -> Option<Overlap> {
+        self.throttle_level?;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "overlap time in microseconds fits within f64"
+        )]
+        let ms = (self.overlap_us as f64) / 1000.0;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "overlap time in ms fits within f32"
+        )]
+        let overlap_ms = ms as f32;
+        #[expect(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            reason = "coast time in microseconds fits within f64, in ms within f32"
+        )]
+        let coast_ms = self.coast_us.map(|us| ((us as f64) / 1000.0) as f32);
+        Some(Overlap {
+            overlap_ms,
+            peak_throttle: self.overlap_peak,
+            coast_ms,
+        })
     }
 
     /// Evaluates scoring for a completed rep, records the result, and transitions to
@@ -306,17 +669,20 @@ impl DrillRun {
             }
         };
 
+        let overlap = self.current_overlap();
         if let Some(score) = &rep_score {
             events.push(DrillEvent::RepScored {
                 rep,
                 score: score.clone(),
+                overlap,
             });
         } else {
-            events.push(DrillEvent::RepFailed { rep });
+            events.push(DrillEvent::RepFailed { rep, overlap });
         }
 
         self.results.push(rep_score);
         self.buffer.clear();
+        self.reset_overlap();
 
         let next_rep = rep.saturating_add(1);
         if next_rep < self.drill.reps {
@@ -355,7 +721,11 @@ impl DrillRun {
     pub fn abort(&mut self) -> Option<SetSummary> {
         match self.phase {
             Phase::Idle | Phase::Finished | Phase::Aborted => None,
-            Phase::Countdown { .. } | Phase::Active { .. } | Phase::Scoring { .. } => {
+            Phase::Countdown { .. }
+            | Phase::ThrottleWait { .. }
+            | Phase::ThrottleHold { .. }
+            | Phase::Active { .. }
+            | Phase::Scoring { .. } => {
                 self.phase = Phase::Aborted;
                 self.buffer.clear();
                 let scored_totals: Vec<f32> = self
@@ -404,7 +774,12 @@ impl DrillRun {
                     Some(curve.value_at(dt_ms))
                 }
             },
-            Phase::Idle | Phase::Countdown { .. } | Phase::Finished | Phase::Aborted => None,
+            Phase::Idle
+            | Phase::Countdown { .. }
+            | Phase::ThrottleWait { .. }
+            | Phase::ThrottleHold { .. }
+            | Phase::Finished
+            | Phase::Aborted => None,
         }
     }
 
@@ -429,12 +804,41 @@ impl DrillRun {
                     Some(band.at(dt_ms))
                 }
             },
-            Phase::Idle | Phase::Countdown { .. } | Phase::Finished | Phase::Aborted => None,
+            Phase::Idle
+            | Phase::Countdown { .. }
+            | Phase::ThrottleWait { .. }
+            | Phase::ThrottleHold { .. }
+            | Phase::Finished
+            | Phase::Aborted => None,
         }
     }
 
-    /// Normalized progress fraction in `0.0..=1.0` through the current countdown or active phase
-    /// (`1.0` during scoring), or `None` during idle, finished, or aborted states.
+    /// Throttle level fraction to hold at timestamp `t_us` while waiting for the throttle of a
+    /// lead-in drill or holding it before the LIFT cue, or `None` in the lift window and every
+    /// other phase.
+    #[must_use]
+    pub fn throttle_target_at(&self, t_us: u64) -> Option<f32> {
+        match self.phase {
+            Phase::ThrottleWait { .. } => self.throttle_level,
+            Phase::ThrottleHold { lift_us, .. } => {
+                if t_us < lift_us {
+                    self.throttle_level
+                } else {
+                    None
+                }
+            }
+            Phase::Idle
+            | Phase::Countdown { .. }
+            | Phase::Active { .. }
+            | Phase::Scoring { .. }
+            | Phase::Finished
+            | Phase::Aborted => None,
+        }
+    }
+
+    /// Normalized progress fraction in `0.0..=1.0` through the current countdown, throttle hold
+    /// or active phase (`0.0` while waiting for the throttle, `1.0` during scoring), or `None`
+    /// during idle, finished, or aborted states.
     #[must_use]
     pub fn progress(&self, t_us: u64) -> Option<f32> {
         match self.phase {
@@ -455,7 +859,11 @@ impl DrillRun {
                 )]
                 Some((frac as f32).clamp(0.0, 1.0))
             }
-            Phase::Active {
+            Phase::ThrottleWait { .. } => Some(0.0),
+            Phase::ThrottleHold {
+                start_us, ends_us, ..
+            }
+            | Phase::Active {
                 start_us, ends_us, ..
             } => {
                 if ends_us <= start_us {
@@ -465,7 +873,7 @@ impl DrillRun {
                 let elapsed = t_us.saturating_sub(start_us);
                 #[expect(
                     clippy::cast_precision_loss,
-                    reason = "active duration in microseconds fits within f64"
+                    reason = "phase duration in microseconds fits within f64"
                 )]
                 let frac = (elapsed as f64) / (total as f64);
                 #[expect(
@@ -484,6 +892,7 @@ impl DrillRun {
 mod tests {
     use super::*;
     use crate::preset::{Pedal, parse_preset};
+    use crate::trace_scoring::TraceScore;
 
     fn make_hold_drill(reps: u32, lead_in_ms: u32, hold_ms: u32, target: f32) -> Drill {
         Drill {
@@ -494,6 +903,7 @@ mod tests {
             lead_in_ms,
             tolerance: Some(5.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Hold { target, hold_ms },
         }
     }
@@ -507,6 +917,7 @@ mod tests {
             lead_in_ms,
             tolerance: Some(6.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Trace { points },
         }
     }
@@ -569,7 +980,7 @@ mod tests {
         );
 
         match &events[2] {
-            DrillEvent::RepScored { rep, score } => {
+            DrillEvent::RepScored { rep, score, .. } => {
                 assert_eq!(*rep, 0);
                 assert!(score.total() >= 98.0, "rep 0 total was {}", score.total());
             }
@@ -593,7 +1004,7 @@ mod tests {
         );
 
         match &events[5] {
-            DrillEvent::RepScored { rep, score } => {
+            DrillEvent::RepScored { rep, score, .. } => {
                 assert_eq!(*rep, 1);
                 assert!(score.total() >= 98.0, "rep 1 total was {}", score.total());
             }
@@ -661,7 +1072,10 @@ mod tests {
                     rep: 0,
                     start_us: 1_000_000,
                 },
-                DrillEvent::RepFailed { rep: 0 },
+                DrillEvent::RepFailed {
+                    rep: 0,
+                    overlap: None,
+                },
                 DrillEvent::CountdownStarted {
                     rep: 1,
                     start_us: 1_500_000,
@@ -671,7 +1085,10 @@ mod tests {
                     rep: 1,
                     start_us: 1_800_000,
                 },
-                DrillEvent::RepFailed { rep: 1 },
+                DrillEvent::RepFailed {
+                    rep: 1,
+                    overlap: None,
+                },
                 DrillEvent::SetFinished { summary: None },
             ]
         );
@@ -732,7 +1149,7 @@ mod tests {
         assert_eq!(run.phase(), Phase::Finished);
 
         match &final_events[0] {
-            DrillEvent::RepScored { rep, score } => {
+            DrillEvent::RepScored { rep, score, .. } => {
                 assert_eq!(*rep, 0);
                 assert!(score.total() >= 95.0, "total was {}", score.total());
             }
@@ -969,12 +1386,16 @@ mod tests {
         let event3 = DrillEvent::RepScored {
             rep: 0,
             score: rep_score,
+            overlap: None,
         };
         let json_event3 = serde_json::to_value(&event3).unwrap();
         assert_eq!(json_event3["event"], "repScored");
         assert_eq!(json_event3["score"]["kind"], "hold");
 
-        let event4 = DrillEvent::RepFailed { rep: 2 };
+        let event4 = DrillEvent::RepFailed {
+            rep: 2,
+            overlap: None,
+        };
         let json_event4 = serde_json::to_value(&event4).unwrap();
         assert_eq!(json_event4["event"], "repFailed");
         assert_eq!(json_event4["rep"], 2);
@@ -1111,7 +1532,7 @@ mod tests {
             }
         );
         let score0 = match &events[2] {
-            DrillEvent::RepScored { rep: 0, score } => score.clone(),
+            DrillEvent::RepScored { rep: 0, score, .. } => score.clone(),
             other => panic!("expected RepScored(0), got {other:?}"),
         };
         assert_eq!(
@@ -1130,7 +1551,7 @@ mod tests {
             }
         );
         let score1 = match &events[5] {
-            DrillEvent::RepScored { rep: 1, score } => score.clone(),
+            DrillEvent::RepScored { rep: 1, score, .. } => score.clone(),
             other => panic!("expected RepScored(1), got {other:?}"),
         };
         assert!(matches!(
@@ -1147,5 +1568,1237 @@ mod tests {
             score0.total(),
             score1.total()
         );
+    }
+
+    fn with_lead_in(mut drill: Drill, level: f32, hold_ms: u32) -> Drill {
+        drill.throttle_lead_in = Some(crate::preset::ThrottleLeadIn {
+            level,
+            hold_ms,
+            lift_ms: Some(0),
+        });
+        drill
+    }
+
+    /// Feeds 1 kHz samples where `pedals(t)` returns `(brake, throttle)`.
+    fn feed_pedals<F>(
+        run: &mut DrillRun,
+        start_t_us: u64,
+        end_t_us: u64,
+        mut pedals: F,
+    ) -> Vec<DrillEvent>
+    where
+        F: FnMut(u64) -> (f32, f32),
+    {
+        let mut all_events = Vec::new();
+        let mut t = start_t_us;
+        while t <= end_t_us {
+            let (brake, throttle) = pedals(t);
+            all_events.extend(run.push_pedals(ValueSample::new(t, brake), throttle));
+            t = t.saturating_add(1_000);
+        }
+        all_events
+    }
+
+    fn overlap_of(event: &DrillEvent) -> Option<Overlap> {
+        match event {
+            DrillEvent::RepScored { overlap, .. } | DrillEvent::RepFailed { overlap, .. } => {
+                *overlap
+            }
+            other => panic!("expected RepScored or RepFailed, got {other:?}"),
+        }
+    }
+
+    fn trace_value(curve: &TraceCurve, t: u64, cue_us: u64) -> f32 {
+        if t < cue_us {
+            return 0.0;
+        }
+        #[expect(clippy::cast_precision_loss, reason = "dt fits within f64")]
+        let ms = ((t - cue_us) as f64) / 1000.0;
+        curve.value_at(ms)
+    }
+
+    #[test]
+    fn lead_in_regression_throttle_ignored_without_lead_in() {
+        // Hold drill: same samples as test_1, through push and push_pedals with the throttle on.
+        let drill = make_hold_drill(2, 1000, 500, 70.0);
+        let mut plain = DrillRun::new(drill.clone(), 300);
+        let mut pedals = DrillRun::new(drill, 300);
+        let mut plain_events = plain.start(0);
+        let mut pedal_events = pedals.start(0);
+        plain_events.extend(feed_1khz(&mut plain, 0, 2_300_000, |_t| 0.70));
+        pedal_events.extend(feed_pedals(&mut pedals, 0, 2_300_000, |_t| (0.70, 0.9)));
+        assert_eq!(plain_events, pedal_events);
+        assert_eq!(plain.results(), pedals.results());
+        assert_eq!(pedals.results().len(), 2);
+        for result in pedals.results() {
+            let total = result.as_ref().unwrap().total();
+            assert!(total >= 98.0, "hold total was {total}");
+        }
+
+        // Trace drill: same samples as test_multi_rep_trace_perfect.
+        let points = vec![(0, 0.0), (150, 90.0), (600, 0.0)];
+        let drill = make_trace_drill(2, 1000, points);
+        let curve = drill.trace_curve().unwrap();
+        let brake = |t: u64| {
+            if (1_000_000..=1_600_000).contains(&t) {
+                trace_value(&curve, t, 1_000_000)
+            } else if (2_200_000..=2_800_000).contains(&t) {
+                trace_value(&curve, t, 2_200_000)
+            } else {
+                0.0
+            }
+        };
+        let mut plain = DrillRun::new(drill.clone(), 300);
+        let mut pedals = DrillRun::new(drill, 300);
+        let mut plain_events = plain.start(0);
+        let mut pedal_events = pedals.start(0);
+        plain_events.extend(feed_1khz(&mut plain, 0, 3_100_000, brake));
+        pedal_events.extend(feed_pedals(&mut pedals, 0, 3_100_000, |t| (brake(t), 0.9)));
+        assert_eq!(plain_events, pedal_events);
+        assert_eq!(pedal_events.len(), 7);
+        for result in pedals.results() {
+            let total = result.as_ref().unwrap().total();
+            assert!(total >= 90.0, "trace total was {total}");
+        }
+        for event in &pedal_events {
+            if matches!(event, DrillEvent::RepScored { .. }) {
+                assert_eq!(overlap_of(event), None);
+            }
+        }
+    }
+
+    #[test]
+    fn lead_in_throttle_at_level_from_start() {
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        let mut events = run.start(0);
+
+        events.extend(feed_pedals(&mut run, 0, 1_000_000, |_t| (0.0, 0.80)));
+        assert_eq!(
+            run.phase(),
+            Phase::ThrottleHold {
+                rep: 0,
+                start_us: 1_000_000,
+                lift_us: 2_000_000,
+                ends_us: 2_000_000
+            }
+        );
+        assert_eq!(run.throttle_target_at(1_500_000), Some(0.80));
+        assert_eq!(run.target_at(1_500_000), None);
+        assert_eq!(run.band_at(1_500_000), None);
+        assert_eq!(run.progress(1_500_000), Some(0.5));
+
+        // Lift exactly at the cue and brake after it.
+        events.extend(feed_pedals(&mut run, 1_001_000, 2_500_000, |t| {
+            if t < 2_000_000 {
+                (0.0, 0.80)
+            } else {
+                (0.70, 0.0)
+            }
+        }));
+        assert_eq!(run.phase(), Phase::Finished);
+        assert_eq!(events.len(), 5, "{events:?}");
+        assert_eq!(
+            events[0],
+            DrillEvent::CountdownStarted {
+                rep: 0,
+                start_us: 0,
+                ends_us: 1_000_000
+            }
+        );
+        assert_eq!(
+            events[1],
+            DrillEvent::ThrottleHoldStarted {
+                rep: 0,
+                start_us: 1_000_000,
+                lift_us: 2_000_000,
+                ends_us: 2_000_000
+            }
+        );
+        assert_eq!(
+            events[2],
+            DrillEvent::RepStarted {
+                rep: 0,
+                start_us: 2_000_000
+            }
+        );
+        match &events[3] {
+            DrillEvent::RepScored { rep: 0, score, .. } => {
+                assert!(score.total() >= 98.0, "total was {}", score.total());
+            }
+            other => panic!("expected RepScored(0), got {other:?}"),
+        }
+        assert_eq!(
+            overlap_of(&events[3]),
+            Some(Overlap {
+                overlap_ms: 0.0,
+                peak_throttle: 0.0,
+                coast_ms: Some(0.0)
+            })
+        );
+        assert!(matches!(
+            events[4],
+            DrillEvent::SetFinished { summary: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn lead_in_waits_for_throttle_after_countdown() {
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        let mut events = run.start(0);
+
+        events.extend(feed_pedals(&mut run, 0, 1_299_000, |_t| (0.0, 0.0)));
+        assert_eq!(run.phase(), Phase::ThrottleWait { rep: 0 });
+        assert_eq!(run.progress(1_200_000), Some(0.0));
+        assert_eq!(run.throttle_target_at(1_200_000), Some(0.80));
+
+        events.extend(feed_pedals(&mut run, 1_300_000, 2_800_000, |t| {
+            if t < 2_300_000 {
+                (0.0, 0.85)
+            } else {
+                (0.70, 0.0)
+            }
+        }));
+        assert_eq!(
+            events[..4],
+            [
+                DrillEvent::CountdownStarted {
+                    rep: 0,
+                    start_us: 0,
+                    ends_us: 1_000_000
+                },
+                DrillEvent::ThrottleWait {
+                    rep: 0,
+                    since_us: 1_000_000
+                },
+                DrillEvent::ThrottleHoldStarted {
+                    rep: 0,
+                    start_us: 1_300_000,
+                    lift_us: 2_300_000,
+                    ends_us: 2_300_000
+                },
+                DrillEvent::RepStarted {
+                    rep: 0,
+                    start_us: 2_300_000
+                },
+            ]
+        );
+        assert!(matches!(events[4], DrillEvent::RepScored { rep: 0, .. }));
+        assert_eq!(run.phase(), Phase::Finished);
+    }
+
+    #[test]
+    fn lead_in_throttle_drop_restarts_hold() {
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        let mut events = run.start(0);
+
+        events.extend(feed_pedals(&mut run, 0, 3_000_000, |t| {
+            if t < 1_400_000 {
+                (0.0, 0.80)
+            } else if t < 1_500_000 {
+                (0.0, 0.50)
+            } else if t < 2_500_000 {
+                (0.0, 0.80)
+            } else {
+                (0.70, 0.0)
+            }
+        }));
+        assert_eq!(
+            events[..5],
+            [
+                DrillEvent::CountdownStarted {
+                    rep: 0,
+                    start_us: 0,
+                    ends_us: 1_000_000
+                },
+                DrillEvent::ThrottleHoldStarted {
+                    rep: 0,
+                    start_us: 1_000_000,
+                    lift_us: 2_000_000,
+                    ends_us: 2_000_000
+                },
+                DrillEvent::ThrottleWait {
+                    rep: 0,
+                    since_us: 1_400_000
+                },
+                DrillEvent::ThrottleHoldStarted {
+                    rep: 0,
+                    start_us: 1_500_000,
+                    lift_us: 2_500_000,
+                    ends_us: 2_500_000
+                },
+                DrillEvent::RepStarted {
+                    rep: 0,
+                    start_us: 2_500_000
+                },
+            ]
+        );
+        assert!(matches!(events[5], DrillEvent::RepScored { rep: 0, .. }));
+        assert_eq!(run.phase(), Phase::Finished);
+    }
+
+    #[test]
+    fn lead_in_overlap_numbers() {
+        // Throttle at 30% for the first 200 ms of the active window while braking at 70%.
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        let events = feed_pedals(&mut run, 0, 2_500_000, |t| {
+            if t < 2_000_000 {
+                (0.0, 0.80)
+            } else if t < 2_200_000 {
+                (0.70, 0.30)
+            } else {
+                (0.70, 0.0)
+            }
+        });
+        let scored = events
+            .iter()
+            .find(|e| matches!(e, DrillEvent::RepScored { .. }))
+            .expect("rep scored");
+        let overlap = overlap_of(scored).expect("lead-in drill reports overlap");
+        assert!(
+            (overlap.overlap_ms - 200.0).abs() <= 2.0,
+            "overlap_ms was {}",
+            overlap.overlap_ms
+        );
+        assert!(
+            (overlap.peak_throttle - 0.30).abs() <= 1e-6,
+            "peak was {}",
+            overlap.peak_throttle
+        );
+
+        // Brake at 10% for the last 500 ms of the hold while holding the throttle.
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        let events = feed_pedals(&mut run, 0, 2_500_000, |t| {
+            if t < 1_500_000 {
+                (0.0, 0.80)
+            } else if t < 2_000_000 {
+                (0.10, 0.80)
+            } else {
+                (0.70, 0.0)
+            }
+        });
+        let scored = events
+            .iter()
+            .find(|e| matches!(e, DrillEvent::RepScored { .. }))
+            .expect("rep scored");
+        let overlap = overlap_of(scored).expect("lead-in drill reports overlap");
+        assert!(
+            (overlap.overlap_ms - 500.0).abs() <= 2.0,
+            "overlap_ms was {}",
+            overlap.overlap_ms
+        );
+        assert!(
+            (overlap.peak_throttle - 0.80).abs() <= 1e-6,
+            "peak was {}",
+            overlap.peak_throttle
+        );
+    }
+
+    #[test]
+    fn lead_in_trace_scores_like_plain_trace() {
+        let points = vec![(0, 0.0), (150, 90.0), (600, 0.0)];
+        let plain_drill = make_trace_drill(1, 1000, points);
+        let curve = plain_drill.trace_curve().unwrap();
+        let lead_in_drill = with_lead_in(plain_drill.clone(), 80.0, 1000);
+
+        // Plain: cue at 1.0 s, pre-roll from the countdown.
+        let mut plain = DrillRun::new(plain_drill, 300);
+        plain.start(0);
+        feed_1khz(&mut plain, 0, 1_900_000, |t| {
+            trace_value(&curve, t, 1_000_000)
+        });
+
+        // Lead-in: cue at 2.0 s, pre-roll from the throttle hold.
+        let mut lead_in = DrillRun::new(lead_in_drill, 300);
+        lead_in.start(0);
+        let events = feed_pedals(&mut lead_in, 0, 2_900_000, |t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            (trace_value(&curve, t, 2_000_000), throttle)
+        });
+
+        assert_eq!(plain.phase(), Phase::Finished);
+        assert_eq!(lead_in.phase(), Phase::Finished);
+        let plain_score = plain.results()[0].as_ref().unwrap();
+        let lead_in_score = lead_in.results()[0].as_ref().unwrap();
+        assert!(
+            plain_score.total() >= 95.0,
+            "total was {}",
+            plain_score.total()
+        );
+        assert_eq!(plain_score, lead_in_score);
+        assert!(events.contains(&DrillEvent::RepStarted {
+            rep: 0,
+            start_us: 2_000_000
+        }));
+    }
+
+    #[test]
+    fn lead_in_serialization() {
+        let wait = serde_json::to_value(DrillEvent::ThrottleWait {
+            rep: 1,
+            since_us: 5_000,
+        })
+        .unwrap();
+        assert_eq!(wait["event"], "throttleWait");
+        assert_eq!(wait["rep"], 1);
+        assert_eq!(wait["sinceUs"], 5_000);
+
+        let hold = serde_json::to_value(DrillEvent::ThrottleHoldStarted {
+            rep: 0,
+            start_us: 1_000,
+            lift_us: 1_500,
+            ends_us: 2_000,
+        })
+        .unwrap();
+        assert_eq!(hold["event"], "throttleHoldStarted");
+        assert_eq!(hold["startUs"], 1_000);
+        assert_eq!(hold["liftUs"], 1_500);
+        assert_eq!(hold["endsUs"], 2_000);
+
+        let score = RepScore::Hold(HoldScore {
+            total: 96.0,
+            grade: Grade::S,
+            accuracy: 95.0,
+            timing: 98.0,
+            smoothness: 95.0,
+            time_in_band: 1.0,
+            rmse: 0.01,
+            time_to_band_ms: Some(100.0),
+            overshoot: 0.0,
+            jitter: 0.001,
+        });
+        let overlap = Overlap {
+            overlap_ms: 120.0,
+            peak_throttle: 0.25,
+            coast_ms: Some(180.0),
+        };
+        let scored = serde_json::to_value(DrillEvent::RepScored {
+            rep: 0,
+            score: score.clone(),
+            overlap: Some(overlap),
+        })
+        .unwrap();
+        assert_eq!(scored["overlap"]["overlapMs"], 120.0);
+        assert_eq!(scored["overlap"]["peakThrottle"], 0.25);
+        assert_eq!(scored["overlap"]["coastMs"], 180.0);
+        let no_coast = serde_json::to_value(DrillEvent::RepScored {
+            rep: 0,
+            score: score.clone(),
+            overlap: Some(Overlap {
+                coast_ms: None,
+                ..overlap
+            }),
+        })
+        .unwrap();
+        assert_eq!(no_coast["overlap"]["overlapMs"], 120.0);
+        assert!(no_coast["overlap"].get("coastMs").is_none());
+
+        let failed = serde_json::to_value(DrillEvent::RepFailed {
+            rep: 0,
+            overlap: Some(overlap),
+        })
+        .unwrap();
+        assert_eq!(failed["event"], "repFailed");
+        assert_eq!(failed["overlap"]["overlapMs"], 120.0);
+
+        let plain = serde_json::to_value(DrillEvent::RepScored {
+            rep: 0,
+            score,
+            overlap: None,
+        })
+        .unwrap();
+        assert!(plain.get("overlap").is_none());
+        let plain_failed = serde_json::to_value(DrillEvent::RepFailed {
+            rep: 0,
+            overlap: None,
+        })
+        .unwrap();
+        assert!(plain_failed.get("overlap").is_none());
+
+        let phase = serde_json::to_value(Phase::ThrottleHold {
+            rep: 0,
+            start_us: 1,
+            lift_us: 2,
+            ends_us: 2,
+        })
+        .unwrap();
+        assert_eq!(phase["phase"], "throttleHold");
+        assert_eq!(phase["endsUs"], 2);
+        let phase = serde_json::to_value(Phase::ThrottleWait { rep: 0 }).unwrap();
+        assert_eq!(phase["phase"], "throttleWait");
+    }
+
+    #[test]
+    fn lead_in_abort_from_wait_and_hold() {
+        // Rep 0: countdown to 1.0 s, hold to 2.0 s, active to 2.5 s; rep 1 countdown to 2.8 s.
+        for rehold in [false, true] {
+            let drill = with_lead_in(make_hold_drill(2, 1000, 500, 70.0), 80.0, 1000);
+            let mut run = DrillRun::new(drill, 300);
+            run.start(0);
+            feed_pedals(&mut run, 0, 2_900_000, |t| {
+                if t < 2_000_000 {
+                    (0.0, 0.80)
+                } else if t < 2_500_000 {
+                    (0.70, 0.0)
+                } else if rehold {
+                    (0.0, 0.80)
+                } else {
+                    (0.0, 0.0)
+                }
+            });
+            if rehold {
+                assert_eq!(
+                    run.phase(),
+                    Phase::ThrottleHold {
+                        rep: 1,
+                        start_us: 2_800_000,
+                        lift_us: 3_800_000,
+                        ends_us: 3_800_000
+                    }
+                );
+            } else {
+                assert_eq!(run.phase(), Phase::ThrottleWait { rep: 1 });
+            }
+
+            let summary = run.abort().expect("rep 0 scored so summary exists");
+            assert_eq!(summary.rep_totals.len(), 1);
+            assert!(summary.rep_totals[0] >= 98.0);
+            assert_eq!(run.phase(), Phase::Aborted);
+            assert_eq!(run.throttle_target_at(3_000_000), None);
+            assert_eq!(run.push_pedals(ValueSample::new(3_000_000, 0.0), 0.80), []);
+        }
+    }
+
+    /// Counts the [`DrillEvent::ThrottleWait`] and [`DrillEvent::ThrottleHoldStarted`] events.
+    fn throttle_events(events: &[DrillEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    DrillEvent::ThrottleWait { .. } | DrillEvent::ThrottleHoldStarted { .. }
+                )
+            })
+            .count()
+    }
+
+    fn first_scored(events: &[DrillEvent]) -> &DrillEvent {
+        events
+            .iter()
+            .find(|e| matches!(e, DrillEvent::RepScored { .. }))
+            .expect("rep scored")
+    }
+
+    #[test]
+    fn no_lead_in_scores_match_main() {
+        // Expected values came from main at 6559413 (before SCT-037), printed with `{:?}`.
+        const NOISE: [f32; 7] = [0.02, -0.015, 0.01, -0.02, 0.005, 0.015, -0.01];
+        let points = vec![(0, 0.0), (150, 90.0), (600, 0.0)];
+
+        // The samples of test_1_perfect_hold_two_reps.
+        let mut run = DrillRun::new(make_hold_drill(2, 1000, 500, 70.0), 300);
+        run.start(0);
+        feed_1khz(&mut run, 0, 2_300_000, |_t| 0.70);
+        let perfect_hold = RepScore::Hold(HoldScore {
+            total: 100.0,
+            grade: Grade::S,
+            accuracy: 100.0,
+            timing: 100.0,
+            smoothness: 100.0,
+            time_in_band: 1.0,
+            rmse: 0.0,
+            time_to_band_ms: Some(0.0),
+            overshoot: 0.0,
+            jitter: 0.0,
+        });
+        assert_eq!(
+            run.results(),
+            &[Some(perfect_hold.clone()), Some(perfect_hold)]
+        );
+
+        // The samples of test_multi_rep_trace_perfect.
+        let drill = make_trace_drill(2, 1000, points.clone());
+        let curve = drill.trace_curve().unwrap();
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        feed_1khz(&mut run, 0, 3_100_000, |t| {
+            if (1_000_000..=1_600_000).contains(&t) {
+                trace_value(&curve, t, 1_000_000)
+            } else if (2_200_000..=2_800_000).contains(&t) {
+                trace_value(&curve, t, 2_200_000)
+            } else {
+                0.0
+            }
+        });
+        let perfect_trace = RepScore::Trace(TraceScore {
+            total: 99.58676,
+            grade: Grade::S,
+            accuracy: 100.0,
+            timing: 100.0,
+            smoothness: 98.347_046,
+            lag_ms: 3.804_708_3e-13,
+            time_in_band: 1.0,
+            rmse: 0.0,
+            overshoot: 0.002_833_724,
+            ldlj_user: -8.036_273,
+            ldlj_target: -8.036_273,
+        });
+        assert_eq!(
+            run.results(),
+            &[Some(perfect_trace.clone()), Some(perfect_trace)]
+        );
+
+        // A noisy hold rep.
+        let mut run = DrillRun::new(make_hold_drill(1, 1000, 500, 70.0), 300);
+        run.start(0);
+        feed_1khz(&mut run, 0, 1_500_000, |t| {
+            0.70 + NOISE[usize::try_from((t / 1_000) % 7).unwrap()]
+        });
+        assert_eq!(
+            run.results(),
+            &[Some(RepScore::Hold(HoldScore {
+                total: 90.7435,
+                grade: Grade::A,
+                accuracy: 96.127_365,
+                timing: 100.0,
+                smoothness: 70.71927,
+                time_in_band: 1.0,
+                rmse: 0.014_522_383,
+                time_to_band_ms: Some(0.0),
+                overshoot: 0.0,
+                jitter: 0.014_640_368,
+            }))]
+        );
+
+        // A trace rep 100 ms late (the delayed run of test_6).
+        let drill = make_trace_drill(1, 1000, points);
+        let curve = drill.trace_curve().unwrap();
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        feed_1khz(&mut run, 0, 1_900_000, |t| {
+            if t < 1_000_000 {
+                0.0
+            } else {
+                #[expect(clippy::cast_precision_loss, reason = "dt fits within f64")]
+                let ms = ((t - 1_000_000) as f64) / 1000.0 - 100.0;
+                curve.value_at(ms)
+            }
+        });
+        assert_eq!(
+            run.results(),
+            &[Some(RepScore::Trace(TraceScore {
+                total: 85.617_645,
+                grade: Grade::A,
+                accuracy: 100.0,
+                timing: 44.13793,
+                smoothness: 98.33266,
+                lag_ms: 100.0,
+                time_in_band: 1.0,
+                rmse: 0.0,
+                overshoot: 0.002_859_115_6,
+                ldlj_user: -7.135_460_4,
+                ldlj_target: -8.036_273,
+            }))]
+        );
+    }
+
+    #[test]
+    fn lead_in_throttle_at_arm_edge_does_not_chatter() {
+        // Level 80 arms at 0.70 and drops below 0.65, so 0.699 keeps a started hold.
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        let mut events = feed_pedals(&mut run, 0, 999_000, |_t| (0.0, 0.0));
+        events.extend(feed_pedals(&mut run, 1_000_000, 3_000_000, |t| {
+            let throttle = if (t / 1_000) % 2 == 0 { 0.699 } else { 0.701 };
+            (0.0, throttle)
+        }));
+        assert!(
+            throttle_events(&events) <= 2,
+            "{} throttle events",
+            throttle_events(&events)
+        );
+        assert!(events.contains(&DrillEvent::RepStarted {
+            rep: 0,
+            start_us: 2_001_000
+        }));
+    }
+
+    #[test]
+    fn lead_in_late_sample_after_countdown_starts_hold_at_sample_time() {
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        // The stream stalls through the countdown; the next sample comes 5 s after its end.
+        let events = run.push_pedals(ValueSample::new(6_000_000, 0.0), 0.80);
+        assert_eq!(
+            events,
+            vec![DrillEvent::ThrottleHoldStarted {
+                rep: 0,
+                start_us: 6_000_000,
+                lift_us: 7_000_000,
+                ends_us: 7_000_000
+            }]
+        );
+        assert_eq!(
+            run.phase(),
+            Phase::ThrottleHold {
+                rep: 0,
+                start_us: 6_000_000,
+                lift_us: 7_000_000,
+                ends_us: 7_000_000
+            }
+        );
+    }
+
+    #[test]
+    fn lead_in_jump_across_boundaries_stops_in_the_hold() {
+        // Rep 0: hold 1.0-2.0 s, active 2.0-2.5 s; rep 1 countdown 2.5-2.8 s.
+        let drill = with_lead_in(make_hold_drill(2, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        feed_pedals(&mut run, 0, 2_499_000, |t| {
+            if t < 2_000_000 {
+                (0.0, 0.80)
+            } else {
+                (0.70, 0.0)
+            }
+        });
+        let events = run.push_pedals(ValueSample::new(10_000_000, 0.0), 0.80);
+        assert!(
+            matches!(events[0], DrillEvent::RepScored { rep: 0, .. }),
+            "{events:?}"
+        );
+        assert_eq!(
+            events[1..],
+            [
+                DrillEvent::CountdownStarted {
+                    rep: 1,
+                    start_us: 2_500_000,
+                    ends_us: 2_800_000
+                },
+                DrillEvent::ThrottleHoldStarted {
+                    rep: 1,
+                    start_us: 10_000_000,
+                    lift_us: 11_000_000,
+                    ends_us: 11_000_000
+                },
+            ]
+        );
+        assert_eq!(
+            run.phase(),
+            Phase::ThrottleHold {
+                rep: 1,
+                start_us: 10_000_000,
+                lift_us: 11_000_000,
+                ends_us: 11_000_000
+            }
+        );
+    }
+
+    #[test]
+    fn lead_in_trace_hold_restart_clears_pre_roll() {
+        let points = vec![(0, 0.0), (150, 90.0), (600, 0.0)];
+        let drill = with_lead_in(make_trace_drill(1, 1000, points), 80.0, 1000);
+        let curve = drill.trace_curve().unwrap();
+
+        // No drop: hold 1.0-2.0 s, cue at 2.0 s.
+        let mut steady = DrillRun::new(drill.clone(), 300);
+        steady.start(0);
+        let steady_events = feed_pedals(&mut steady, 0, 2_900_000, |t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            (trace_value(&curve, t, 2_000_000), throttle)
+        });
+
+        // Brake at 50 % inside the first pre-roll, drop the throttle at 1.8 s, re-arm at 1.9 s:
+        // hold 1.9-2.9 s, cue at 2.9 s.
+        let mut dropped = DrillRun::new(drill, 300);
+        dropped.start(0);
+        let dropped_events = feed_pedals(&mut dropped, 0, 3_800_000, |t| {
+            if t < 1_700_000 {
+                (0.0, 0.80)
+            } else if t < 1_800_000 {
+                (0.50, 0.80)
+            } else if t < 1_900_000 {
+                (0.0, 0.50)
+            } else if t < 2_900_000 {
+                (0.0, 0.80)
+            } else {
+                (trace_value(&curve, t, 2_900_000), 0.0)
+            }
+        });
+
+        assert!(dropped_events.contains(&DrillEvent::RepStarted {
+            rep: 0,
+            start_us: 2_900_000
+        }));
+        assert_eq!(steady.phase(), Phase::Finished);
+        assert_eq!(dropped.phase(), Phase::Finished);
+        assert_eq!(steady.results(), dropped.results());
+        assert_eq!(
+            overlap_of(first_scored(&steady_events)),
+            overlap_of(first_scored(&dropped_events))
+        );
+    }
+
+    #[test]
+    fn lead_in_throttle_noise_is_not_a_peak() {
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        let events = feed_pedals(&mut run, 0, 2_500_000, |t| {
+            if t < 2_000_000 {
+                (0.0, 0.80)
+            } else {
+                (0.70, 0.01)
+            }
+        });
+        assert_eq!(
+            overlap_of(first_scored(&events)),
+            Some(Overlap {
+                overlap_ms: 0.0,
+                peak_throttle: 0.0,
+                coast_ms: Some(0.0)
+            })
+        );
+    }
+
+    #[test]
+    fn lead_in_overlap_counts_up_to_the_active_end() {
+        // Both pedals pressed from 2.3 s to the active end at 2.5 s. The boundary sample comes
+        // late, at 2.56 s: the last gap counts only up to 2.5 s.
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        feed_pedals(&mut run, 0, 2_499_000, |t| {
+            if t < 2_000_000 {
+                (0.0, 0.80)
+            } else if t < 2_300_000 {
+                (0.70, 0.0)
+            } else {
+                (0.70, 0.30)
+            }
+        });
+        let events = run.push_pedals(ValueSample::new(2_560_000, 0.70), 0.90);
+        let overlap = overlap_of(first_scored(&events)).expect("lead-in drill reports overlap");
+        assert!(
+            (overlap.overlap_ms - 200.0).abs() < 1.0,
+            "overlap_ms was {}",
+            overlap.overlap_ms
+        );
+        // The boundary sample lies past the window, so its throttle is not a peak.
+        assert!(
+            (overlap.peak_throttle - 0.30).abs() <= 1e-6,
+            "peak was {}",
+            overlap.peak_throttle
+        );
+    }
+
+    #[test]
+    fn lead_in_overlap_gap_is_capped() {
+        let drill = with_lead_in(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        run.push_pedals(ValueSample::new(1_000_000, 0.0), 0.80);
+        run.push_pedals(ValueSample::new(1_200_000, 0.30), 0.80);
+        run.push_pedals(ValueSample::new(1_700_000, 0.30), 0.80);
+        assert_eq!(
+            run.current_overlap(),
+            Some(Overlap {
+                overlap_ms: 100.0,
+                peak_throttle: 0.80,
+                coast_ms: Some(0.0)
+            })
+        );
+    }
+
+    fn with_lift(drill: Drill, level: f32, hold_ms: u32, lift_ms: u32) -> Drill {
+        let mut drill = with_lead_in(drill, level, hold_ms);
+        if let Some(lead_in) = drill.throttle_lead_in.as_mut() {
+            lead_in.lift_ms = Some(lift_ms);
+        }
+        drill
+    }
+
+    /// Runs a one-rep hold drill (countdown 1.0 s, hold 1000 ms, lift window 300 ms, active
+    /// 500 ms) with `pedals(t)` and returns the overlap of the rep. The LIFT cue is at 2.0 s and
+    /// the brake point at 2.3 s.
+    fn lift_window_overlap<F>(pedals: F) -> Option<Overlap>
+    where
+        F: FnMut(u64) -> (f32, f32),
+    {
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        let events = feed_pedals(&mut run, 0, 2_800_000, pedals);
+        assert_eq!(run.phase(), Phase::Finished);
+        let rep = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    DrillEvent::RepScored { .. } | DrillEvent::RepFailed { .. }
+                )
+            })
+            .expect("rep ended");
+        overlap_of(rep)
+    }
+
+    #[test]
+    fn lift_window_moves_the_rep_start_to_the_brake_point() {
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+        let mut run = DrillRun::new(drill, 300);
+        let mut events = run.start(0);
+        events.extend(feed_pedals(&mut run, 0, 2_800_000, |t| {
+            if t < 2_000_000 {
+                (0.0, 0.80)
+            } else if t < 2_300_000 {
+                (0.0, 0.0)
+            } else {
+                (0.70, 0.0)
+            }
+        }));
+        assert_eq!(
+            events[1],
+            DrillEvent::ThrottleHoldStarted {
+                rep: 0,
+                start_us: 1_000_000,
+                lift_us: 2_000_000,
+                ends_us: 2_300_000
+            }
+        );
+        assert_eq!(
+            events[2],
+            DrillEvent::RepStarted {
+                rep: 0,
+                start_us: 2_300_000
+            }
+        );
+        assert!(matches!(events[3], DrillEvent::RepScored { rep: 0, .. }));
+        assert_eq!(run.phase(), Phase::Finished);
+    }
+
+    #[test]
+    fn lift_window_drop_restarts_only_before_the_lift_cue() {
+        // A drop to 0 at 1.999 s, just before the LIFT cue at 2.0 s, restarts the hold.
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+        let mut run = DrillRun::new(drill.clone(), 300);
+        run.start(0);
+        let events = feed_pedals(&mut run, 0, 1_999_000, |t| {
+            if t < 1_999_000 {
+                (0.0, 0.80)
+            } else {
+                (0.0, 0.0)
+            }
+        });
+        assert_eq!(
+            events.last(),
+            Some(&DrillEvent::ThrottleWait {
+                rep: 0,
+                since_us: 1_999_000
+            })
+        );
+        assert_eq!(run.phase(), Phase::ThrottleWait { rep: 0 });
+
+        // A drop to 0 at 2.001 s, inside the lift window, does not.
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        let events = feed_pedals(&mut run, 0, 2_800_000, |t| {
+            if t < 2_001_000 {
+                (0.0, 0.80)
+            } else {
+                (0.0, 0.0)
+            }
+        });
+        assert_eq!(throttle_events(&events), 1, "{events:?}");
+        assert!(events.contains(&DrillEvent::RepStarted {
+            rep: 0,
+            start_us: 2_300_000
+        }));
+    }
+
+    #[test]
+    fn lift_window_throttle_target_ends_at_the_lift_cue() {
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        feed_pedals(&mut run, 0, 1_999_000, |_t| (0.0, 0.80));
+        assert_eq!(
+            run.phase(),
+            Phase::ThrottleHold {
+                rep: 0,
+                start_us: 1_000_000,
+                lift_us: 2_000_000,
+                ends_us: 2_300_000
+            }
+        );
+        assert_eq!(run.throttle_target_at(1_999_999), Some(0.80));
+        assert_eq!(run.throttle_target_at(2_000_000), None);
+        assert_eq!(run.throttle_target_at(2_200_000), None);
+        // Progress runs from the hold start to the brake point.
+        let progress = run.progress(1_650_000).unwrap();
+        assert!((progress - 0.5).abs() < 1e-6, "progress was {progress}");
+    }
+
+    #[test]
+    fn coast_time_from_release_to_brake() {
+        let overlap = lift_window_overlap(|t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            let brake = if t < 2_180_000 { 0.0 } else { 0.70 };
+            (brake, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        let coast = overlap.coast_ms.expect("brake applied");
+        assert!((coast - 180.0).abs() <= 1.0, "coast_ms was {coast}");
+        assert!(
+            overlap.overlap_ms.abs() < 1e-6,
+            "overlap_ms was {}",
+            overlap.overlap_ms
+        );
+    }
+
+    #[test]
+    fn coast_time_is_zero_when_the_pedals_overlap() {
+        let overlap = lift_window_overlap(|t| {
+            // Part-lifted to 50 % at the LIFT cue, brake at 2.1 s, throttle off at 2.2 s.
+            let throttle = if t < 2_000_000 {
+                0.80
+            } else if t < 2_200_000 {
+                0.50
+            } else {
+                0.0
+            };
+            let brake = if t < 2_100_000 { 0.0 } else { 0.70 };
+            (brake, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        assert_eq!(overlap.coast_ms, Some(0.0));
+        assert!(
+            (overlap.overlap_ms - 100.0).abs() <= 2.0,
+            "overlap_ms was {}",
+            overlap.overlap_ms
+        );
+    }
+
+    #[test]
+    fn coast_time_counts_from_the_last_release() {
+        // Released at 2.0 s, pressed again at 2.05 s, released again at 2.1 s, brake at 2.25 s.
+        let overlap = lift_window_overlap(|t| {
+            let throttle = if t < 2_000_000 {
+                0.80
+            } else if (2_050_000..2_100_000).contains(&t) {
+                0.50
+            } else {
+                0.0
+            };
+            let brake = if t < 2_250_000 { 0.0 } else { 0.70 };
+            (brake, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        let coast = overlap.coast_ms.expect("brake applied");
+        assert!((coast - 150.0).abs() <= 1.0, "coast_ms was {coast}");
+    }
+
+    #[test]
+    fn coast_time_ignores_a_brake_brush_during_the_hold() {
+        // Brake at 10 % for 50 ms at the hold start with the throttle held, then a clean lift at
+        // 2.0 s and the brake at 2.15 s.
+        let overlap = lift_window_overlap(|t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            let brake = if (1_000_000..1_050_000).contains(&t) {
+                0.10
+            } else if t < 2_150_000 {
+                0.0
+            } else {
+                0.70
+            };
+            (brake, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        let coast = overlap.coast_ms.expect("brake applied");
+        assert!((coast - 150.0).abs() <= 1.0, "coast_ms was {coast}");
+    }
+
+    #[test]
+    fn coast_time_is_zero_with_a_resting_brake() {
+        // Brake resting at 10 % through the whole hold, then the lift at 2.0 s.
+        let overlap = lift_window_overlap(|t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            let brake = if t < 2_150_000 { 0.10 } else { 0.70 };
+            (brake, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        assert_eq!(overlap.coast_ms, Some(0.0));
+    }
+
+    #[test]
+    fn coast_time_ignores_a_heel_toe_blip() {
+        // A clean 150 ms coast, then the throttle at 30 % for 50 ms while braking.
+        let overlap = lift_window_overlap(|t| {
+            let throttle = if t < 2_000_000 {
+                0.80
+            } else if (2_200_000..2_250_000).contains(&t) {
+                0.30
+            } else {
+                0.0
+            };
+            let brake = if t < 2_150_000 { 0.0 } else { 0.70 };
+            (brake, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        let coast = overlap.coast_ms.expect("brake applied");
+        assert!((coast - 150.0).abs() <= 1.0, "coast_ms was {coast}");
+    }
+
+    #[test]
+    fn coast_time_is_unknown_after_a_stall() {
+        // The last throttle sample at 80 % is at 1.85 s; the next, 400 ms later at 2.25 s in the
+        // lift window, has the throttle at 0 and the brake at 70 %.
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+        let mut run = DrillRun::new(drill, 300);
+        run.start(0);
+        let mut events = feed_pedals(&mut run, 0, 1_850_000, |_t| (0.0, 0.80));
+        events.extend(feed_pedals(&mut run, 2_250_000, 2_800_000, |_t| {
+            (0.70, 0.0)
+        }));
+        assert_eq!(run.phase(), Phase::Finished);
+        let overlap = overlap_of(first_scored(&events)).expect("lead-in drill reports overlap");
+        assert_eq!(overlap.coast_ms, None);
+    }
+
+    #[test]
+    fn hold_restart_clears_the_coast() {
+        // A brake brush at the hold start, then a throttle drop at 1.2 s restarts the hold. The
+        // new hold starts at 1.3 s: LIFT at 2.3 s, the brake point at 2.6 s, the end at 3.1 s.
+        let brush_then_drop = |t: u64| {
+            let brake = if (1_000_000..1_050_000).contains(&t) {
+                0.10
+            } else {
+                0.0
+            };
+            let throttle = if (1_200_000..1_300_000).contains(&t) {
+                0.0
+            } else {
+                0.80
+            };
+            (brake, throttle)
+        };
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+
+        // No brake after the restart: no stale provisional coast.
+        let mut run = DrillRun::new(drill.clone(), 300);
+        run.start(0);
+        let mut events = feed_pedals(&mut run, 0, 3_200_000, |t| {
+            if t < 2_300_000 {
+                brush_then_drop(t)
+            } else {
+                (0.0, 0.0)
+            }
+        });
+        assert_eq!(throttle_events(&events), 3, "{events:?}");
+        assert_eq!(run.phase(), Phase::Finished);
+        let rep = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    DrillEvent::RepScored { .. } | DrillEvent::RepFailed { .. }
+                )
+            })
+            .expect("rep ended");
+        assert_eq!(overlap_of(rep).expect("overlap").coast_ms, None);
+
+        // A clean 150 ms coast after the restart.
+        let mut run = DrillRun::new(drill, 300);
+        events = run.start(0);
+        events.extend(feed_pedals(&mut run, 0, 3_200_000, |t| {
+            if t < 2_300_000 {
+                brush_then_drop(t)
+            } else if t < 2_450_000 {
+                (0.0, 0.0)
+            } else {
+                (0.70, 0.0)
+            }
+        }));
+        assert!(events.contains(&DrillEvent::RepStarted {
+            rep: 0,
+            start_us: 2_600_000
+        }));
+        let overlap = overlap_of(first_scored(&events)).expect("overlap");
+        let coast = overlap.coast_ms.expect("brake applied");
+        assert!((coast - 150.0).abs() <= 1.0, "coast_ms was {coast}");
+    }
+
+    #[test]
+    fn stall_across_lift_does_not_restart_the_hold() {
+        // Samples stop at 1.5 s with the throttle at 80 % and resume at 2.1 s, past the LIFT
+        // cue at 2.0 s, with the throttle at 0.
+        let drill = with_lift(make_hold_drill(1, 1000, 500, 70.0), 80.0, 1000, 300);
+        let mut run = DrillRun::new(drill, 300);
+        let mut events = run.start(0);
+        events.extend(feed_pedals(&mut run, 0, 1_500_000, |_t| (0.0, 0.80)));
+        events.extend(feed_pedals(&mut run, 2_100_000, 2_800_000, |t| {
+            let brake = if t < 2_300_000 { 0.0 } else { 0.70 };
+            (brake, 0.0)
+        }));
+        assert_eq!(throttle_events(&events), 1, "{events:?}");
+        assert!(events.contains(&DrillEvent::RepStarted {
+            rep: 0,
+            start_us: 2_300_000
+        }));
+        assert_eq!(run.phase(), Phase::Finished);
+    }
+
+    #[test]
+    fn coast_time_is_none_without_the_brake() {
+        let overlap = lift_window_overlap(|t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            (0.0, throttle)
+        })
+        .expect("lead-in drill reports overlap");
+        assert_eq!(overlap.coast_ms, None);
+    }
+
+    #[test]
+    fn lift_window_coast_costs_no_trace_score() {
+        let points = vec![(0, 0.0), (150, 90.0), (600, 0.0)];
+        let plain_drill = make_trace_drill(1, 1000, points);
+        let curve = plain_drill.trace_curve().unwrap();
+
+        // No lift window: LIFT and the brake point at 2.0 s.
+        let mut no_window = DrillRun::new(with_lift(plain_drill.clone(), 80.0, 1000, 0), 300);
+        no_window.start(0);
+        feed_pedals(&mut no_window, 0, 2_900_000, |t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            (trace_value(&curve, t, 2_000_000), throttle)
+        });
+
+        // A 1000 ms lift window: LIFT at 2.0 s, a 1 s coast, the brake point at 3.0 s.
+        let mut window = DrillRun::new(with_lift(plain_drill, 80.0, 1000, 1000), 300);
+        window.start(0);
+        let events = feed_pedals(&mut window, 0, 3_900_000, |t| {
+            let throttle = if t < 2_000_000 { 0.80 } else { 0.0 };
+            (trace_value(&curve, t, 3_000_000), throttle)
+        });
+
+        assert_eq!(no_window.phase(), Phase::Finished);
+        assert_eq!(window.phase(), Phase::Finished);
+        assert!(events.contains(&DrillEvent::RepStarted {
+            rep: 0,
+            start_us: 3_000_000
+        }));
+        let no_window_score = no_window.results()[0].as_ref().unwrap();
+        assert!(
+            no_window_score.total() >= 95.0,
+            "total was {}",
+            no_window_score.total()
+        );
+        assert_eq!(no_window.results(), window.results());
     }
 }

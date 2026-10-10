@@ -158,6 +158,67 @@ impl Drill {
     pub fn tolerance_fraction(&self) -> f32 {
         self.tolerance.unwrap_or(DEFAULT_TOLERANCE) / 100.0
     }
+
+    /// Returns the duration of a single repetition in milliseconds.
+    ///
+    /// For [`DrillKind::Hold`], this is `hold_ms`. For [`DrillKind::Trace`], this is the
+    /// timestamp of the final curve point (or `0` if empty).
+    #[must_use]
+    pub fn rep_ms(&self) -> u32 {
+        match &self.kind {
+            DrillKind::Hold { hold_ms, .. } => *hold_ms,
+            DrillKind::Trace { points } => points.last().map_or(0, |(t, _)| *t),
+        }
+    }
+
+    /// Returns the estimated duration of a set of `reps` repetitions in milliseconds.
+    ///
+    /// Calculated as `lead_in_ms + reps * rep_ms() + (reps - 1) * DEFAULT_REST_MS`
+    /// using saturating arithmetic. For [`DrillKind::Trace`] drills, each rep also adds
+    /// [`crate::drill_engine::TRACE_LAG_MARGIN_MS`], because the engine ends a trace rep that
+    /// many milliseconds after its last point. When `reps` is 0, this returns `lead_in_ms`.
+    #[must_use]
+    pub fn set_ms(&self, reps: u32) -> u32 {
+        if reps == 0 {
+            return self.lead_in_ms;
+        }
+        let reps_duration = reps.saturating_mul(self.rep_ms());
+        let rest_duration = reps
+            .saturating_sub(1)
+            .saturating_mul(crate::drill_engine::DEFAULT_REST_MS);
+        let margin_duration = if matches!(self.kind, DrillKind::Trace { .. }) {
+            reps.saturating_mul(crate::drill_engine::TRACE_LAG_MARGIN_MS)
+        } else {
+            0
+        };
+        self.lead_in_ms
+            .saturating_add(reps_duration)
+            .saturating_add(rest_duration)
+            .saturating_add(margin_duration)
+    }
+}
+
+/// Shortest allowed estimated warm-up length in ms (D-25).
+pub const WARM_UP_MIN_MS: u32 = 180_000;
+/// Longest allowed estimated warm-up length in ms (D-25).
+pub const WARM_UP_MAX_MS: u32 = 300_000;
+
+/// A single step in a preset's pre-race warm-up sequence.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WarmUpStep {
+    /// Identifier of the drill to run for this step.
+    pub drill: String,
+    /// Number of repetitions to perform for this drill during the warm-up (`1..=50`).
+    pub reps: u32,
+}
+
+/// An ordered pre-race warm-up routine chaining drills from the preset.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WarmUp {
+    /// Ordered list of drill steps that make up the warm-up.
+    pub steps: Vec<WarmUpStep>,
 }
 
 /// A drill preset containing metadata and one or more drills.
@@ -175,6 +236,9 @@ pub struct Preset {
     pub description: String,
     /// Drills included in this preset.
     pub drills: Vec<Drill>,
+    /// Optional pre-race warm-up routine chaining drills from this preset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warm_up: Option<WarmUp>,
 }
 
 impl Preset {
@@ -230,7 +294,97 @@ impl Preset {
             validate_drill(drill)?;
         }
 
+        if let Some(warm_up) = &self.warm_up {
+            self.validate_warm_up(warm_up)?;
+        }
+
         Ok(())
+    }
+
+    fn validate_warm_up(&self, warm_up: &WarmUp) -> Result<(), PresetError> {
+        if warm_up.steps.is_empty() {
+            return Err(PresetError::Invalid {
+                drill: None,
+                message: "warmUp: steps must be non-empty".to_string(),
+            });
+        }
+
+        for step in &warm_up.steps {
+            if !self.drills.iter().any(|d| d.id == step.drill) {
+                return Err(PresetError::Invalid {
+                    drill: None,
+                    message: format!("warmUp: drill '{}' not found in preset", step.drill),
+                });
+            }
+        }
+
+        let mut seen_warm_up_drills = HashSet::new();
+        for step in &warm_up.steps {
+            if !seen_warm_up_drills.insert(&step.drill) {
+                return Err(PresetError::Invalid {
+                    drill: None,
+                    message: format!("warmUp: duplicate drill '{}'", step.drill),
+                });
+            }
+        }
+
+        for step in &warm_up.steps {
+            if !(1..=50).contains(&step.reps) {
+                return Err(PresetError::Invalid {
+                    drill: None,
+                    message: format!(
+                        "warmUp: drill '{}' reps ({}) must be between 1 and 50",
+                        step.drill, step.reps
+                    ),
+                });
+            }
+        }
+
+        for step in &warm_up.steps {
+            if let Some(drill) = self.drills.iter().find(|d| d.id == step.drill)
+                && drill.pedal == Pedal::Clutch
+            {
+                return Err(PresetError::Invalid {
+                    drill: None,
+                    message: format!(
+                        "warmUp: drill '{}' targets clutch pedal, but warm-up does not support clutch",
+                        step.drill
+                    ),
+                });
+            }
+        }
+
+        let estimate_ms = self.warm_up_estimate_ms().unwrap_or(0);
+        if !(WARM_UP_MIN_MS..=WARM_UP_MAX_MS).contains(&estimate_ms) {
+            let duration_sec = f64::from(estimate_ms) / 1000.0;
+            let min_s = WARM_UP_MIN_MS / 1000;
+            let max_s = WARM_UP_MAX_MS / 1000;
+            return Err(PresetError::Invalid {
+                drill: None,
+                message: format!(
+                    "warmUp: estimated duration {duration_sec:.1}s ({estimate_ms} ms) must be between {min_s}s and {max_s}s ({WARM_UP_MIN_MS}..={WARM_UP_MAX_MS} ms)"
+                ),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Returns the estimated total duration in milliseconds for this preset's warm-up routine,
+    /// or `None` if the preset does not define a warm-up.
+    ///
+    /// The estimate is calculated by summing [`Drill::set_ms`] across all warm-up steps
+    /// using each step's rep count. A step naming a missing drill adds `0`.
+    #[must_use]
+    pub fn warm_up_estimate_ms(&self) -> Option<u32> {
+        let warm_up = self.warm_up.as_ref()?;
+        let mut total: u32 = 0;
+        for step in &warm_up.steps {
+            if let Some(drill) = self.drills.iter().find(|d| d.id == step.drill) {
+                total = total.saturating_add(drill.set_ms(step.reps));
+            }
+        }
+        Some(total)
     }
 }
 
@@ -833,6 +987,45 @@ pub fn find_drill(presets: &[Preset], preset_id: &str, drill_id: &str) -> Result
         .ok_or_else(|| format!("drill '{drill_id}' not found in preset '{preset_id}'"))
 }
 
+/// Finds the drill `drill_id` inside preset `preset_id` configured for its warm-up routine.
+///
+/// Returns the matching drill cloned with its `reps` count replaced by the warm-up step's
+/// rep count.
+///
+/// # Errors
+///
+/// Returns an error message naming the missing preset, the preset having no warm-up,
+/// or the drill not being present in the warm-up.
+pub fn find_warm_up_drill(
+    presets: &[Preset],
+    preset_id: &str,
+    drill_id: &str,
+) -> Result<Drill, String> {
+    let preset = presets
+        .iter()
+        .find(|p| p.id == preset_id)
+        .ok_or_else(|| format!("preset '{preset_id}' not found"))?;
+    let warm_up = preset
+        .warm_up
+        .as_ref()
+        .ok_or_else(|| format!("preset '{preset_id}' has no warm-up"))?;
+    let step = warm_up
+        .steps
+        .iter()
+        .find(|s| s.drill == drill_id)
+        .ok_or_else(|| {
+            format!("drill '{drill_id}' not found in warm-up for preset '{preset_id}'")
+        })?;
+    let mut drill = preset
+        .drills
+        .iter()
+        .find(|d| d.id == drill_id)
+        .cloned()
+        .ok_or_else(|| format!("drill '{drill_id}' not found in preset '{preset_id}'"))?;
+    drill.reps = step.reps;
+    Ok(drill)
+}
+
 /// Loads and validates all preset files from a directory.
 ///
 /// Reads every `*.json` file in `dir` (non-recursively), sorted by file name.
@@ -954,6 +1147,7 @@ mod tests {
             name: "GT3".to_string(),
             description: "Threshold braking and trail-off for GT3 cars.".to_string(),
             drills: vec![valid_hold_drill(), valid_trace_drill()],
+            warm_up: None,
         }
     }
 
@@ -1930,6 +2124,7 @@ mod tests {
             name: "P".to_string(),
             description: String::new(),
             drills: vec![valid_hold_drill(), valid_trace_drill()],
+            warm_up: None,
         };
         let presets = [preset];
         assert_eq!(
@@ -1952,5 +2147,355 @@ mod tests {
         let preset = parse_preset(json).unwrap();
         assert_eq!(preset.drills[0].tolerance, None);
         assert!((preset.drills[0].tolerance_fraction() - 0.10).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn drill_set_ms_hold_and_trace() {
+        let hold = valid_hold_drill(); // hold_ms = 2000, lead_in_ms = 3000
+        assert_eq!(hold.rep_ms(), 2000);
+        assert_eq!(hold.set_ms(0), 3000);
+        assert_eq!(hold.set_ms(1), 3000 + 2000);
+        // reps 5: 3000 + 5 * 2000 + 4 * 2000 = 21000
+        assert_eq!(hold.set_ms(5), 21000);
+
+        let trace = valid_trace_drill(); // duration = 1500, lead_in_ms = 2000
+        assert_eq!(trace.rep_ms(), 1500);
+        assert_eq!(trace.set_ms(0), 2000);
+        assert_eq!(trace.set_ms(1), 2000 + 1500 + 300);
+        // reps 4: 2000 + 4 * 1500 + 3 * 2000 + 4 * 300 = 15200
+        assert_eq!(trace.set_ms(4), 15200);
+    }
+
+    #[test]
+    fn preset_without_warm_up_parses_with_none() {
+        let json = r#"{
+            "schemaVersion": 1,
+            "id": "minimal",
+            "name": "Minimal",
+            "drills": [
+                {
+                    "id": "drill-1",
+                    "name": "Hold",
+                    "type": "hold",
+                    "pedal": "brake",
+                    "target": 50,
+                    "tolerance": 5,
+                    "holdMs": 1000
+                }
+            ]
+        }"#;
+        let preset = parse_preset(json).expect("should parse preset without warmUp");
+        assert_eq!(preset.warm_up, None);
+        assert_eq!(preset.warm_up_estimate_ms(), None);
+    }
+
+    #[test]
+    fn valid_warm_up_parses_and_estimate_matches() {
+        let json = r#"{
+            "schemaVersion": 1,
+            "id": "warmup-test",
+            "name": "Warm-up Test",
+            "drills": [
+                {
+                    "id": "brake-hold-70",
+                    "name": "Brake hold 70%",
+                    "type": "hold",
+                    "pedal": "brake",
+                    "target": 70,
+                    "tolerance": 5,
+                    "holdMs": 2000,
+                    "leadInMs": 3000
+                },
+                {
+                    "id": "hairpin",
+                    "name": "Hairpin trace",
+                    "type": "trace",
+                    "pedal": "brake",
+                    "tolerance": 6,
+                    "leadInMs": 2000,
+                    "points": [[0, 0], [150, 92], [600, 60], [1500, 0]]
+                }
+            ],
+            "warmUp": {
+                "steps": [
+                    { "drill": "brake-hold-70", "reps": 20 },
+                    { "drill": "hairpin", "reps": 30 }
+                ]
+            }
+        }"#;
+        let preset = parse_preset(json).expect("valid warm-up should parse");
+        assert!(preset.warm_up.is_some());
+        // Hand-computed:
+        // brake-hold-70: 3000 + 20 * 2000 + 19 * 2000 = 81_000 ms
+        // hairpin: 2000 + 30 * 1500 + 29 * 2000 + 30 * 300 = 114_000 ms
+        // Total: 81_000 + 114_000 = 195_000 ms
+        assert_eq!(preset.warm_up_estimate_ms(), Some(195_000));
+    }
+
+    #[test]
+    fn warm_up_validation_rule_1_empty_steps() {
+        let mut preset = valid_preset();
+        preset.warm_up = Some(WarmUp { steps: vec![] });
+        let err = preset.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            PresetError::Invalid {
+                drill: None,
+                ref message
+            } if message.starts_with("warmUp: ") && message.contains("steps must be non-empty")
+        ));
+    }
+
+    #[test]
+    fn warm_up_validation_rule_2_drill_not_found() {
+        let mut preset = valid_preset();
+        preset.warm_up = Some(WarmUp {
+            steps: vec![WarmUpStep {
+                drill: "nonexistent-drill".to_string(),
+                reps: 10,
+            }],
+        });
+        let err = preset.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            PresetError::Invalid {
+                drill: None,
+                ref message
+            } if message.starts_with("warmUp: ") && message.contains("drill 'nonexistent-drill' not found in preset")
+        ));
+    }
+
+    #[test]
+    fn warm_up_validation_rule_3_duplicate_drill() {
+        let mut preset = valid_preset();
+        preset.warm_up = Some(WarmUp {
+            steps: vec![
+                WarmUpStep {
+                    drill: "brake-hold-70".to_string(),
+                    reps: 10,
+                },
+                WarmUpStep {
+                    drill: "brake-hold-70".to_string(),
+                    reps: 10,
+                },
+            ],
+        });
+        let err = preset.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            PresetError::Invalid {
+                drill: None,
+                ref message
+            } if message.starts_with("warmUp: ") && message.contains("duplicate drill 'brake-hold-70'")
+        ));
+    }
+
+    #[test]
+    fn warm_up_validation_rule_4_reps_range() {
+        let mut preset = valid_preset();
+        preset.warm_up = Some(WarmUp {
+            steps: vec![WarmUpStep {
+                drill: "brake-hold-70".to_string(),
+                reps: 0,
+            }],
+        });
+        let err = preset.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            PresetError::Invalid {
+                drill: None,
+                ref message
+            } if message.starts_with("warmUp: ") && message.contains("reps (0) must be between 1 and 50")
+        ));
+
+        preset.warm_up = Some(WarmUp {
+            steps: vec![WarmUpStep {
+                drill: "brake-hold-70".to_string(),
+                reps: 51,
+            }],
+        });
+        let err51 = preset.validate().unwrap_err();
+        assert!(matches!(
+            err51,
+            PresetError::Invalid {
+                drill: None,
+                ref message
+            } if message.starts_with("warmUp: ") && message.contains("reps (51) must be between 1 and 50")
+        ));
+    }
+
+    #[test]
+    fn warm_up_validation_rule_5_clutch_drill_rejected() {
+        let mut preset = valid_preset();
+        let mut clutch_drill = valid_hold_drill();
+        clutch_drill.id = "clutch-hold".to_string();
+        clutch_drill.pedal = Pedal::Clutch;
+        preset.drills.push(clutch_drill);
+        preset.warm_up = Some(WarmUp {
+            steps: vec![WarmUpStep {
+                drill: "clutch-hold".to_string(),
+                reps: 10,
+            }],
+        });
+        let err = preset.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            PresetError::Invalid {
+                drill: None,
+                ref message
+            } if message.starts_with("warmUp: ") && message.contains("targets clutch pedal")
+        ));
+    }
+
+    #[test]
+    fn warm_up_validation_rule_6_estimate_range() {
+        // Too short (< 180s = 180_000 ms)
+        let mut preset = valid_preset();
+        preset.warm_up = Some(WarmUp {
+            steps: vec![WarmUpStep {
+                drill: "brake-hold-70".to_string(),
+                reps: 1,
+            }],
+        });
+        let err = preset.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            PresetError::Invalid {
+                drill: None,
+                ref message
+            } if message.starts_with("warmUp: ") && message.contains("estimated duration") && message.contains("180s and 300s")
+        ));
+
+        // Too long (> 300s = 300_000 ms)
+        preset.warm_up = Some(WarmUp {
+            steps: vec![
+                WarmUpStep {
+                    drill: "brake-hold-70".to_string(),
+                    reps: 50,
+                },
+                WarmUpStep {
+                    drill: "hairpin".to_string(),
+                    reps: 50,
+                },
+            ],
+        });
+        let err_long = preset.validate().unwrap_err();
+        assert!(matches!(
+            err_long,
+            PresetError::Invalid {
+                drill: None,
+                ref message
+            } if message.starts_with("warmUp: ") && message.contains("estimated duration") && message.contains("180s and 300s")
+        ));
+    }
+
+    /// A preset whose only drill is a brake hold with a 1000 ms lead-in, and whose warm-up
+    /// runs that drill `reps` times.
+    fn single_hold_warm_up(hold_ms: u32, reps: u32) -> Preset {
+        let mut preset = valid_preset();
+        preset.drills = vec![Drill {
+            lead_in_ms: 1000,
+            kind: DrillKind::Hold {
+                target: 70.0,
+                hold_ms,
+            },
+            ..valid_hold_drill()
+        }];
+        preset.warm_up = Some(WarmUp {
+            steps: vec![WarmUpStep {
+                drill: "brake-hold-70".to_string(),
+                reps,
+            }],
+        });
+        preset
+    }
+
+    #[test]
+    fn warm_up_estimate_boundaries_are_inclusive() {
+        // Estimate with lead-in 1000 ms: 1000 + reps * (hold_ms + 2000) - 2000.
+        let cases = [
+            // (reps, hold_ms, estimate_ms, valid)
+            (9, 18_111, 179_999, false),
+            (4, 43_250, 180_000, true),
+            (5, 58_200, 300_000, true),
+            (23, 11_087, 300_001, false),
+        ];
+        for (reps, hold_ms, estimate_ms, valid) in cases {
+            let preset = single_hold_warm_up(hold_ms, reps);
+            assert_eq!(preset.warm_up_estimate_ms(), Some(estimate_ms));
+            let result = preset.validate();
+            assert_eq!(result.is_ok(), valid, "estimate {estimate_ms} ms");
+            if !valid {
+                assert!(matches!(
+                    result,
+                    Err(PresetError::Invalid { drill: None, ref message })
+                        if message.contains("estimated duration")
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn warm_up_step_unknown_key_rejected() {
+        let json = r#"{
+            "schemaVersion": 1,
+            "id": "warmup-test",
+            "name": "Warm-up Test",
+            "drills": [
+                {
+                    "id": "brake-hold-70",
+                    "name": "Brake hold 70%",
+                    "type": "hold",
+                    "pedal": "brake",
+                    "target": 70,
+                    "tolerance": 5,
+                    "holdMs": 2000
+                }
+            ],
+            "warmUp": {
+                "steps": [
+                    {
+                        "drill": "brake-hold-70",
+                        "reps": 8,
+                        "extraKey": "not allowed"
+                    }
+                ]
+            }
+        }"#;
+        let err = parse_preset(json).unwrap_err();
+        assert!(matches!(err, PresetError::Json(_)));
+        assert!(err.to_string().contains("extraKey"));
+    }
+
+    #[test]
+    fn find_warm_up_drill_overrides_reps_and_errors() {
+        let mut preset = valid_preset();
+        preset.warm_up = Some(WarmUp {
+            steps: vec![WarmUpStep {
+                drill: "brake-hold-70".to_string(),
+                reps: 18,
+            }],
+        });
+        let presets = [preset];
+
+        // Found with overridden reps
+        let drill = find_warm_up_drill(&presets, "gt3", "brake-hold-70").unwrap();
+        assert_eq!(drill.reps, 18);
+        assert_eq!(drill.id, "brake-hold-70");
+
+        // Drill outside warm-up
+        let err_outside = find_warm_up_drill(&presets, "gt3", "hairpin").unwrap_err();
+        assert!(err_outside.contains("drill 'hairpin' not found in warm-up"));
+
+        // Preset without warm-up
+        let unconfigured_preset = valid_preset();
+        let unconfigured_list = [unconfigured_preset];
+        let err_no_wu = find_warm_up_drill(&unconfigured_list, "gt3", "brake-hold-70").unwrap_err();
+        assert!(err_no_wu.contains("preset 'gt3' has no warm-up"));
+
+        // Missing preset
+        let err_missing =
+            find_warm_up_drill(&presets, "unknown-preset", "brake-hold-70").unwrap_err();
+        assert!(err_missing.contains("preset 'unknown-preset' not found"));
     }
 }

@@ -219,9 +219,10 @@ Same structure, using MX-5 traces (low grip, gentle threshold, early throttle).
 Same structure as GT3, from the Caterham 420R laps (light car, short sharp brake peak). Road-car brake budget per [D-22](../decisions/README.md).
 - **Deps:** SCT-044, SCT-036
 
-### SCT-045 · Pre-race warm-up ⬜ · M
-One button on each preset card runs a 3–5 minute routine: a chain of the preset's drills with fewer reps. It ends with a summary.
+### SCT-045 · Pre-race warm-up ✅ · M
+One button on each preset card runs a 3–5 minute routine: a chain of the preset's drills with the warm-up's own rep counts (D-25). It ends with a summary.
 - **AC:** the routine is defined in the preset JSON ([D-19](../decisions/README.md)); you can skip a drill; the summary shows a score per drill and an overall warm-up score; each warm-up run is saved (per-drill scores and the overall score) for the per-warm-up leaderboard in SCT-051.
+- **Status:** a preset defines its warm-up in a `warmUp` block ([preset format](../preset-format.md)); the GT3 and Sample presets have one. Each step has its own rep count and the chain is validated to an estimated 3-5 minutes ([D-25](../decisions/README.md)). The overall score is the mean of the set averages, with skipped drills counted as 0 ([D-26](../decisions/README.md)). Finished runs go to the `warm_up_run` and `warm_up_step` tables (migration 3); a run left halfway is not stored, though its sets are.
 - **Deps:** SCT-040, at least one preset
 
 ---

@@ -13,6 +13,7 @@ Files use JSON. The app ships its presets in the bundled `presets/` folder (impo
 | `name` | string | Required | Non-empty string | Human-readable title shown in the UI. |
 | `description` | string | Optional (default: `""`) | Any string | Human-readable description of the preset purpose. |
 | `drills` | array of objects | Required | At least 1 drill | Ordered list of drills included in this preset. |
+| `warmUp` | object | Optional (default: omitted) | Valid warm-up object | Optional pre-race warm-up routine chaining drills from this preset. |
 
 ## Drill Fields
 
@@ -109,6 +110,80 @@ Endurance drivers lift about a second early and coast to save fuel. This lead-in
 "throttleLeadIn": { "level": 100, "holdMs": 2000, "liftMs": 1200 }
 ```
 
+## Warm-up
+
+Presets can define an optional pre-race warm-up routine that chains drills from the preset in a fixed order. Warm-up reps are the warm-up's own count and may be more or fewer than the drill's `reps` ([D-25](decisions/README.md)).
+
+```json
+"warmUp": {
+  "steps": [
+    { "drill": "gt3-brake-hold-80", "reps": 8 },
+    { "drill": "gt3-heavy-stop", "reps": 8 }
+  ]
+}
+```
+
+### Shape and fields
+
+| Field | Type | Required / Default | Allowed Range | Meaning |
+|---|---|---|---|---|
+| `steps` | array of objects | Required | At least 1 step | Ordered chain of drill steps in the warm-up routine. |
+
+Each step object contains:
+
+| Field | Type | Required / Default | Allowed Range | Meaning |
+|---|---|---|---|---|
+| `drill` | string | Required | Non-empty string | Drill identifier of an existing drill in this preset. |
+| `reps` | integer | Required | `1` to `50` | Number of repetitions to perform during the warm-up. |
+
+### Validation rules
+
+A warm-up block must satisfy six validation rules:
+1. `steps` must be non-empty (at least one step).
+2. Every `step.drill` must name an existing drill in this preset.
+3. No drill may appear in more than one step (each drill in the warm-up is unique).
+4. `step.reps` must be between `1` and `50`.
+5. The step's drill pedal must not be `"clutch"` (the drill screen cannot run clutch drills).
+6. The estimated warm-up duration (`warm_up_estimate_ms`) must be between `180000` ms (3 minutes) and `300000` ms (5 minutes).
+
+Unknown keys inside `warmUp` or a step are strictly rejected.
+
+### Estimated duration formula
+
+The warm-up estimate predicts total drill run time. It leaves out the time spent on screen between drills (such as transition screens and reviewing rep scores).
+
+Each drill step duration is calculated as:
+`set_ms(reps) = lead_in_ms + reps * rep_ms + (reps - 1) * DEFAULT_REST_MS` for hold drills, and
+`set_ms(reps) = lead_in_ms + reps * rep_ms + (reps - 1) * DEFAULT_REST_MS + reps * TRACE_LAG_MARGIN_MS` for trace drills.
+
+Where:
+- `lead_in_ms` is the drill lead-in countdown duration in milliseconds (`1000` to `10000` ms, default `3000` ms).
+- `rep_ms` is the duration of a single repetition in milliseconds: `holdMs` for hold drills, or the timestamp of the last control point for trace drills (0 if no points).
+- `DEFAULT_REST_MS` is the standard pause between repetitions (2000 ms).
+- `TRACE_LAG_MARGIN_MS` is the time the engine keeps each trace repetition running after its last point, before the rest starts (300 ms). Hold drills add nothing for it.
+- If `reps` is 0, the set duration equals `lead_in_ms`.
+
+The total warm-up estimate is the sum of `set_ms` across all warm-up steps.
+
+#### Worked example
+
+Consider a warm-up step with drill `gt3-brake-hold-80` (`leadInMs`: 3000, `holdMs`: 1500) configured for 8 reps:
+- Rep duration: 1500 ms
+- Rest pauses: (8 - 1) * 2000 ms = 14000 ms
+- Reps time: 8 * 1500 ms = 12000 ms
+- Lead-in: 3000 ms
+- Step set length: 3000 + 12000 + 14000 = 29000 ms (29.0 s)
+
+A trace drill step adds the margin to each rep. Consider a step with drill `hairpin` (`leadInMs`: 2000, last point at 1500 ms) configured for 30 reps:
+- Rep duration: 1500 ms
+- Rest pauses: (30 - 1) * 2000 ms = 58000 ms
+- Reps time: 30 * 1500 ms = 45000 ms
+- Trace margin: 30 * 300 ms = 9000 ms
+- Lead-in: 2000 ms
+- Step set length: 2000 + 45000 + 58000 + 9000 = 114000 ms (114.0 s)
+
+Summing this set duration for all steps in the preset yields the total warm-up duration estimate.
+
 ## Validation Rules
 
 The parser validates all presets strictly upon loading:
@@ -180,7 +255,39 @@ Here is the complete `presets/sample.json` file included with the repository:
         [1000, 40],
         [1500, 0]
       ]
+    },
+    {
+      "id": "throttle-rolling-start-35",
+      "name": "Rolling start: throttle hold 35%",
+      "type": "hold",
+      "pedal": "throttle",
+      "target": 35,
+      "tolerance": 2,
+      "decimals": 1,
+      "holdMs": 10000,
+      "reps": 3,
+      "leadInMs": 3000
     }
-  ]
+  ],
+  "warmUp": {
+    "steps": [
+      {
+        "drill": "brake-hold-70",
+        "reps": 12
+      },
+      {
+        "drill": "throttle-hold-50",
+        "reps": 12
+      },
+      {
+        "drill": "hairpin",
+        "reps": 12
+      },
+      {
+        "drill": "throttle-rolling-start-35",
+        "reps": 4
+      }
+    ]
+  }
 }
 ```

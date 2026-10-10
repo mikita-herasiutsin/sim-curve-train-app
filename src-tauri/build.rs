@@ -21,6 +21,8 @@ fn main() {
             "list_attempts",
             "best_total",
             "best_totals",
+            "save_warm_up_run",
+            "list_warm_up_runs",
             "audio_test_tone",
             "audio_set_enabled",
             "audio_set_volume",

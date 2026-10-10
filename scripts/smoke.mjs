@@ -1232,6 +1232,209 @@ async function main() {
       what: `${P.name} to be open again on the home page`,
     });
   });
+
+  await step("warm-up-with-skips", async () => {
+    const samplePreset = bundledPresets().find((p) => p.id === "sample");
+    assert(samplePreset, "bundled preset 'sample' not found");
+    const warmUpSteps = samplePreset.warmUp?.steps ?? [];
+    assert(
+      warmUpSteps.length === 4,
+      `expected 4 warm-up steps in sample, got ${warmUpSteps.length}`,
+    );
+    const sampleName = samplePreset.name;
+
+    await go("/");
+    const cardOf = (name) =>
+      `[...document.querySelectorAll("li.preset-card")].find((li) => li.querySelector(".preset-name")?.textContent.trim() === ${JSON.stringify(name)})`;
+    const headerOf = (name) => `(${cardOf(name)})?.querySelector("button.preset-header")`;
+
+    await waitFor(() => ev(`Boolean(${headerOf(sampleName)})`), {
+      what: `the ${sampleName} card`,
+    });
+    const wasExpanded = await ev(`${headerOf(sampleName)}.getAttribute("aria-expanded")`);
+    if (wasExpanded !== "true") {
+      await ev(`${headerOf(sampleName)}.click()`);
+    }
+    await waitFor(() => ev(`(${headerOf(sampleName)})?.getAttribute("aria-expanded") === "true"`), {
+      what: `${sampleName} to open`,
+    });
+
+    await click('[data-testid="warm-up-start"]', null, cardOf(sampleName));
+    await waitFor(
+      () => ev(`location.search.includes("preset=sample") && location.search.includes("warmup=1")`),
+      { what: "location.search to contain preset=sample and warmup=1" },
+    );
+    await waitFor(() => hasText(`Warm-up: ${sampleName}`), {
+      what: `the text "Warm-up: ${sampleName}"`,
+    });
+    await waitFor(() => hasText("Drill 1 of 4"), { what: 'the text "Drill 1 of 4"' });
+    await waitFor(() => hasText(`Pedals Active: ${SIM_NAME}`), {
+      timeout: 15_000,
+      what: "the drill page to show the pedals as active",
+    });
+
+    const drill1 = findDrill("sample", warmUpSteps[0].drill);
+    await setPedalsVerified(
+      [0, raw("brake", drill1.target / 100), 0],
+      { brake: drill1.target },
+      0.5,
+    );
+    await click("button", "Start Drill");
+    let snap;
+    await waitFor(
+      async () => {
+        snap = await drillSnap();
+        if (snap.error) throw new Fatal(`drill page error: ${snap.error}`);
+        const nextEnabled = await ev(`(() => {
+          const btn = [...document.querySelectorAll("button")].find((b) => b.textContent.trim() === "Next Drill");
+          return Boolean(btn && !btn.disabled);
+        })()`);
+        return snap.finished && nextEnabled;
+      },
+      { timeout: 120_000, interval: 200, what: '"Set Finished!" and enabled "Next Drill" button' },
+    );
+    assert(
+      snap.pills.length === warmUpSteps[0].reps,
+      `expected ${warmUpSteps[0].reps} reps, summary has ${snap.pills.length}`,
+    );
+    await setPedalsVerified([0, raw("brake", 0), 0], { brake: 0 }, 0.5);
+    await click("button", "Next Drill");
+
+    await waitFor(() => hasText("Drill 2 of 4"), { timeout: 15_000, what: '"Drill 2 of 4"' });
+    await click('[data-testid="warm-up-skip"]');
+
+    await waitFor(() => hasText("Drill 3 of 4"), { timeout: 15_000, what: '"Drill 3 of 4"' });
+    await click("button", "Start Drill");
+    await waitFor(
+      async () => {
+        const s = await drillSnap();
+        if (s.error) throw new Fatal(`drill page error: ${s.error}`);
+        return s.rep?.startsWith("Rep 2 /");
+      },
+      {
+        timeout: 30_000,
+        interval: 100,
+        what: 'second rep to start (.rep-info h3 reads "Rep 2 /")',
+      },
+    );
+    await click('[data-testid="warm-up-skip"]');
+    await waitFor(() => hasText("Drill 4 of 4"), { timeout: 15_000, what: '"Drill 4 of 4"' });
+
+    await click('[data-testid="warm-up-skip"]');
+
+    await waitFor(
+      async () => {
+        const summary = await ev(
+          `Boolean(document.querySelector('[data-testid="warm-up-summary"]'))`,
+        );
+        const saved = await hasText("Saved.");
+        const s = await drillSnap();
+        if (s.error) throw new Fatal(`drill page error: ${s.error}`);
+        return summary && saved;
+      },
+      { timeout: 15_000, what: 'warm-up summary with "Saved."' },
+    );
+    const rows = await ev(
+      `[...document.querySelectorAll(".warm-up-table tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent.trim()))`,
+    );
+    assert(rows.length === 4, `expected 4 rows in warm-up summary, got ${rows.length}`);
+    const row1Score = Number(rows[0][1]);
+    assert(
+      !Number.isNaN(row1Score) && row1Score >= 90,
+      `expected row 1 score to be a number >= 90, got ${rows[0][1]}`,
+    );
+    for (let i = 1; i < 4; i++) {
+      assert(
+        rows[i][1] === "Skipped",
+        `expected row ${i + 1} to read "Skipped", got ${JSON.stringify(rows[i][1])}`,
+      );
+    }
+    const shownScoreText = await ev(
+      `document.querySelector('[data-testid="warm-up-score"]')?.textContent.trim()`,
+    );
+    const shownScore = Number(shownScoreText);
+    assert(
+      !Number.isNaN(shownScore),
+      `expected [data-testid="warm-up-score"] to be a number, got ${JSON.stringify(shownScoreText)}`,
+    );
+    assert(
+      Math.abs(shownScore - Math.round(row1Score / 4)) <= 1,
+      `overall score ${shownScore} does not match Math.round(${row1Score} / 4) within ±1`,
+    );
+    await shot("warm-up-summary");
+
+    const runs = await waitFor(
+      async () => {
+        const r = await invoke("list_warm_up_runs", { presetId: "sample", limit: 5 });
+        return Array.isArray(r) && r.length === 1 ? r : null;
+      },
+      { timeout: 5000, what: "saved warm-up run in database" },
+    );
+    const run = runs[0];
+    assert(
+      Array.isArray(run.steps) && run.steps.length === 4,
+      `expected 4 steps in saved run, got ${run.steps?.length}`,
+    );
+    assert(
+      run.steps[0].skipped === false,
+      `expected step 0 skipped: false, got ${run.steps[0].skipped}`,
+    );
+    assert(
+      typeof run.steps[0].attemptId === "number",
+      `expected step 0 attemptId to be a number, got ${run.steps[0].attemptId}`,
+    );
+    assert(
+      typeof run.steps[0].score === "number" && run.steps[0].score >= 90,
+      `expected step 0 score >= 90, got ${run.steps[0].score}`,
+    );
+
+    assert(
+      run.steps[1].skipped === true,
+      `expected step 1 skipped: true, got ${run.steps[1].skipped}`,
+    );
+    assert(
+      run.steps[1].attemptId === null,
+      `expected step 1 attemptId: null, got ${run.steps[1].attemptId}`,
+    );
+
+    assert(
+      run.steps[2].skipped === true,
+      `expected step 2 skipped: true, got ${run.steps[2].skipped}`,
+    );
+    assert(
+      typeof run.steps[2].attemptId === "number",
+      `expected step 2 attemptId to be a number, got ${run.steps[2].attemptId}`,
+    );
+
+    assert(
+      run.steps[3].skipped === true,
+      `expected step 3 skipped: true, got ${run.steps[3].skipped}`,
+    );
+    assert(
+      run.steps[3].attemptId === null,
+      `expected step 3 attemptId: null, got ${run.steps[3].attemptId}`,
+    );
+
+    assert(
+      Math.abs(run.score - run.steps[0].score / 4) <= 0.01,
+      `run score ${run.score} does not match steps[0].score / 4 (${run.steps[0].score / 4}) within 0.01`,
+    );
+
+    const hairpinAttempts = await invoke("list_attempts", { drillId: "hairpin", limit: 20 });
+    const hairpinAttempt = hairpinAttempts.find((a) => a.id === run.steps[2].attemptId);
+    assert(
+      hairpinAttempt,
+      `hairpin attempt with id ${run.steps[2].attemptId} not found in list_attempts`,
+    );
+    assert(
+      hairpinAttempt.aborted === true,
+      `expected hairpin attempt to have aborted: true, got ${hairpinAttempt.aborted}`,
+    );
+
+    log(
+      `      warm-up row scores: ${rows.map((r) => r[1]).join(", ")}; overall: ${shownScore} (run score: ${run.score.toFixed(1)})`,
+    );
+  });
 }
 
 // ---------------------------------------------------------------- run

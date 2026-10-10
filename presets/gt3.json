@@ -118,5 +118,33 @@
         [1700, 100]
       ]
     }
-  ]
+  ],
+  "warmUp": {
+    "steps": [
+      {
+        "drill": "gt3-brake-hold-80",
+        "reps": 8
+      },
+      {
+        "drill": "gt3-brake-hold-50",
+        "reps": 8
+      },
+      {
+        "drill": "gt3-heavy-stop",
+        "reps": 8
+      },
+      {
+        "drill": "gt3-medium-corner",
+        "reps": 8
+      },
+      {
+        "drill": "gt3-staged-exit",
+        "reps": 8
+      },
+      {
+        "drill": "gt3-two-step-exit",
+        "reps": 8
+      }
+    ]
+  }
 }

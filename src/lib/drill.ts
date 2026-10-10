@@ -54,12 +54,23 @@ export function playableDrills(preset: Preset): Drill[] {
   return preset.drills.filter(isPlayable);
 }
 
+/** One step of a preset's warm-up (D-19, D-25): a drill id and the warm-up's own rep count. */
+export interface WarmUpStep {
+  drill: string;
+  reps: number;
+}
+
+export interface WarmUp {
+  steps: WarmUpStep[];
+}
+
 export interface Preset {
   schemaVersion: number;
   id: string;
   name: string;
   description: string;
   drills: Drill[];
+  warmUp?: WarmUp;
 }
 
 export interface HoldScore {
@@ -130,10 +141,11 @@ export async function startDrillRun(
   presetId: string,
   drillId: string,
   onEvent: (e: DrillEvent) => void,
+  warmUp = false,
 ): Promise<void> {
   const channel = new Channel<DrillEvent>();
   channel.onmessage = onEvent;
-  return invoke<void>("start_drill_run", { token, presetId, drillId, onEvent: channel });
+  return invoke<void>("start_drill_run", { token, presetId, drillId, warmUp, onEvent: channel });
 }
 
 export async function abortDrillRun(token: number): Promise<void> {

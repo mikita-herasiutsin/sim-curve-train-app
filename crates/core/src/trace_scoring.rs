@@ -994,36 +994,58 @@ mod tests {
     }
 
     #[test]
-    fn bundled_trace_drills_score_an_exact_follow_near_full_marks() {
-        // Every trace drill in presets/ must load, build a curve and score a perfect follow.
+    fn bundled_presets_score_a_perfect_follow_and_punish_a_late_one() {
+        // Every drill in presets/ loads and scores: an exact follow earns an S, and a trace
+        // followed 250 ms late loses at least 5 points.
+        use crate::preset::DrillKind;
+        use crate::scoring::{HoldParams, score_hold};
+
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets");
-        let mut checked = 0;
-        for entry in std::fs::read_dir(&dir).expect("presets/ is readable") {
-            let path = entry.unwrap().path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let json = std::fs::read_to_string(&path).unwrap();
-            let preset = crate::preset::parse_preset(&json)
-                .unwrap_or_else(|e| panic!("{} must be valid: {e}", path.display()));
+        let presets = crate::preset::load_dir(&dir).expect("presets/ loads");
+        let mut checked = Vec::new();
+        for preset in &presets {
             for drill in &preset.drills {
-                let Some(curve) = drill.trace_curve() else {
-                    continue;
+                let who = format!("{} / {}", preset.id, drill.id);
+                let (total, grade) = match &drill.kind {
+                    DrillKind::Trace { .. } => {
+                        let curve = drill.trace_curve().unwrap();
+                        let params = TraceParams::new(&curve, drill.tolerance_fraction());
+                        let exact =
+                            generate_synthetic_samples(&curve, START_US, 0.0, |_n, val| val);
+                        let score = score_trace(&exact, START_US, &params).unwrap();
+                        assert!(score.lag_ms.abs() < 1.0, "{who}: lag was {}", score.lag_ms);
+                        let late =
+                            generate_synthetic_samples(&curve, START_US, 250.0, |_n, val| val);
+                        let late = score_trace(&late, START_US, &params).unwrap();
+                        assert!(
+                            late.total <= score.total - 5.0,
+                            "{who}: 250 ms late scored {} against {}",
+                            late.total,
+                            score.total
+                        );
+                        (score.total, score.grade)
+                    }
+                    DrillKind::Hold { hold_ms, .. } => {
+                        let target = drill.target_fraction().unwrap();
+                        let params = HoldParams::new(target, drill.tolerance_fraction(), *hold_ms);
+                        let samples: Vec<ValueSample> = (0..=u64::from(*hold_ms) + 1000)
+                            .map(|ms| ValueSample::new(START_US - 500_000 + ms * 1000, target))
+                            .collect();
+                        let score = score_hold(&samples, START_US, &params).unwrap();
+                        (score.total, score.grade)
+                    }
                 };
-                let params = TraceParams::new(&curve, drill.tolerance_fraction());
-                let samples = generate_synthetic_samples(&curve, START_US, 0.0, |_n, val| val);
-                let score = score_trace(&samples, START_US, &params).unwrap();
                 assert!(
-                    score.accuracy > 99.0,
-                    "{} / {}: accuracy was {}",
-                    preset.id,
-                    drill.id,
-                    score.accuracy
+                    total.is_finite() && total >= 95.0 && grade == Grade::S,
+                    "{who}: total {total} grade {grade:?}"
                 );
-                checked += 1;
+                checked.push(format!("{}/{}", preset.id, drill.id));
             }
         }
-        assert!(checked > 0, "no trace drills found in presets/");
+        assert!(
+            checked.iter().filter(|id| id.starts_with("gt3/")).count() == 6,
+            "expected the six GT3 drills, checked {checked:?}"
+        );
     }
 
     #[test]

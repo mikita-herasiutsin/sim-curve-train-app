@@ -5,7 +5,7 @@
   "description": "GT3 with ABS: threshold holds, a heavy stop and a medium-corner trail, and staged exit throttle.",
   "drills": [
     {
-      "id": "brake-hold-80",
+      "id": "gt3-brake-hold-80",
       "name": "Brake hold 80%",
       "type": "hold",
       "pedal": "brake",
@@ -16,7 +16,7 @@
       "leadInMs": 3000
     },
     {
-      "id": "brake-hold-50",
+      "id": "gt3-brake-hold-50",
       "name": "Brake hold 50%",
       "type": "hold",
       "pedal": "brake",
@@ -27,7 +27,7 @@
       "leadInMs": 3000
     },
     {
-      "id": "heavy-stop",
+      "id": "gt3-heavy-stop",
       "name": "Heavy stop trace",
       "type": "trace",
       "pedal": "brake",
@@ -46,7 +46,7 @@
       ]
     },
     {
-      "id": "medium-corner",
+      "id": "gt3-medium-corner",
       "name": "Medium corner trace",
       "type": "trace",
       "pedal": "brake",
@@ -56,15 +56,15 @@
       "points": [
         [0, 0],
         [350, 52],
-        [800, 48],
-        [1500, 28],
-        [2100, 12],
-        [2600, 4],
-        [2900, 0]
+        [700, 48],
+        [1200, 28],
+        [1600, 12],
+        [1900, 4],
+        [2100, 0]
       ]
     },
     {
-      "id": "staged-exit",
+      "id": "gt3-staged-exit",
       "name": "Staged exit throttle",
       "type": "trace",
       "pedal": "throttle",
@@ -73,14 +73,13 @@
       "leadInMs": 2000,
       "points": [
         [0, 0],
-        [150, 65],
-        [600, 68],
-        [1200, 100],
-        [1600, 100]
+        [150, 66],
+        [450, 72],
+        [900, 100]
       ]
     },
     {
-      "id": "two-step-exit",
+      "id": "gt3-two-step-exit",
       "name": "Two-step exit throttle",
       "type": "trace",
       "pedal": "throttle",
@@ -93,8 +92,7 @@
         [600, 55],
         [800, 75],
         [1300, 80],
-        [1700, 100],
-        [2000, 100]
+        [1700, 100]
       ]
     }
   ]

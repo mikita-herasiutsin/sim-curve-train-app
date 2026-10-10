@@ -202,7 +202,7 @@ Five or six drills hand-tuned from your own GT3 laps:
 - Two brake traces (hairpin, medium corner)
 - One or two staged exit-throttle traces ([D-18](../decisions/README.md)), with GT3 thresholds and ramp rate
 - **AC:** every drill can be played and scored.
-- **Status:** `presets/gt3.json` has six drills tuned from six BMW M4 GT3 laps at Road Atlanta: brake holds at 80% and 50%, a heavy-stop and a medium-corner brake trace, a single-step and a two-step exit. A core test scores an exact follow of every bundled trace drill.
+- **Status:** `presets/gt3.json` has six drills tuned from six BMW M4 GT3 laps at Road Atlanta: brake holds at 80% and 50%, a heavy-stop and a medium-corner brake trace, a single-step and a two-step exit. Drill ids start with `gt3-`, because attempts and bests are keyed by drill id alone. A core test plays every bundled drill: an exact follow must score an S, and a trace followed 250 ms late must lose at least 5 points.
 - **Deps:** SCT-044, SCT-036
 
 ### SCT-042 · NASCAR preset ⬜ · S
@@ -238,6 +238,7 @@ Save every finished rep and set to SQLite: drill, preset, time, total score, sub
 - A leaderboard screen showing your own top 10 attempts per drill, with date and grade.
 - A "New PB!" moment on the result card.
 - **AC:** the PB updates right away; the leaderboard is kept per drill, per preset and per warm-up ([D-23](../decisions/README.md)).
+- **Open:** `AttemptStore::best_total` and the attempt queries filter by `drill_id` alone, so two presets with the same drill id share history. Bundled presets prefix their ids (`gt3-`); key by preset and drill here.
 - **Deps:** SCT-050, SCT-045 (the per-warm-up level needs the stored warm-up runs)
 
 ### SCT-023 · Dark/light theme switch ✅ · S

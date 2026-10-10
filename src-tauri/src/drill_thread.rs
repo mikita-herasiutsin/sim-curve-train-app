@@ -21,14 +21,17 @@ const QUEUE_CAPACITY: usize = 4_096;
 /// The input thread's handle to a drill running on its own thread.
 ///
 /// Dropping it ends the drill: the drill thread handles the samples already queued, then sends
-/// the UI the terminal `SetFinished` (unless the run already finished).
+/// the UI the terminal `SetFinished` (unless the run already finished). A handle dropped before
+/// [`DrillThread::start`] ends the thread without sending anything.
 pub struct DrillThread {
     samples: SyncSender<ValueSample>,
+    /// Lets the parked thread start the run; `None` once it has.
+    go: Option<SyncSender<()>>,
 }
 
 impl DrillThread {
-    /// Starts `run` at `t_us` on a new `sct-drill` thread that sends its events to `channel`
-    /// and drives `audio`.
+    /// Spawns an `sct-drill` thread for `run`. The thread stays parked and sends nothing until
+    /// [`DrillThread::start`]; dropping the handle before that ends it without an event.
     pub fn spawn(
         run: DrillRun,
         t_us: u64,
@@ -36,12 +39,15 @@ impl DrillThread {
         audio: Option<AudioFeedback>,
     ) -> io::Result<Self> {
         let (samples, queue) = mpsc::sync_channel(QUEUE_CAPACITY);
-        // If the spawn fails, std drops the closure and with it `drill`, whose drop sends the
-        // UI its `SetFinished`.
-        let mut drill = RunningDrill::new(run, channel, audio);
+        let (go, gate) = mpsc::sync_channel(1);
         thread::Builder::new()
             .name("sct-drill".into())
             .spawn(move || {
+                // Never started: the run and its channel drop without an event.
+                if gate.recv().is_err() {
+                    return;
+                }
+                let mut drill = RunningDrill::new(run, channel, audio);
                 drill.start(t_us);
                 for sample in queue {
                     if drill.step(sample) {
@@ -49,7 +55,18 @@ impl DrillThread {
                     }
                 }
             })?;
-        Ok(Self { samples })
+        Ok(Self {
+            samples,
+            go: Some(go),
+        })
+    }
+
+    /// Starts the run at the `t_us` given to `spawn`: the thread sends `CountdownStarted`,
+    /// then handles the queued samples in order.
+    pub fn start(&mut self) {
+        if let Some(go) = self.go.take() {
+            let _ = go.send(());
+        }
     }
 
     /// Queues `sample` without blocking. Returns `false` once the drill has ended or its queue
@@ -96,18 +113,16 @@ impl RunningDrill {
 
     /// Starts the run at `t_us` and forwards its events.
     fn start(&mut self, t_us: u64) {
-        for event in self.run.start(t_us) {
-            let _ = self.channel.send(event);
-        }
+        let events = self.run.start(t_us);
+        self.forward(events);
     }
 
     /// Feeds one sample to the run, forwards its events and updates the tone. Returns whether
     /// the run has finished.
     fn step(&mut self, sample: ValueSample) -> bool {
         let value = sample.value;
-        for event in self.run.push(sample) {
-            let _ = self.channel.send(event);
-        }
+        let events = self.run.push(sample);
+        self.forward(events);
         if let Some(audio) = &self.audio {
             // Beeps only while a rep is active: silent in the countdown and the rest pause.
             // The target is the nearest point of the band, so the tone measures the distance
@@ -121,11 +136,17 @@ impl RunningDrill {
                 .step(target, value, self.run.drill().tolerance_fraction());
             audio.set_pulse_rate(rate);
         }
-        if matches!(self.run.phase(), Phase::Finished) {
-            // The engine sent `SetFinished` itself.
-            self.finished = true;
-        }
         self.finished
+    }
+
+    /// Sends `events` to the UI. Marks the run finished once the terminal `SetFinished` is
+    /// out, so the drop never sends a second one.
+    fn forward(&mut self, events: Vec<DrillEvent>) {
+        for event in events {
+            let terminal = matches!(event, DrillEvent::SetFinished { .. });
+            let _ = self.channel.send(event);
+            self.finished |= terminal;
+        }
     }
 }
 
@@ -147,7 +168,6 @@ pub(crate) mod tests {
     use sct_core::drill_engine::DEFAULT_REST_MS;
     use sct_core::preset::{Drill, DrillKind};
     use sct_core::profile::Pedal;
-    use std::sync::Mutex;
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::time::Duration;
     use tauri::ipc::InvokeResponseBody;
@@ -317,13 +337,14 @@ pub(crate) mod tests {
     #[test]
     fn runs_a_trace_set_in_order_on_its_own_thread() {
         let (channel, log) = event_channel();
-        let thread = DrillThread::spawn(
+        let mut thread = DrillThread::spawn(
             DrillRun::new(trace_drill(), DEFAULT_REST_MS),
             0,
             channel,
             None,
         )
         .unwrap();
+        thread.start();
         for ms in 1..=2_000 {
             if !thread.send(ValueSample::new(ms * 1000, 0.5)) {
                 break;
@@ -340,21 +361,9 @@ pub(crate) mod tests {
 
     #[test]
     fn a_full_queue_refuses_samples_without_blocking() {
-        let (release, gate) = mpsc::channel::<()>();
-        let gate = Mutex::new(gate);
-        let (sink, log) = mpsc::channel();
-        // Holds the drill thread inside `start` until the test releases it.
-        let channel = Channel::new(move |body| {
-            if let InvokeResponseBody::Json(json) = body {
-                let blocks = json.contains("countdownStarted");
-                let _ = sink.send(json);
-                if blocks {
-                    let _ = gate.lock().unwrap().recv();
-                }
-            }
-            Ok(())
-        });
-        let thread = DrillThread::spawn(
+        let (channel, log) = event_channel();
+        // Not started yet: the parked thread reads nothing, so the queue fills up.
+        let mut thread = DrillThread::spawn(
             DrillRun::new(hold_drill(), DEFAULT_REST_MS),
             0,
             channel,
@@ -365,12 +374,72 @@ pub(crate) mod tests {
             assert!(thread.send(ValueSample::new(ms * 1000, 0.5)), "sample {ms}");
         }
         assert!(!thread.send(ValueSample::new((QUEUE_CAPACITY as u64 + 1) * 1000, 0.5)));
-        // Later countdowns find the gate closed and don't block.
-        release.send(()).unwrap();
-        drop(release);
+        // Started and dropped: the thread handles the queued samples, then ends the drill.
+        thread.start();
         drop(thread);
         let events = drain(&log);
         let finished = events.iter().filter(|e| e.contains("setFinished")).count();
         assert_eq!(finished, 1, "{events:?}");
+        assert!(events.last().unwrap().contains("setFinished"), "{events:?}");
+    }
+
+    #[test]
+    fn a_thread_dropped_before_start_sends_nothing() {
+        let (channel, log) = event_channel();
+        let thread = DrillThread::spawn(
+            DrillRun::new(hold_drill(), DEFAULT_REST_MS),
+            0,
+            channel,
+            None,
+        )
+        .unwrap();
+        for ms in 1..=10 {
+            assert!(
+                thread.send(ValueSample::new(ms * 1000, 0.70)),
+                "sample {ms}"
+            );
+        }
+        drop(thread);
+        assert_eq!(drain(&log), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_panic_on_the_drill_thread_ends_only_its_run() {
+        let (sink, log) = mpsc::channel();
+        // Logs each event, then fails on the first rep, as a scoring bug would.
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(json) = body {
+                let fails = json.contains("repStarted");
+                let _ = sink.send(json);
+                #[expect(
+                    clippy::manual_assert,
+                    reason = "the test simulates a panic, not a failed check"
+                )]
+                if fails {
+                    panic!("scoring failed");
+                }
+            }
+            Ok(())
+        });
+        let mut thread = DrillThread::spawn(
+            DrillRun::new(hold_drill(), DEFAULT_REST_MS),
+            0,
+            channel,
+            None,
+        )
+        .unwrap();
+        thread.start();
+        for ms in 1..=1_100 {
+            if !thread.send(ValueSample::new(ms * 1000, 0.70)) {
+                break;
+            }
+        }
+        let events = drain(&log);
+        // The drop sends the terminal event while the thread unwinds.
+        assert_eq!(
+            kinds(&events),
+            ["countdownStarted", "repStarted", "setFinished"]
+        );
+        assert!(!thread.send(ValueSample::new(1_101_000, 0.70)));
     }
 }

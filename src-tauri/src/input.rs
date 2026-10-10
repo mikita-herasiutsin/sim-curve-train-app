@@ -462,7 +462,8 @@ fn check_start(
 /// Starts `drill` on `stream`, replacing a running one, and answers on `reply`.
 ///
 /// The answer goes out before any event. If nobody is waiting for it any more (the caller
-/// timed out), the drill is not installed and no event is sent.
+/// timed out), the drill is not installed and no event is sent. A drill thread that can't be
+/// spawned is an error answer, and the running drill keeps going.
 fn start_drill(
     stream: Option<&mut Stream>,
     profile: Option<DeviceProfile>,
@@ -479,23 +480,26 @@ fn start_drill(
             return;
         }
     };
+    let pedal = drill.pedal;
+    let run = DrillRun::new(drill, DEFAULT_REST_MS);
+    let mut thread = match DrillThread::spawn(run, t_us, channel, audio) {
+        Ok(thread) => thread,
+        Err(error) => {
+            let _ = reply.send(Err(format!("failed to start the drill: {error}")));
+            return;
+        }
+    };
+    // Returning drops the parked thread, which then ends without an event.
     if reply.send(Ok(())).is_err() {
         return;
     }
     stream.finish_drill();
-    let pedal = drill.pedal;
-    let run = DrillRun::new(drill, DEFAULT_REST_MS);
-    match DrillThread::spawn(run, t_us, channel, audio) {
-        Ok(thread) => {
-            stream.active_drill = Some(ActiveDrill {
-                thread,
-                profile,
-                pedal,
-            });
-        }
-        // The run's drop already sent the UI its `SetFinished`.
-        Err(error) => eprintln!("failed to start the drill thread: {error}"),
-    }
+    thread.start();
+    stream.active_drill = Some(ActiveDrill {
+        thread,
+        profile,
+        pedal,
+    });
 }
 
 /// The profile of the stream started with `token`, if it is still the active one.
@@ -860,6 +864,7 @@ mod tests {
         let events = drain(&log);
         assert!(events[0].contains("countdownStarted"));
         assert_eq!(finished_count(&events), 1);
+        assert!(events.last().unwrap().contains("setFinished"), "{events:?}");
     }
 
     #[test]
@@ -988,5 +993,45 @@ mod tests {
         );
         stream.step_drill(&sample_at(400_000, 0.70));
         assert!(stream.active_drill.is_none());
+    }
+
+    #[test]
+    fn start_drill_hands_the_audio_to_the_drill_thread() {
+        let audio = AudioFeedback::detached();
+        let mut stream = stream();
+        let hold = Drill {
+            reps: 1,
+            lead_in_ms: 100,
+            kind: DrillKind::Hold {
+                target: 70.0,
+                hold_ms: 200,
+            },
+            ..drill(Pedal::Brake)
+        };
+        let (channel, log) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        start_drill(
+            Some(&mut stream),
+            Some(brake_profile()),
+            0,
+            hold,
+            channel,
+            Some(audio.clone()),
+            &reply,
+        );
+        assert_eq!(answer.recv().unwrap(), Ok(()));
+        // Off target inside the active rep.
+        for ms in 1..150 {
+            stream.step_drill(&sample_at(ms * 1000, 0.20));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while audio.pulse_rate() <= 0.0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(audio.pulse_rate() > 0.0, "the drill thread never beeped");
+        stream.finish_drill();
+        let events = drain(&log);
+        assert_eq!(audio.pulse_rate(), 0.0);
+        assert_eq!(finished_count(&events), 1, "{events:?}");
     }
 }

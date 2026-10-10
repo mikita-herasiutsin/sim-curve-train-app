@@ -19,6 +19,8 @@
     "allow-list-attempts",
     "allow-best-total",
     "allow-best-totals",
+    "allow-save-warm-up-run",
+    "allow-list-warm-up-runs",
     "allow-audio-test-tone",
     "allow-audio-set-enabled",
     "allow-audio-set-volume",

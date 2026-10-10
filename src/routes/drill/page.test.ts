@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import DrillPage from "./+page.svelte";
 import type { Preset } from "$lib/drill";
-import type { NewAttempt } from "$lib/attempts";
+import type { NewAttempt, NewWarmUpRun } from "$lib/attempts";
 import { pedalStream } from "$lib/pedals/stream";
 
 let mockUrl = new URL("http://localhost/drill");
@@ -34,6 +34,43 @@ const preset: Preset = {
       holdMs: 2000,
     },
   ],
+};
+
+const warmUpPreset: Preset = {
+  schemaVersion: 1,
+  id: "warmup-preset",
+  name: "Warm-up Drills",
+  description: "Two-drill routine",
+  drills: [
+    {
+      id: "warmup-hold-1",
+      name: "Hold Drill 1",
+      type: "hold",
+      pedal: "brake",
+      reps: 5,
+      leadInMs: 1000,
+      tolerance: 5,
+      target: 70,
+      holdMs: 2000,
+    },
+    {
+      id: "warmup-hold-2",
+      name: "Hold Drill 2",
+      type: "hold",
+      pedal: "brake",
+      reps: 5,
+      leadInMs: 1000,
+      tolerance: 5,
+      target: 80,
+      holdMs: 2000,
+    },
+  ],
+  warmUp: {
+    steps: [
+      { drill: "warmup-hold-1", reps: 2 },
+      { drill: "warmup-hold-2", reps: 3 },
+    ],
+  },
 };
 
 const tracePreset: Preset = {
@@ -79,9 +116,19 @@ describe("Drill page", () => {
   let startError: string | null = null;
   let drillChannel: Channelish | null = null;
   let aborts = 0;
+  let abortError: string | null = null;
   let presetsList: Preset[] = [preset];
   let saved: NewAttempt[] = [];
   let saveError: string | null = null;
+  let savedWarmUpRuns: NewWarmUpRun[] = [];
+  let saveWarmUpRunError: string | null = null;
+  let lastStartDrillRunArgs: {
+    token: number;
+    presetId: string;
+    drillId: string;
+    warmUp: boolean;
+    onEvent: Channelish;
+  } | null = null;
 
   beforeEach(() => {
     localStorage.clear();
@@ -89,9 +136,13 @@ describe("Drill page", () => {
     startError = null;
     drillChannel = null;
     aborts = 0;
+    abortError = null;
     presetsList = [preset];
     saved = [];
     saveError = null;
+    savedWarmUpRuns = [];
+    saveWarmUpRunError = null;
+    lastStartDrillRunArgs = null;
     (globalThis as { isTauri?: boolean }).isTauri = true;
     globalThis.ResizeObserver = class {
       observe() {}
@@ -114,13 +165,25 @@ describe("Drill page", () => {
           case "stop_stream":
             return null;
           case "abort_drill_run":
+            if (abortError) throw abortError;
             aborts++;
             return null;
           case "save_attempt":
             if (saveError) throw saveError;
             saved.push((args as { attempt: NewAttempt }).attempt);
             return saved.length;
+          case "save_warm_up_run":
+            if (saveWarmUpRunError) throw saveWarmUpRunError;
+            savedWarmUpRuns.push((args as { run: NewWarmUpRun }).run);
+            return savedWarmUpRuns.length;
           case "start_drill_run":
+            lastStartDrillRunArgs = args as {
+              token: number;
+              presetId: string;
+              drillId: string;
+              warmUp: boolean;
+              onEvent: Channelish;
+            };
             drillChannel = (args as { onEvent: Channelish }).onEvent;
             if (startError) throw startError;
             return null;
@@ -689,5 +752,329 @@ describe("Drill page", () => {
     advancedOption.selected = true;
     await fireEvent.change(advancedOption.closest("select")!);
     expect(localStorage.getItem("sct:last_preset")).toBe("advanced");
+  });
+
+  it("?preset=<id>&warmup=1 shows Warm-up: <name> and Drill 1 of 2, and Start invokes start_drill_run with warmUp: true", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    expect(await screen.findByText("Warm-up: Warm-up Drills")).toBeInTheDocument();
+    expect(await screen.findByText(/Drill 1 of 2/)).toBeInTheDocument();
+    expect(screen.getByTestId("warm-up-skip")).toBeInTheDocument();
+
+    await startDrill();
+    expect(lastStartDrillRunArgs?.warmUp).toBe(true);
+    expect(lastStartDrillRunArgs?.presetId).toBe("warmup-preset");
+    expect(lastStartDrillRunArgs?.drillId).toBe("warmup-hold-1");
+  });
+
+  it("completing step 1 and skipping step 2 from idle panel shows summary with scores and invokes save_warm_up_run", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 80.0 } });
+    drillChannel!.onmessage({ event: "repScored", rep: 1, score: { ...holdScore, total: 84.0 } });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [80.0, 84.0],
+        best: 84.0,
+        average: 82.0,
+        grade: "B",
+        consistency: 95.0,
+        stdDev: 2.0,
+      },
+    });
+
+    const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
+    await waitFor(() => expect(nextBtn).toBeEnabled());
+    await fireEvent.click(nextBtn);
+
+    expect(await screen.findByText("Warm-up: Warm-up Drills")).toBeInTheDocument();
+    expect(await screen.findByText(/Drill 2 of 2/)).toBeInTheDocument();
+
+    const skipBtn = screen.getByTestId("warm-up-skip");
+    await fireEvent.click(skipBtn);
+
+    const summaryElem = await screen.findByTestId("warm-up-summary");
+    expect(summaryElem).toBeInTheDocument();
+    expect(screen.getByText("Warm-up complete")).toBeInTheDocument();
+
+    expect(within(summaryElem).getByText("Hold Drill 1")).toBeInTheDocument();
+    expect(within(summaryElem).getByText("82")).toBeInTheDocument();
+    expect(within(summaryElem).getByText("Hold Drill 2")).toBeInTheDocument();
+    expect(within(summaryElem).getByText("Skipped")).toBeInTheDocument();
+
+    const scoreElem = screen.getByTestId("warm-up-score");
+    expect(scoreElem).toHaveTextContent("41");
+    expect(screen.getByText("Skipped drills count as 0.")).toBeInTheDocument();
+
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+
+    expect(savedWarmUpRuns).toHaveLength(1);
+    expect(savedWarmUpRuns[0].steps).toEqual([
+      { drillId: "warmup-hold-1", reps: 2, skipped: false, attemptId: 1, score: 82.0 },
+      { drillId: "warmup-hold-2", reps: 3, skipped: true, attemptId: null, score: null },
+    ]);
+  });
+
+  it("Skip during a set aborts the run and records the step as skipped with the attempt id of the saved partial set", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 80.0 } });
+
+    const skipBtn = await screen.findByRole("button", { name: "Skip Drill" });
+    expect(skipBtn).toHaveAttribute("data-testid", "warm-up-skip");
+    await fireEvent.click(skipBtn);
+    await waitFor(() => expect(aborts).toBe(1));
+
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: { ...summary, repTotals: [80.0] },
+    });
+
+    expect(screen.queryByText("Set Finished!")).not.toBeInTheDocument();
+    expect(await screen.findByText(/Drill 2 of 2/)).toBeInTheDocument();
+
+    await fireEvent.click(screen.getByTestId("warm-up-skip"));
+    expect(await screen.findByTestId("warm-up-summary")).toBeInTheDocument();
+
+    await waitFor(() => expect(savedWarmUpRuns).toHaveLength(1));
+    expect(savedWarmUpRuns[0].steps[0]).toEqual({
+      drillId: "warmup-hold-1",
+      reps: 2,
+      skipped: true,
+      attemptId: 1,
+      score: null,
+    });
+  });
+
+  it("a failing save_warm_up_run shows the alert", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    saveWarmUpRunError = "warm-up store is unavailable";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    render(DrillPage);
+
+    await fireEvent.click(await screen.findByTestId("warm-up-skip"));
+    await fireEvent.click(await screen.findByTestId("warm-up-skip"));
+
+    expect(await screen.findByTestId("warm-up-summary")).toBeInTheDocument();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("This warm-up was not saved: warm-up store is unavailable");
+  });
+
+  it("without warmup=1 a preset with warm-up shows the picker as before", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset");
+    render(DrillPage);
+
+    expect(await screen.findByText("Select a Drill")).toBeInTheDocument();
+    expect(screen.getByLabelText("Preset:")).toBeInTheDocument();
+    expect(await screen.findByLabelText("Drill:")).toBeInTheDocument();
+    expect(screen.queryByTestId("warm-up-skip")).not.toBeInTheDocument();
+  });
+
+  it("all steps complete with full sets: saves warm-up run before See Summary is clicked and shows summary with both scores", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    // Step 1: warmup-hold-1 (2 reps)
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 80.0 } });
+    drillChannel!.onmessage({ event: "repScored", rep: 1, score: { ...holdScore, total: 84.0 } });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [80.0, 84.0],
+        best: 84.0,
+        average: 82.0,
+        grade: "B",
+        consistency: 95.0,
+        stdDev: 2.0,
+      },
+    });
+
+    const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
+    await waitFor(() => expect(nextBtn).toBeEnabled());
+    await fireEvent.click(nextBtn);
+
+    // Step 2: warmup-hold-2 (3 reps)
+    expect(await screen.findByText("Warm-up: Warm-up Drills")).toBeInTheDocument();
+    expect(await screen.findByText(/Drill 2 of 2/)).toBeInTheDocument();
+
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 90.0 } });
+    drillChannel!.onmessage({ event: "repScored", rep: 1, score: { ...holdScore, total: 92.0 } });
+    drillChannel!.onmessage({ event: "repScored", rep: 2, score: { ...holdScore, total: 94.0 } });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [90.0, 92.0, 94.0],
+        best: 94.0,
+        average: 92.0,
+        grade: "A",
+        consistency: 98.0,
+        stdDev: 1.0,
+      },
+    });
+
+    // save_warm_up_run is invoked once before "See Summary" is clicked
+    await waitFor(() => expect(savedWarmUpRuns).toHaveLength(1));
+    expect(savedWarmUpRuns[0].steps).toEqual([
+      { drillId: "warmup-hold-1", reps: 2, skipped: false, attemptId: 1, score: 82.0 },
+      { drillId: "warmup-hold-2", reps: 3, skipped: false, attemptId: 2, score: 92.0 },
+    ]);
+
+    // Overlay shows "See Summary"
+    const seeSummaryBtn = await screen.findByRole("button", { name: "See Summary" });
+    await waitFor(() => expect(seeSummaryBtn).toBeEnabled());
+
+    // Clicking it shows the summary with both scores
+    await fireEvent.click(seeSummaryBtn);
+    const summaryElem = await screen.findByTestId("warm-up-summary");
+    expect(summaryElem).toBeInTheDocument();
+    expect(within(summaryElem).getByText("Hold Drill 1")).toBeInTheDocument();
+    expect(within(summaryElem).getByText("82")).toBeInTheDocument();
+    expect(within(summaryElem).getByText("Hold Drill 2")).toBeInTheDocument();
+    expect(within(summaryElem).getByText("92")).toBeInTheDocument();
+
+    const scoreElem = screen.getByTestId("warm-up-score");
+    expect(scoreElem).toHaveTextContent("87");
+    expect(await screen.findByText("Saved.")).toBeInTheDocument();
+    expect(savedWarmUpRuns).toHaveLength(1);
+  });
+
+  it("Run Again on the summary starts a fresh warm-up at Drill 1 of 2 and late setFinished does not advance it", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    const earlierChannel = drillChannel!;
+
+    earlierChannel.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 80.0 } });
+    earlierChannel.onmessage({ event: "repScored", rep: 1, score: { ...holdScore, total: 84.0 } });
+    earlierChannel.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [80.0, 84.0],
+        best: 84.0,
+        average: 82.0,
+        grade: "B",
+        consistency: 95.0,
+        stdDev: 2.0,
+      },
+    });
+
+    const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
+    await waitFor(() => expect(nextBtn).toBeEnabled());
+    await fireEvent.click(nextBtn);
+
+    const skipBtn = await screen.findByTestId("warm-up-skip");
+    await fireEvent.click(skipBtn);
+
+    const summaryElem = await screen.findByTestId("warm-up-summary");
+    expect(summaryElem).toBeInTheDocument();
+
+    const runAgainBtn = screen.getByRole("button", { name: "Run Again" });
+    await fireEvent.click(runAgainBtn);
+
+    expect(await screen.findByText("Warm-up: Warm-up Drills")).toBeInTheDocument();
+    expect(await screen.findByText(/Drill 1 of 2/)).toBeInTheDocument();
+
+    // Late setFinished from earlier run's channel
+    earlierChannel.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [80.0, 84.0],
+        best: 84.0,
+        average: 82.0,
+        grade: "B",
+        consistency: 95.0,
+        stdDev: 2.0,
+      },
+    });
+
+    // Guard prevents advance: remains at Drill 1 of 2
+    expect(screen.getByText(/Drill 1 of 2/)).toBeInTheDocument();
+    expect(screen.queryByText(/Drill 2 of 2/)).not.toBeInTheDocument();
+  });
+
+  it("a set that the engine ends early without Skip is recorded as skipped with its attempt id", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 80.0 } });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [80.0],
+        best: 80.0,
+        average: 80.0,
+        grade: "B",
+        consistency: 100.0,
+        stdDev: 0.0,
+      },
+    });
+
+    const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
+    await waitFor(() => expect(nextBtn).toBeEnabled());
+    await fireEvent.click(nextBtn);
+
+    expect(await screen.findByText(/Drill 2 of 2/)).toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId("warm-up-skip"));
+
+    expect(await screen.findByTestId("warm-up-summary")).toBeInTheDocument();
+
+    await waitFor(() => expect(savedWarmUpRuns).toHaveLength(1));
+    expect(savedWarmUpRuns[0].steps[0]).toEqual({
+      drillId: "warmup-hold-1",
+      reps: 2,
+      skipped: true,
+      attemptId: 1,
+      score: null,
+    });
+  });
+
+  it("a rejected abort_drill_run after Skip keeps later events updating the screen", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    abortError = "engine communication failure";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    render(DrillPage);
+
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+
+    const skipBtn = await screen.findByRole("button", { name: "Skip Drill" });
+    await fireEvent.click(skipBtn);
+
+    expect(
+      await screen.findByText("Failed to abort drill: engine communication failure"),
+    ).toBeInTheDocument();
+
+    drillChannel!.onmessage({ event: "repStarted", rep: 0, startUs: 1_000_000 });
+    expect(await screen.findByTestId("hold-hud")).toBeInTheDocument();
   });
 });

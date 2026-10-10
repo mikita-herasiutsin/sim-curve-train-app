@@ -10,12 +10,12 @@ use std::collections::HashMap;
 use audio::AudioFeedback;
 use input::InputService;
 use sct_core::AppInfo;
-use sct_core::attempts::{Attempt, AttemptStore, NewAttempt};
+use sct_core::attempts::{Attempt, AttemptStore, NewAttempt, NewWarmUpRun, WarmUpRun};
 use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
 use sct_core::drill_engine::DrillEvent;
-use sct_core::preset::{Preset, find_drill, load_dir};
+use sct_core::preset::{Preset, find_drill, find_warm_up_drill, load_dir};
 use sct_core::profile::{DeviceProfile, ProfileStore};
 use sct_core::stream::SampleBatch;
 use tauri::Manager;
@@ -265,6 +265,43 @@ fn best_totals(
     store.best_totals(&preset_id).map_err(|e| e.to_string())
 }
 
+/// Saves a completed warm-up run and its step results.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn save_warm_up_run(
+    run: NewWarmUpRun,
+    attempts: tauri::State<'_, AttemptsService>,
+) -> Result<i64, String> {
+    let guard = lock_attempts(&attempts.store);
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "attempts store is unavailable".to_string())?;
+    store.save_warm_up_run(&run).map_err(|e| e.to_string())
+}
+
+/// Lists recorded warm-up runs for a preset, ordered from newest to oldest.
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri injects command arguments by value"
+)]
+fn list_warm_up_runs(
+    preset_id: String,
+    limit: u32,
+    attempts: tauri::State<'_, AttemptsService>,
+) -> Result<Vec<WarmUpRun>, String> {
+    let guard = lock_attempts(&attempts.store);
+    let store = guard
+        .as_ref()
+        .ok_or_else(|| "attempts store is unavailable".to_string())?;
+    store
+        .list_warm_up_runs(&preset_id, limit)
+        .map_err(|e| e.to_string())
+}
+
 /// Loads the bundled presets from `<resource dir>/presets`.
 fn load_presets(app: &tauri::AppHandle) -> Result<Vec<Preset>, String> {
     let resources = app
@@ -287,6 +324,7 @@ fn list_presets(app: tauri::AppHandle) -> Result<Vec<Preset>, String> {
 
 /// Starts a drill run for a bundled drill, feeding samples from the active stream.
 ///
+/// When `warm_up` is true, reps are configured from the preset's warm-up routine.
 /// The drill is looked up on the Rust side; the webview only names it.
 /// `async` so it can wait for the input thread without blocking the main thread.
 #[tauri::command(async)]
@@ -298,11 +336,17 @@ fn start_drill_run(
     token: u64,
     preset_id: String,
     drill_id: String,
+    warm_up: bool,
     on_event: Channel<DrillEvent>,
     app: tauri::AppHandle,
     input: tauri::State<'_, InputService>,
 ) -> Result<(), String> {
-    let drill = find_drill(&load_presets(&app)?, &preset_id, &drill_id)?;
+    let presets = load_presets(&app)?;
+    let drill = if warm_up {
+        find_warm_up_drill(&presets, &preset_id, &drill_id)?
+    } else {
+        find_drill(&presets, &preset_id, &drill_id)?
+    };
     input.start_drill(token, drill, on_event)
 }
 
@@ -434,6 +478,8 @@ pub fn run() {
             list_attempts,
             best_total,
             best_totals,
+            save_warm_up_run,
+            list_warm_up_runs,
             #[cfg(debug_assertions)]
             audio_test_tone,
             audio_set_enabled,

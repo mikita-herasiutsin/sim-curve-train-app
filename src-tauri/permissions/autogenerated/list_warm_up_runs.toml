@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-list-warm-up-runs"
+description = "Enables the list_warm_up_runs command without any pre-configured scope."
+commands.allow = ["list_warm_up_runs"]
+
+[[permission]]
+identifier = "deny-list-warm-up-runs"
+description = "Denies the list_warm_up_runs command without any pre-configured scope."
+commands.deny = ["list_warm_up_runs"]

@@ -36,6 +36,9 @@ const starterPreset: Preset = {
       holdMs: 2000,
     },
   ],
+  warmUp: {
+    steps: [{ drill: "brake-hold-70", reps: 2 }],
+  },
 };
 
 const advancedPreset: Preset = {
@@ -149,6 +152,21 @@ describe("Home page preset picker", () => {
     expect(goto).toHaveBeenCalledWith(
       expect.stringMatching(/\/drill\?preset=starter&drill=brake-hold-70$/),
     );
+  });
+
+  it("shows Warm-up button only for a preset with warm-up and navigates to /drill?preset=<id>&warmup=1", async () => {
+    render(Page);
+
+    const warmUpBtn = await screen.findByTestId("warm-up-start");
+    expect(warmUpBtn).toHaveTextContent("Warm-up");
+    await fireEvent.click(warmUpBtn);
+
+    expect(localStorage.getItem("sct:last_preset")).toBe("starter");
+    expect(goto).toHaveBeenCalledWith(expect.stringMatching(/\/drill\?preset=starter&warmup=1$/));
+
+    const advancedBtn = screen.getByRole("button", { name: /Advanced Drills/ });
+    await fireEvent.click(advancedBtn);
+    expect(screen.queryByTestId("warm-up-start")).not.toBeInTheDocument();
   });
 
   interface HomeMock {

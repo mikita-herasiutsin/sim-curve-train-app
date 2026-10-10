@@ -534,22 +534,34 @@ mod tests {
         {
             let store = ProfileStore::open(&temp_file).unwrap();
             store.save(&key, &profile).unwrap();
-            assert_eq!(store.user_version().unwrap(), 2);
+            assert_eq!(
+                store.user_version().unwrap(),
+                u32::try_from(crate::db::MIGRATIONS.len()).unwrap()
+            );
         }
 
         {
             let store2 = ProfileStore::open(&temp_file).unwrap();
             assert_eq!(store2.load(&key).unwrap(), Some(profile));
-            assert_eq!(store2.user_version().unwrap(), 2);
+            assert_eq!(
+                store2.user_version().unwrap(),
+                u32::try_from(crate::db::MIGRATIONS.len()).unwrap()
+            );
         }
     }
 
     #[test]
     fn running_migrations_twice_is_noop() {
         let mut store = ProfileStore::open_in_memory().unwrap();
-        assert_eq!(store.user_version().unwrap(), 2);
+        assert_eq!(
+            store.user_version().unwrap(),
+            u32::try_from(crate::db::MIGRATIONS.len()).unwrap()
+        );
         store.apply_migrations().unwrap();
-        assert_eq!(store.user_version().unwrap(), 2);
+        assert_eq!(
+            store.user_version().unwrap(),
+            u32::try_from(crate::db::MIGRATIONS.len()).unwrap()
+        );
     }
 
     #[test]
@@ -604,7 +616,10 @@ mod tests {
         // ProfileStore::open must upgrade to version 2 cleanly and preserve the stored profile
         {
             let store = ProfileStore::open(&temp_file).unwrap();
-            assert_eq!(store.user_version().unwrap(), 2);
+            assert_eq!(
+                store.user_version().unwrap(),
+                u32::try_from(crate::db::MIGRATIONS.len()).unwrap()
+            );
             let loaded = store
                 .load(&key)
                 .unwrap()

@@ -23,6 +23,7 @@
     type DrillEvent,
     type RunView,
     type SetSummary,
+    type Overlap,
   } from "$lib/drill";
   import { buildAttempt, saveAttempt, type ScoredRep } from "$lib/attempts";
   import { pedalStream } from "$lib/pedals/stream";
@@ -46,6 +47,8 @@
   }
   let presetsError = $state<string | null>(null);
 
+  const leadIn = $derived(selectedDrill?.throttleLeadIn);
+
   const traceCurve = $derived<TraceCurve | null>(
     selectedDrill?.type === "trace" ? new TraceCurve(selectedDrill.points) : null,
   );
@@ -55,6 +58,9 @@
 
   let view = $state<RunView>({ ...IDLE_VIEW });
   let countdownMs = $state(0);
+  let throttleRemainingSec = $state(0);
+  let showLiftCue = $state(false);
+  let isGo = $state(false);
   // Time left to hold in the active rep, in ms (0..holdMs), refreshed every frame.
   let holdRemainingMs = $state(0);
   // Time left in the active trace rep, in ms (0..durationMs), refreshed every frame.
@@ -66,7 +72,9 @@
   const countdownText = $derived(
     countdownMs > GO_LEAD_MS
       ? String(Math.max(1, Math.ceil((countdownMs - GO_LEAD_MS) / 1000)))
-      : "GO",
+      : leadIn
+        ? "THROTTLE"
+        : "GO",
   );
   let errorMessage = $state<string | null>(null);
   // Set once the user aborts; the engine still ends the set with a final `setFinished`.
@@ -74,7 +82,8 @@
 
   // The target band on the graph, while a hold rep is active or during the GO second.
   const graphBand = $derived<TargetBand | null>(
-    (view.runState === "active" || (view.runState === "countdown" && countdownMs <= GO_LEAD_MS)) &&
+    (view.runState === "active" ||
+      (!leadIn && view.runState === "countdown" && countdownMs <= GO_LEAD_MS)) &&
       selectedDrill?.type === "hold"
       ? {
           pedal: selectedDrill.pedal,
@@ -150,9 +159,29 @@
         holdRemainingMs = Math.ceil(ms / 100) * 100;
       }
 
+      if (view.runState === "throttle") {
+        if (view.throttleHoldEndsUs > 0) {
+          throttleRemainingSec = Math.max(0, (view.throttleHoldEndsUs - nowUs) / 1e6);
+        } else {
+          throttleRemainingSec = 0;
+        }
+      }
+
+      showLiftCue = Boolean(
+        leadIn &&
+        view.runState === "active" &&
+        view.repStartUs > 0 &&
+        nowUs - view.repStartUs < 800_000,
+      );
+
+      const goCountingDown = leadIn
+        ? view.runState === "throttle" && view.throttleHoldEndsUs > 0
+        : view.runState === "countdown";
+      const goEndsUs = leadIn ? view.throttleHoldEndsUs : view.countdownEndsUs;
+      isGo = goCountingDown && goEndsUs > 0 && goEndsUs - nowUs <= GO_LEAD_MS * 1000;
+
       if (selectedDrill?.type === "trace" && traceCurve) {
         const durationMs = traceCurve.durationMs;
-        const isGo = view.runState === "countdown" && countdownMs <= GO_LEAD_MS;
         if (view.runState === "active") {
           const repMs = Math.max(0, Math.min(durationMs, (nowUs - view.repStartUs) / 1000));
           currentTargetFrac = traceCurve.valueAt(repMs);
@@ -163,8 +192,7 @@
           const rem = durationMs - repMs;
           remainingMs = Math.ceil(rem / 100) * 100;
         } else if (isGo) {
-          const playheadMs =
-            view.countdownEndsUs > 0 ? (nowUs - view.countdownEndsUs) / 1000 : -GO_LEAD_MS;
+          const playheadMs = goEndsUs > 0 ? (nowUs - goEndsUs) / 1000 : -GO_LEAD_MS;
           currentTargetFrac = traceCurve.valueAt(playheadMs);
           currentRangeFrac = traceCurve.envelopeAt(playheadMs);
           const latest = pedalStream.history.latest();
@@ -365,6 +393,12 @@
               <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
               <p class="view-row"><strong>View:</strong> {@render traceViewToggle()}</p>
             {/if}
+            {#if leadIn}
+              <p data-testid="lead-in-info">
+                <strong>Starts from throttle:</strong>
+                {leadIn.level}% for {leadIn.holdMs / 1000}s, then lift and brake
+              </p>
+            {/if}
             <p><strong>Reps:</strong> {selectedDrill.reps}</p>
           </div>
 
@@ -384,6 +418,15 @@
                   <p class="countdown-number">{countdownText}</p>
                 {/key}
               </div>
+            {:else if view.runState === "throttle"}
+              <div class="overlay" aria-live="assertive" data-testid="throttle-cue">
+                <p class="countdown-label">Throttle to {leadIn?.level}%</p>
+                <p class="countdown-number" class:text-cue={view.throttleHoldEndsUs <= 0}>
+                  {view.throttleHoldEndsUs > 0
+                    ? throttleRemainingSec.toFixed(1)
+                    : "Press the throttle"}
+                </p>
+              </div>
             {:else if view.runState === "finished"}
               <div class="overlay">
                 <h2 class="finished-text">Set Finished!</h2>
@@ -394,21 +437,38 @@
               </div>
             {/if}
 
+            {#if showLiftCue}
+              <p class="lift-cue" data-testid="lift-cue">LIFT</p>
+            {/if}
+
             {#if selectedDrill?.type === "hold"}
               <PedalBars
                 stream={pedalStream}
-                targetPedal={selectedDrill.pedal}
-                targetVal={selectedDrill.target / 100}
-                targetTolerance={toleranceOf(selectedDrill) / 100}
+                targetPedal={view.runState === "throttle" && leadIn
+                  ? "throttle"
+                  : selectedDrill.pedal}
+                targetVal={view.runState === "throttle" && leadIn
+                  ? leadIn.level / 100
+                  : selectedDrill.target / 100}
+                targetTolerance={view.runState === "throttle" && leadIn
+                  ? 0.1
+                  : toleranceOf(selectedDrill) / 100}
+                targetRange={null}
                 decimals={selectedDrill.decimals ?? 0}
               />
             {:else if selectedDrill?.type === "trace"}
               <PedalBars
                 stream={pedalStream}
-                targetPedal={selectedDrill.pedal}
-                targetVal={currentTargetFrac}
-                targetRange={currentRangeFrac}
-                targetTolerance={toleranceOf(selectedDrill) / 100}
+                targetPedal={view.runState === "throttle" && leadIn
+                  ? "throttle"
+                  : selectedDrill.pedal}
+                targetVal={view.runState === "throttle" && leadIn
+                  ? leadIn.level / 100
+                  : currentTargetFrac}
+                targetRange={view.runState === "throttle" && leadIn ? null : currentRangeFrac}
+                targetTolerance={view.runState === "throttle" && leadIn
+                  ? 0.1
+                  : toleranceOf(selectedDrill) / 100}
                 decimals={selectedDrill.decimals ?? 0}
               />
             {/if}
@@ -421,8 +481,10 @@
                 curve={traceCurve}
                 repStartUs={view.repStartUs}
                 active={view.runState === "active"}
-                countdownEndsUs={view.countdownEndsUs}
-                countingDown={view.runState === "countdown"}
+                countdownEndsUs={leadIn ? view.throttleHoldEndsUs : view.countdownEndsUs}
+                countingDown={leadIn
+                  ? view.runState === "throttle" && view.throttleHoldEndsUs > 0
+                  : view.runState === "countdown"}
                 mode={traceView}
               />
             {:else}
@@ -451,7 +513,7 @@
                 <span style:width="{(holdRemainingMs / selectedDrill.holdMs) * 100}%"></span>
               </div>
             </div>
-          {:else if (view.runState === "active" || (view.runState === "countdown" && countdownMs <= GO_LEAD_MS)) && selectedDrill?.type === "trace"}
+          {:else if (view.runState === "active" || isGo) && selectedDrill?.type === "trace"}
             {@const durationMs = traceCurve ? traceCurve.durationMs : 0}
             <div class="trace-hud-card panel" data-testid="trace-hud">
               <div class="trace-numbers">
@@ -523,6 +585,9 @@
                   >Off band ±{(view.lastScore.rmse * 100).toFixed(1)}%</small
                 >
               </div>
+              {#if view.lastOverlap}
+                {@render overlapBlock(view.lastOverlap)}
+              {/if}
             </div>
           {:else if view.lastScore}
             <div class="score-card panel">
@@ -558,6 +623,13 @@
                   {/each}
                 </ul>
               </details>
+              {#if view.lastOverlap}
+                {@render overlapBlock(view.lastOverlap)}
+              {/if}
+            </div>
+          {:else if view.lastOverlap}
+            <div class="panel">
+              {@render overlapBlock(view.lastOverlap)}
             </div>
           {/if}
 
@@ -597,6 +669,17 @@
     {/if}
   </main>
 </div>
+
+{#snippet overlapBlock(overlap: Overlap)}
+  <div class="overlap" class:clean={Math.round(overlap.overlapMs) === 0} data-testid="overlap">
+    <small title="Time both pedals were pressed at once, during the throttle hold and the rep."
+      >Overlap {Math.round(overlap.overlapMs)} ms</small
+    >
+    <small title="Highest throttle while the brake was pressed."
+      >Peak throttle while braking {Math.round(overlap.peakThrottle * 100)}%</small
+    >
+  </div>
+{/snippet}
 
 {#snippet traceViewToggle()}
   <span class="view-toggle" role="group" aria-label="Trace view">
@@ -772,6 +855,23 @@
     font-variant-numeric: tabular-nums;
     animation: pop-in 0.45s ease-out;
   }
+  .countdown-number.text-cue {
+    font-size: clamp(2rem, 5vw, 4rem);
+  }
+
+  .lift-cue {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    font-size: 5rem;
+    font-weight: 800;
+    color: var(--accent);
+    margin: 0;
+    z-index: 10;
+  }
 
   @keyframes pop-in {
     from {
@@ -883,7 +983,8 @@
     background: var(--accent);
     color: #fff;
   }
-  .status-badge.countdown {
+  .status-badge.countdown,
+  .status-badge.throttle {
     background: var(--throttle);
     color: #fff;
   }
@@ -929,6 +1030,23 @@
     display: flex;
     justify-content: space-between;
     color: var(--text-muted);
+  }
+
+  .overlap {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
+    margin-top: 0.75rem;
+    color: var(--text-muted);
+  }
+  .overlap small {
+    white-space: nowrap;
+  }
+  .overlap.clean {
+    color: var(--throttle);
+  }
+  .panel > .overlap:only-child {
+    margin-top: 0;
   }
 
   .summary-stats {

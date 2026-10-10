@@ -30,6 +30,7 @@ Every drill shares a set of common fields, plus specific fields determined by th
 | `leadInMs` | integer | Optional (default: `3000`) | `1000` to `10000` | Lead-in preparation countdown before each repetition in milliseconds. GO shows for its last 1000 ms. |
 | `tolerance` | number | Optional (default: `10`, D-17) | `0.5` to `50.0` | Half-width of the tolerance band in percentage points: `5` means the target ±5%. |
 | `decimals` | integer | Optional (default: `0`) | `0` or `1` | Digits after the decimal point when the UI shows percentages for this drill. |
+| `throttleLeadIn` | object | Optional | `level`: `10` to `100`, `holdMs`: `500` to `5000` | Requires holding the throttle at a set level before starting a brake repetition (see [Throttle lead-in](#throttle-lead-in)). |
 
 ### Hold Drill Fields (`"type": "hold"`)
 
@@ -62,6 +63,46 @@ A trace drill specifies an array of two-element arrays `[t, value]`, where:
 - **After the final point:** Timestamps beyond the final timestamp clamp to the final point value.
 - **Normalization:** In internal scoring and evaluation, percentage values `0.0..=100.0` are converted into normalized fractions `0.0..=1.0`.
 
+## Throttle lead-in
+
+The optional `throttleLeadIn` object configures a throttle hold that must be satisfied before a brake repetition begins. It is allowed only on drills with `"pedal": "brake"`, supporting both hold and trace drills. Starting such a drill needs the throttle pedal assigned on the Devices page.
+
+The object accepts two properties: `level` (target throttle percentage to hold, from `10` to `100`) and `holdMs` (required hold duration in milliseconds, from `500` to `5000`). Unknown keys inside `throttleLeadIn` are rejected.
+
+After the `leadInMs` preparation countdown completes, the drill waits until the throttle is at `level - 10` percentage points or above. There is no timeout while waiting. The user then holds the throttle for `holdMs`. If the throttle drops below that during the hold, the drill waits again and the hold restarts.
+
+When the hold completes, the UI shows LIFT and the brake rep starts, with hold or trace timing counting from that moment. While the drill waits and during the hold, the audio tone beeps when the throttle is below the accepted range; during the rep it beeps against the brake target as usual.
+
+After each rep of such a drill the app shows overlap: the time both pedals were above 5 % at once (during the hold and the rep), and the peak throttle while the brake was above 5 %. The score does not change.
+
+Here is an example of a brake trace drill configured with a throttle lead-in:
+
+```json
+{
+  "id": "heavy-stop-from-throttle",
+  "name": "Heavy stop from full throttle",
+  "type": "trace",
+  "pedal": "brake",
+  "tolerance": 7,
+  "reps": 5,
+  "leadInMs": 2000,
+  "throttleLeadIn": {
+    "level": 100,
+    "holdMs": 1500
+  },
+  "points": [
+    [0, 0],
+    [200, 78],
+    [900, 76],
+    [1700, 58],
+    [2400, 25],
+    [2900, 12],
+    [3300, 5],
+    [3600, 0]
+  ]
+}
+```
+
 ## Validation Rules
 
 The parser validates all presets strictly upon loading:
@@ -80,8 +121,9 @@ The parser validates all presets strictly upon loading:
     - Timestamps must be strictly increasing (`t[n] > t[n - 1]`).
     - Every value must be finite and between `0.0` and `100.0`.
     - The total duration (the final point timestamp) must be between `500` and `15000` ms. The ±150 ms band needs a trace well over 300 ms, and 15 s plus the 1 s GO fits the UI's 20 s pedal history.
-11. Unknown fields are rejected at both the preset and drill level.
-12. Directories loaded via the directory loader must not contain duplicate preset IDs across different files.
+11. `throttleLeadIn` (if present) is allowed only on drills with `pedal` set to `"brake"`. The `level` value must be finite and between `10` and `100`. The `holdMs` value must be an integer between `500` and `5000`. Unknown keys inside `throttleLeadIn` are rejected.
+12. Unknown fields are rejected at both the preset and drill level.
+13. Directories loaded via the directory loader must not contain duplicate preset IDs across different files.
 
 ## Sample Preset
 

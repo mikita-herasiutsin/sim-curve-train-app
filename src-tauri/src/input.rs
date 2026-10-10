@@ -26,7 +26,7 @@ use sct_core::profile::{DeviceKey, DeviceProfile, Pedal, ProfileStore};
 use sct_core::ring_buffer::RingBuffer;
 use sct_core::stream::{PedalFrame, RateMeter, SampleBatch, StreamStats};
 
-use sct_core::drill_engine::{DrillEvent, DrillRun, Phase};
+use sct_core::drill_engine::{DrillEvent, DrillRun, Phase, THROTTLE_ARM_MARGIN};
 use sct_core::preset::Drill;
 use sct_core::scoring::ValueSample;
 
@@ -437,20 +437,41 @@ impl Stream {
         };
         let frame = PedalFrame::from_sample(&drill.profile, sample);
         let value = pedal_value(&frame, drill.run.drill().pedal);
-        for event in drill.run.push(ValueSample::new(sample.t_us, value)) {
+        let throttle = frame.throttle;
+        for event in drill
+            .run
+            .push_pedals(ValueSample::new(sample.t_us, value), throttle)
+        {
             let _ = drill.channel.send(event);
         }
         if let Some(audio) = &drill.audio {
-            // Beeps only while a rep is active: silent in the countdown and the rest pause.
-            // The target is the nearest point of the band, so the tone measures the distance
-            // outside the timing-window envelope. `max`/`min` never panic, unlike `clamp`.
-            let target = matches!(drill.run.phase(), Phase::Active { .. })
-                .then(|| drill.run.band_at(sample.t_us))
-                .flatten()
-                .map(|(lo, hi)| value.max(lo).min(hi));
-            let rate = drill
-                .tone
-                .step(target, value, drill.run.drill().tolerance_fraction());
+            // Beeps while a rep is active, and against the throttle level while a lead-in drill
+            // waits for or holds the throttle: silent in the countdown and the rest pause.
+            // In a rep the target is the nearest point of the band, so the tone measures the
+            // distance outside the timing-window envelope. `max`/`min` never panic, unlike
+            // `clamp`.
+            let (target, tone_value, tolerance) = match drill.run.phase() {
+                // Any throttle from the level up to full counts, as in the engine: the
+                // target is the nearest point of that range.
+                Phase::ThrottleWait { .. } | Phase::ThrottleHold { .. } => (
+                    drill
+                        .run
+                        .throttle_target_at()
+                        .map(|level| throttle.max(level)),
+                    throttle,
+                    THROTTLE_ARM_MARGIN,
+                ),
+                Phase::Active { .. } => (
+                    drill
+                        .run
+                        .band_at(sample.t_us)
+                        .map(|(lo, hi)| value.max(lo).min(hi)),
+                    value,
+                    drill.run.drill().tolerance_fraction(),
+                ),
+                _ => (None, value, drill.run.drill().tolerance_fraction()),
+            };
+            let rate = drill.tone.step(target, tone_value, tolerance);
             audio.set_pulse_rate(rate);
         }
         if matches!(drill.run.phase(), Phase::Finished) {
@@ -477,19 +498,25 @@ fn pedal_value(frame: &PedalFrame, pedal: Pedal) -> f32 {
     }
 }
 
-/// Why a drill can't start on `stream` with `profile`, if it can't.
-fn check_start(
-    stream: Option<&mut Stream>,
+/// Why `drill` can't start on `stream` with `profile`, if it can't.
+fn check_start<'a>(
+    stream: Option<&'a mut Stream>,
     profile: Option<DeviceProfile>,
-    pedal: Pedal,
-) -> Result<(&mut Stream, DeviceProfile), String> {
+    drill: &Drill,
+) -> Result<(&'a mut Stream, DeviceProfile), String> {
     let stream = stream.ok_or("no active pedal stream; connect the pedals first")?;
     let profile = profile.ok_or("the device has no saved profile; calibrate it first")?;
+    let pedal = drill.pedal;
     if profile.get(pedal).is_none() {
         let name = format!("{pedal:?}").to_lowercase();
         return Err(format!(
             "the {name} pedal isn't assigned; set it up on the Devices page"
         ));
+    }
+    if drill.throttle_lead_in.is_some() && profile.get(Pedal::Throttle).is_none() {
+        return Err(
+            "the throttle pedal isn't assigned; this drill starts from the throttle".to_owned(),
+        );
     }
     Ok((stream, profile))
 }
@@ -507,7 +534,7 @@ fn start_drill(
     audio: Option<AudioFeedback>,
     reply: &Sender<Result<(), String>>,
 ) {
-    let (stream, profile) = match check_start(stream, profile, drill.pedal) {
+    let (stream, profile) = match check_start(stream, profile, &drill) {
         Ok(checked) => checked,
         Err(error) => {
             let _ = reply.send(Err(error));
@@ -822,7 +849,7 @@ fn key_of(device: &DeviceInfo) -> DeviceKey {
 mod tests {
     use super::*;
     use sct_core::calibration::AxisCalibration;
-    use sct_core::preset::DrillKind;
+    use sct_core::preset::{DrillKind, ThrottleLeadIn};
     use sct_core::profile::PedalAxis;
     use tauri::ipc::InvokeResponseBody;
 
@@ -873,6 +900,7 @@ mod tests {
             lead_in_ms: 1000,
             tolerance: Some(5.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Hold {
                 target: 70.0,
                 hold_ms: 1000,
@@ -1073,6 +1101,7 @@ mod tests {
             lead_in_ms: 1000,
             tolerance: Some(6.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Trace {
                 points: vec![(0, 0.0), (150, 90.0), (600, 0.0)],
             },
@@ -1131,6 +1160,110 @@ mod tests {
             stream.step_drill(&sample_at(ms * 1000, 0.2));
         }
         assert!(stream.active_drill.is_none(), "drill should have finished");
+        assert_eq!(audio.pulse_rate(), 0.0);
+    }
+
+    /// A brake drill (1 s countdown, 1 s hold at 70 %) that starts from the throttle held at
+    /// 80 % for 1 s.
+    fn lead_in_drill() -> Drill {
+        Drill {
+            throttle_lead_in: Some(ThrottleLeadIn {
+                level: 80.0,
+                hold_ms: 1000,
+            }),
+            ..drill(Pedal::Brake)
+        }
+    }
+
+    #[test]
+    fn lead_in_drill_needs_the_throttle_assigned() {
+        let mut stream = stream();
+        let (channel, log) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        start_drill(
+            Some(&mut stream),
+            Some(brake_profile()),
+            0,
+            lead_in_drill(),
+            channel,
+            None,
+            &reply,
+        );
+        assert_eq!(
+            answer.recv().unwrap(),
+            Err(
+                "the throttle pedal isn't assigned; this drill starts from the throttle".to_owned()
+            )
+        );
+        assert!(log.lock().unwrap().is_empty());
+        assert!(stream.active_drill.is_none());
+    }
+
+    /// A sample with the brake on axis 0 and the throttle on axis 1, as fractions of travel.
+    fn pedals_at(t_us: u64, brake: f32, throttle: f32) -> RawSample {
+        let mut sample = sample_at(t_us, brake);
+        sample.axes[1] = sample_at(t_us, throttle).axes[0];
+        sample.axis_count = 2;
+        sample
+    }
+
+    #[test]
+    fn lead_in_beeps_against_the_throttle_level() {
+        let mut profile = brake_profile();
+        profile.set(
+            Pedal::Throttle,
+            Some(PedalAxis {
+                axis: 1,
+                calibration: AxisCalibration::default(),
+            }),
+        );
+        let mut stream = stream();
+        let audio = AudioFeedback::detached();
+        let (channel, _) = event_channel();
+        let (reply, answer) = mpsc::channel();
+        start_drill(
+            Some(&mut stream),
+            Some(profile),
+            0,
+            lead_in_drill(),
+            channel,
+            Some(audio.clone()),
+            &reply,
+        );
+        assert_eq!(answer.recv().unwrap(), Ok(()));
+
+        // Countdown: silent.
+        for ms in 100..1_000 {
+            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.0));
+        }
+        assert_eq!(audio.pulse_rate(), 0.0);
+
+        // Countdown over with the throttle off: waiting, beeping against the level.
+        for ms in 1_000..1_010 {
+            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.0));
+        }
+        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
+        assert!(
+            matches!(phase, Some(Phase::ThrottleWait { .. })),
+            "{phase:?}"
+        );
+        assert!(audio.pulse_rate() > 0.0);
+
+        // Throttle at the level: the hold starts and the tone goes silent.
+        for ms in 1_010..1_100 {
+            stream.step_drill(&pedals_at(ms * 1000, 0.0, 0.80));
+        }
+        let phase = stream.active_drill.as_ref().map(|d| d.run.phase());
+        assert!(
+            matches!(phase, Some(Phase::ThrottleHold { .. })),
+            "{phase:?}"
+        );
+        assert_eq!(audio.pulse_rate(), 0.0);
+
+        // Full throttle is above the level but still accepted, so the tone stays silent.
+        for ms in 1_100..1_200 {
+            stream.step_drill(&pedals_at(ms * 1000, 0.0, 1.0));
+        }
         assert_eq!(audio.pulse_rate(), 0.0);
     }
 }

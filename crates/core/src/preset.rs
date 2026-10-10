@@ -28,6 +28,14 @@ pub const MIN_TRACE_MS: u32 = 500;
 pub const MAX_TRACE_MS: u32 = 15000;
 /// Most points a trace may have.
 pub const MAX_TRACE_POINTS: usize = 64;
+/// Lowest throttle level in percent a throttle lead-in may hold.
+pub const MIN_THROTTLE_LEAD_IN_LEVEL: f32 = 10.0;
+/// Highest throttle level in percent a throttle lead-in may hold.
+pub const MAX_THROTTLE_LEAD_IN_LEVEL: f32 = 100.0;
+/// Shortest throttle hold in milliseconds before the lift cue.
+pub const MIN_THROTTLE_HOLD_MS: u32 = 500;
+/// Longest throttle hold in milliseconds before the lift cue.
+pub const MAX_THROTTLE_HOLD_MS: u32 = 5000;
 
 const fn default_reps() -> u32 {
     DEFAULT_REPS
@@ -60,6 +68,16 @@ pub enum DrillKind {
     },
 }
 
+/// Throttle held before a brake rep; the rep start is the cue to lift (SCT-037).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThrottleLeadIn {
+    /// Throttle level to hold, in percent (`10.0..=100.0`).
+    pub level: f32,
+    /// How long the throttle must stay at the level before the lift cue, in ms (`500..=5000`).
+    pub hold_ms: u32,
+}
+
 /// A single practice drill within a preset.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +102,9 @@ pub struct Drill {
     /// `None` (omitted) means 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decimals: Option<u8>,
+    /// Throttle held before each rep of a brake drill; `None` (omitted) means no lead-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throttle_lead_in: Option<ThrottleLeadIn>,
     /// Drill type and parameters (flattened in JSON).
     #[serde(flatten)]
     pub kind: DrillKind,
@@ -106,6 +127,12 @@ impl Drill {
             DrillKind::Hold { target, .. } => Some(*target / 100.0),
             DrillKind::Trace { .. } => None,
         }
+    }
+
+    /// Returns the throttle lead-in level as a fraction in `[0.0, 1.0]`, if the drill has one.
+    #[must_use]
+    pub fn throttle_level_fraction(&self) -> Option<f32> {
+        self.throttle_lead_in.as_ref().map(|l| l.level / 100.0)
     }
 
     /// Returns the permissible tolerance as a fraction in `[0.0, 1.0]`.
@@ -242,6 +269,35 @@ fn validate_drill(drill: &Drill) -> Result<(), PresetError> {
             drill: drill_ctx,
             message: format!("field 'decimals' ({decimals}) must be 0 or 1"),
         });
+    }
+
+    if let Some(lead_in) = &drill.throttle_lead_in {
+        if drill.pedal != Pedal::Brake {
+            return Err(PresetError::Invalid {
+                drill: drill_ctx,
+                message: "field 'throttleLeadIn' is only allowed on brake drills".to_string(),
+            });
+        }
+        let level = lead_in.level;
+        if !level.is_finite()
+            || !(MIN_THROTTLE_LEAD_IN_LEVEL..=MAX_THROTTLE_LEAD_IN_LEVEL).contains(&level)
+        {
+            return Err(PresetError::Invalid {
+                drill: drill_ctx,
+                message: format!(
+                    "field 'throttleLeadIn.level' ({level}) must be finite and between {MIN_THROTTLE_LEAD_IN_LEVEL} and {MAX_THROTTLE_LEAD_IN_LEVEL}"
+                ),
+            });
+        }
+        if !(MIN_THROTTLE_HOLD_MS..=MAX_THROTTLE_HOLD_MS).contains(&lead_in.hold_ms) {
+            return Err(PresetError::Invalid {
+                drill: drill_ctx,
+                message: format!(
+                    "field 'throttleLeadIn.holdMs' ({}) must be between {MIN_THROTTLE_HOLD_MS} and {MAX_THROTTLE_HOLD_MS}",
+                    lead_in.hold_ms
+                ),
+            });
+        }
     }
 
     match &drill.kind {
@@ -655,6 +711,7 @@ const HOLD_KEYS: &[&str] = &[
     "leadInMs",
     "tolerance",
     "decimals",
+    "throttleLeadIn",
     "target",
     "holdMs",
 ];
@@ -667,6 +724,7 @@ const TRACE_KEYS: &[&str] = &[
     "leadInMs",
     "tolerance",
     "decimals",
+    "throttleLeadIn",
     "points",
 ];
 
@@ -827,6 +885,7 @@ mod tests {
             lead_in_ms: 3000,
             tolerance: Some(5.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Hold {
                 target: 70.0,
                 hold_ms: 2000,
@@ -843,6 +902,7 @@ mod tests {
             lead_in_ms: 2000,
             tolerance: Some(6.0),
             decimals: None,
+            throttle_lead_in: None,
             kind: DrillKind::Trace {
                 points: vec![(0, 0.0), (150, 92.0), (600, 60.0), (1500, 0.0)],
             },
@@ -1538,6 +1598,125 @@ mod tests {
         assert_eq!(parse_preset(trace).unwrap().drills[0].decimals, Some(1));
     }
 
+    fn lead_in_json(pedal: &str, lead_in: &str) -> String {
+        format!(
+            r#"{{"schemaVersion":1,"id":"p","name":"P","drills":[{{"id":"d","name":"D","type":"hold","pedal":"{pedal}","target":70,"holdMs":2000{lead_in}}}]}}"#
+        )
+    }
+
+    fn assert_lead_in_error(json: &str, needle: &str) {
+        let err = parse_preset(json).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                PresetError::Invalid { drill: Some(d), message } if d == "d" && message.contains(needle)
+            ),
+            "unexpected error {err:?}, wanted '{needle}'"
+        );
+    }
+
+    #[test]
+    fn throttle_lead_in_parses_on_hold_and_trace() {
+        let preset = parse_preset(&lead_in_json(
+            "brake",
+            r#","throttleLeadIn":{"level":80,"holdMs":1500}"#,
+        ))
+        .unwrap();
+        let drill = &preset.drills[0];
+        assert_eq!(
+            drill.throttle_lead_in,
+            Some(ThrottleLeadIn {
+                level: 80.0,
+                hold_ms: 1500
+            })
+        );
+        assert!((drill.throttle_level_fraction().unwrap() - 0.80).abs() < 1e-6);
+
+        let trace = r#"{"schemaVersion":1,"id":"p","name":"P","drills":[{"id":"t","name":"T","type":"trace","pedal":"brake","throttleLeadIn":{"level":100,"holdMs":500},"points":[[0,0],[1000,50]]}]}"#;
+        let preset = parse_preset(trace).unwrap();
+        assert_eq!(
+            preset.drills[0].throttle_lead_in,
+            Some(ThrottleLeadIn {
+                level: 100.0,
+                hold_ms: 500
+            })
+        );
+
+        let none = parse_preset(&lead_in_json("brake", "")).unwrap();
+        assert_eq!(none.drills[0].throttle_lead_in, None);
+        assert_eq!(none.drills[0].throttle_level_fraction(), None);
+    }
+
+    #[test]
+    fn throttle_lead_in_validation() {
+        assert_lead_in_error(
+            &lead_in_json(
+                "throttle",
+                r#","throttleLeadIn":{"level":80,"holdMs":1500}"#,
+            ),
+            "field 'throttleLeadIn' is only allowed on brake drills",
+        );
+        assert_lead_in_error(
+            &lead_in_json("brake", r#","throttleLeadIn":{"level":9.9,"holdMs":1500}"#),
+            "field 'throttleLeadIn.level' (9.9)",
+        );
+        assert_lead_in_error(
+            &lead_in_json(
+                "brake",
+                r#","throttleLeadIn":{"level":100.5,"holdMs":1500}"#,
+            ),
+            "field 'throttleLeadIn.level' (100.5)",
+        );
+        assert_lead_in_error(
+            &lead_in_json("brake", r#","throttleLeadIn":{"level":80,"holdMs":499}"#),
+            "field 'throttleLeadIn.holdMs' (499)",
+        );
+        assert_lead_in_error(
+            &lead_in_json("brake", r#","throttleLeadIn":{"level":80,"holdMs":5001}"#),
+            "field 'throttleLeadIn.holdMs' (5001)",
+        );
+
+        let mut drill = valid_hold_drill();
+        drill.throttle_lead_in = Some(ThrottleLeadIn {
+            level: f32::NAN,
+            hold_ms: 1000,
+        });
+        assert!(matches!(
+            validate_drill(&drill),
+            Err(PresetError::Invalid { message, .. }) if message.contains("throttleLeadIn.level")
+        ));
+    }
+
+    #[test]
+    fn throttle_lead_in_rejects_unknown_key() {
+        let err = parse_preset(&lead_in_json(
+            "brake",
+            r#","throttleLeadIn":{"level":80,"holdMs":1500,"lvl":3}"#,
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `lvl`"),
+            "unexpected error {err}"
+        );
+    }
+
+    #[test]
+    fn throttle_lead_in_round_trip() {
+        let drill = valid_hold_drill();
+        let json = serde_json::to_value(&drill).unwrap();
+        assert!(json.get("throttleLeadIn").is_none());
+
+        let mut preset = valid_preset();
+        preset.drills[0].throttle_lead_in = Some(ThrottleLeadIn {
+            level: 60.0,
+            hold_ms: 2000,
+        });
+        let json = serde_json::to_string(&preset).unwrap();
+        assert!(json.contains(r#""throttleLeadIn":{"level":60.0,"holdMs":2000}"#));
+        assert!(!json[json.find("hairpin").unwrap()..].contains("throttleLeadIn"));
+        assert_eq!(parse_preset(&json).unwrap(), preset);
+    }
+
     #[test]
     fn drill_helpers() {
         let hold = valid_hold_drill();
@@ -1557,7 +1736,7 @@ mod tests {
         let json = include_str!("../../../presets/sample.json");
         let preset = parse_preset(json).expect("presets/sample.json must be valid");
         assert_eq!(preset.id, "sample");
-        assert_eq!(preset.drills.len(), 4);
+        assert_eq!(preset.drills.len(), 5);
         assert_eq!(preset.drills[0].pedal, Pedal::Brake);
         assert_eq!(preset.drills[1].pedal, Pedal::Throttle);
         assert_eq!(preset.drills[2].pedal, Pedal::Brake);

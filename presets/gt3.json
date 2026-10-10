@@ -64,6 +64,29 @@
       ]
     },
     {
+      "id": "gt3-heavy-stop-from-throttle",
+      "name": "Heavy stop from full throttle",
+      "type": "trace",
+      "pedal": "brake",
+      "tolerance": 7,
+      "reps": 5,
+      "leadInMs": 2000,
+      "throttleLeadIn": {
+        "level": 100,
+        "holdMs": 1500
+      },
+      "points": [
+        [0, 0],
+        [200, 78],
+        [900, 76],
+        [1700, 58],
+        [2400, 25],
+        [2900, 12],
+        [3300, 5],
+        [3600, 0]
+      ]
+    },
+    {
       "id": "gt3-staged-exit",
       "name": "Staged exit throttle",
       "type": "trace",

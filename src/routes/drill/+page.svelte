@@ -3,7 +3,7 @@
   import { resolve } from "$app/paths";
   import { page } from "$app/state";
   import { isTauri } from "@tauri-apps/api/core";
-  import { saveLastPreset } from "$lib/settings";
+  import { loadLastPreset, saveLastPreset } from "$lib/settings";
   import {
     listPresets,
     startDrillRun,
@@ -105,7 +105,9 @@
           if (presets.length > 0) {
             // The home picker opens this screen with ?preset=<id>&drill=<id>.
             const params = page.url.searchParams;
-            const preset = presets.find((pr) => pr.id === params.get("preset")) ?? presets[0];
+            const preset =
+              presets.find((pr) => pr.id === (params.get("preset") ?? loadLastPreset())) ??
+              presets[0];
             const playable = playableDrills(preset);
             selectedPreset = preset;
             selectedDrill =
@@ -179,6 +181,7 @@
 
   function start() {
     if (!selectedPreset || !selectedDrill) return;
+    saveLastPreset(selectedPreset.id);
     if (sourceStatus.kind !== "live") {
       errorMessage = "Connect your pedals before starting.";
       return;

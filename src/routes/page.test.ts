@@ -150,4 +150,114 @@ describe("Home page preset picker", () => {
       expect.stringMatching(/\/drill\?preset=starter&drill=brake-hold-70$/),
     );
   });
+
+  interface HomeMock {
+    presets?: Preset[];
+    listError?: string;
+    scores?: (presetId: string) => Record<string, number>;
+  }
+
+  /** Replaces the IPC mock. Returns the preset ids that best_totals was called with. */
+  function mockHome({
+    presets = [starterPreset, advancedPreset],
+    listError,
+    scores = () => ({}),
+  }: HomeMock = {}) {
+    const requested: string[] = [];
+    mockIPC((cmd, args) => {
+      switch (cmd) {
+        case "list_presets":
+          if (listError) throw listError;
+          return presets;
+        case "best_totals": {
+          const { presetId } = (args ?? {}) as { presetId: string };
+          requested.push(presetId);
+          return scores(presetId);
+        }
+        case "app_info":
+          return { name: "SimCurveTrainApp", version: "0.1.0" };
+        default:
+          throw new Error(`unexpected command ${cmd}`);
+      }
+    });
+    return { requested };
+  }
+
+  it("shows an alert when the preset list fails to load", async () => {
+    mockHome({ listError: "presets file is corrupt" });
+    render(Page);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to load presets");
+    expect(alert).toHaveTextContent("presets file is corrupt");
+  });
+
+  it("shows a loading message until the presets arrive", async () => {
+    render(Page);
+    expect(screen.getByText("Loading presets…")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Starter Drills/ })).toBeInTheDocument();
+    expect(screen.queryByText("Loading presets…")).not.toBeInTheDocument();
+  });
+
+  it("says no playable drills are found when every drill is hidden", async () => {
+    const clutchOnly: Preset = {
+      ...starterPreset,
+      id: "clutch-only",
+      name: "Clutch Only",
+      drills: [{ ...starterPreset.drills[0] }],
+    };
+    mockHome({ presets: [clutchOnly] });
+    render(Page);
+    expect(await screen.findByText("No playable drills found.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Clutch Only/ })).not.toBeInTheDocument();
+  });
+
+  it("loads the scores of the card that is opened", async () => {
+    const { requested } = mockHome({
+      scores: (presetId): Record<string, number> =>
+        presetId === "advanced" ? { "throttle-trace": 55.2 } : {},
+    });
+    render(Page);
+
+    const advancedBtn = await screen.findByRole("button", { name: /Advanced Drills/ });
+    await fireEvent.click(advancedBtn);
+
+    expect(advancedBtn).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByText("Best 55")).toBeInTheDocument();
+    expect(screen.queryByText("Brake hold 70%")).not.toBeInTheDocument();
+    expect(requested).toContain("advanced");
+  });
+
+  it("collapses the open card when it is clicked again", async () => {
+    render(Page);
+
+    const starterBtn = await screen.findByRole("button", { name: /Starter Drills/ });
+    expect(starterBtn).toHaveAttribute("aria-expanded", "true");
+    expect(await screen.findByText("Brake hold 70%")).toBeInTheDocument();
+
+    await fireEvent.click(starterBtn);
+
+    expect(starterBtn).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText("Brake hold 70%")).not.toBeInTheDocument();
+  });
+
+  it("uses the singular for a preset with one drill", async () => {
+    render(Page);
+    const advancedBtn = await screen.findByRole("button", { name: /Advanced Drills/ });
+    expect(advancedBtn).toHaveTextContent(/1 drill$/);
+    expect(advancedBtn).not.toHaveTextContent("1 drills");
+  });
+
+  it("shows Best — for a drill whose id is a built-in object property", async () => {
+    const ctorPreset: Preset = {
+      ...starterPreset,
+      id: "ctor",
+      name: "Constructor Drills",
+      drills: [{ ...starterPreset.drills[1], id: "constructor", name: "Constructor hold" }],
+    };
+    mockHome({ presets: [ctorPreset] });
+    render(Page);
+    expect(await screen.findByText("Constructor hold")).toBeInTheDocument();
+    expect(await screen.findByText("Best —")).toBeInTheDocument();
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+  });
 });

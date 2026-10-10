@@ -84,6 +84,7 @@ describe("Drill page", () => {
   let saveError: string | null = null;
 
   beforeEach(() => {
+    localStorage.clear();
     mockUrl = new URL("http://localhost/drill");
     startError = null;
     drillChannel = null;
@@ -637,5 +638,42 @@ describe("Drill page", () => {
       name: /First Advanced Drill/,
     });
     expect(drillOption.selected).toBe(true);
+  });
+
+  it("falls back to the first preset when the preset param is unknown", async () => {
+    presetsList = [preset, multiDrillPreset];
+    mockUrl = new URL("http://localhost/drill?preset=no-such-preset");
+    localStorage.setItem("sct:last_preset", "advanced");
+    render(DrillPage);
+    const presetOption = await screen.findByRole<HTMLOptionElement>("option", {
+      name: "Starter Drills",
+    });
+    expect(presetOption.selected).toBe(true);
+  });
+
+  it("selects the remembered preset when there is no preset param", async () => {
+    presetsList = [preset, multiDrillPreset];
+    localStorage.setItem("sct:last_preset", "advanced");
+    render(DrillPage);
+    const presetOption = await screen.findByRole<HTMLOptionElement>("option", {
+      name: "Advanced Drills",
+    });
+    expect(presetOption.selected).toBe(true);
+    const drillOption = await screen.findByRole<HTMLOptionElement>("option", {
+      name: /First Advanced Drill/,
+    });
+    expect(drillOption.selected).toBe(true);
+  });
+
+  it("saves the preset to sct:last_preset when the preset select changes", async () => {
+    presetsList = [preset, multiDrillPreset];
+    render(DrillPage);
+    const advancedOption = await screen.findByRole<HTMLOptionElement>("option", {
+      name: "Advanced Drills",
+    });
+    expect(localStorage.getItem("sct:last_preset")).toBeNull();
+    advancedOption.selected = true;
+    await fireEvent.change(advancedOption.closest("select")!);
+    expect(localStorage.getItem("sct:last_preset")).toBe("advanced");
   });
 });

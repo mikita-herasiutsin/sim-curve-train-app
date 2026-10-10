@@ -983,9 +983,18 @@ async function main() {
       `[...document.querySelectorAll("li.preset-card")].find((li) => li.querySelector(".preset-name")?.textContent.trim() === ${JSON.stringify(name)})`;
     const headerOf = (name) => `(${cardOf(name)})?.querySelector("button.preset-header")`;
 
-    const P = playable[playable.length - 1];
+    // The earlier steps saved attempts for "sample" only, so it is the preset whose scores show.
+    const P = playable.find((p) => p.id === "sample");
+    assert(
+      P,
+      `bundled preset "sample" is not playable (playable: ${playable.map((p) => p.id).join(", ")})`,
+    );
     await waitFor(() => ev(`Boolean(${headerOf(P.name)})`), { what: `the ${P.name} card` });
-    await ev(`${headerOf(P.name)}.click()`);
+    // Clicking an open card collapses it, so only click a closed one.
+    const wasExpanded = await ev(`${headerOf(P.name)}.getAttribute("aria-expanded")`);
+    if (wasExpanded !== "true") {
+      await ev(`${headerOf(P.name)}.click()`);
+    }
     await waitFor(() => ev(`(${headerOf(P.name)})?.getAttribute("aria-expanded") === "true"`), {
       what: `${P.name} to open`,
     });

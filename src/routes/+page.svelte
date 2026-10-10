@@ -27,7 +27,10 @@
   }
 
   function handlePresetClick(id: string) {
-    if (openPresetId === id) return;
+    if (openPresetId === id) {
+      openPresetId = null;
+      return;
+    }
     openPresetId = id;
     saveLastPreset(id);
     fetchScores(id);
@@ -91,6 +94,8 @@
       <p role="alert">Failed to load presets: {loadError}</p>
     {:else if loaded && presets.length === 0}
       <p>No playable drills found.</p>
+    {:else if !loaded}
+      <p>Loading presets…</p>
     {:else}
       <ul class="preset-list">
         {#each presets as preset (preset.id)}
@@ -101,13 +106,16 @@
               aria-expanded={openPresetId === preset.id}
               onclick={() => handlePresetClick(preset.id)}
             >
-              <div class="preset-info">
+              <span class="preset-info">
                 <strong class="preset-name">{preset.name}</strong>
                 {#if preset.description}
-                  <p class="preset-description">{preset.description}</p>
+                  <span class="preset-description">{preset.description}</span>
                 {/if}
-              </div>
-              <span class="drill-count">{playableDrills(preset).length} drills</span>
+              </span>
+              <span class="drill-count"
+                >{playableDrills(preset).length}
+                {playableDrills(preset).length === 1 ? "drill" : "drills"}</span
+              >
             </button>
             {#if openPresetId === preset.id}
               <ul class="drill-list">
@@ -122,7 +130,7 @@
                       <span class="drill-type">{drill.type}</span>
                       <span class="drill-pedal pedal--{drill.pedal}">{drill.pedal}</span>
                       <span class="drill-score">
-                        {#if scores[drill.id] !== undefined}
+                        {#if Object.hasOwn(scores, drill.id)}
                           Best {Math.round(scores[drill.id])}
                         {:else}
                           Best —
@@ -251,12 +259,18 @@
     background: color-mix(in srgb, var(--accent) 8%, transparent);
   }
 
+  .preset-info {
+    display: flex;
+    flex-direction: column;
+  }
+
   .preset-info strong {
     display: block;
     font-size: 1rem;
   }
 
   .preset-description {
+    display: block;
     margin: 0.25rem 0 0;
     color: var(--text-muted);
     font-size: 0.875rem;

@@ -497,12 +497,14 @@
 
           <div class="warm-up-overall">
             <span>Overall score:</span>
-            <span class="warm-up-score" data-testid="warm-up-score">
-              {Math.round(warmUpScore(warmUp.results))}
+            <span>
+              <span class="warm-up-score" data-testid="warm-up-score">
+                {Math.round(warmUpScore(warmUp.results))}
+              </span>
+              <span class="grade-letter grade-{gradeOf(warmUpScore(warmUp.results))}"
+                >{gradeOf(warmUpScore(warmUp.results))}</span
+              >
             </span>
-            <span class="grade-letter grade-{gradeOf(warmUpScore(warmUp.results))}"
-              >{gradeOf(warmUpScore(warmUp.results))}</span
-            >
           </div>
           <p class="note">Skipped drills count as 0.</p>
 

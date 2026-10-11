@@ -1034,13 +1034,12 @@ mod tests {
 
     #[test]
     fn bundled_presets_score_a_perfect_follow_and_punish_a_late_one() {
-        // Every drill in presets/ loads and scores: an exact follow earns an S, and a trace
+        // Every bundled drill loads and scores: an exact follow earns an S, and a trace
         // followed 250 ms late loses at least 5 points.
         use crate::preset::DrillKind;
         use crate::scoring::{HoldParams, score_hold};
 
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets");
-        let presets = crate::preset::load_dir(&dir).expect("presets/ loads");
+        let presets = crate::preset::bundled_presets().expect("bundled presets load");
         let mut checked = Vec::new();
         for preset in &presets {
             for drill in &preset.drills {

@@ -1032,6 +1032,67 @@ pub fn find_warm_up_drill(
     Ok(drill)
 }
 
+/// Preset files compiled into the binary, so a portable build works with no files beside it.
+const BUNDLED_PRESETS: &[(&str, &str)] = &[
+    ("gt3.json", include_str!("../../../presets/gt3.json")),
+    ("sample.json", include_str!("../../../presets/sample.json")),
+];
+
+/// Parses the presets compiled into the binary, sorted by file name.
+///
+/// # Errors
+///
+/// Returns [`PresetError::InFile`] if an embedded file fails to parse or validate,
+/// or if two embedded files share a preset id.
+pub fn bundled_presets() -> Result<Vec<Preset>, PresetError> {
+    let mut presets = Vec::with_capacity(BUNDLED_PRESETS.len());
+    let mut seen_ids = HashSet::new();
+    for (name, json) in BUNDLED_PRESETS {
+        let preset = parse_preset(json).map_err(|source| PresetError::InFile {
+            path: PathBuf::from(name),
+            source: Box::new(source),
+        })?;
+        if !seen_ids.insert(preset.id.clone()) {
+            return Err(PresetError::InFile {
+                path: PathBuf::from(name),
+                source: Box::new(PresetError::Invalid {
+                    drill: None,
+                    message: format!("duplicate preset id '{}'", preset.id),
+                }),
+            });
+        }
+        presets.push(preset);
+    }
+    Ok(presets)
+}
+
+/// Returns the bundled presets, with the presets in `dir` applied on top.
+///
+/// Only a missing `dir` is ignored: the bundled presets are returned unchanged.
+/// For any other case, including a `dir` that is a file or cannot be read, the
+/// error from [`load_dir`] is returned. A broken file in `dir` fails the whole
+/// load, so a preset author sees the error. A file in `dir` replaces the bundled
+/// preset with the same id. Any other preset is appended after the bundled ones,
+/// in file-name order.
+///
+/// # Errors
+///
+/// Returns the error from [`bundled_presets`] or from [`load_dir`].
+pub fn load_with_overrides(dir: &Path) -> Result<Vec<Preset>, PresetError> {
+    let mut presets = bundled_presets()?;
+    match std::fs::metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(presets),
+        _ => {}
+    }
+    for preset in load_dir(dir)? {
+        match presets.iter_mut().find(|p| p.id == preset.id) {
+            Some(slot) => *slot = preset,
+            None => presets.push(preset),
+        }
+    }
+    Ok(presets)
+}
+
 /// Loads and validates all preset files from a directory.
 ///
 /// Reads every `*.json` file in `dir` (non-recursively), sorted by file name.
@@ -2017,6 +2078,103 @@ mod tests {
         assert!((trace.tolerance_fraction() - 0.06).abs() < 1e-6);
         let curve = trace.trace_curve().unwrap();
         assert_eq!(curve.duration_ms(), 1500);
+    }
+
+    #[test]
+    fn bundled_presets_load_without_a_directory() {
+        let presets = bundled_presets().expect("embedded presets are valid");
+        assert!(presets.iter().any(|p| p.id == "gt3"));
+        let missing = std::env::temp_dir().join(format!(
+            "sct_no_such_presets_dir_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!missing.exists());
+        let with = load_with_overrides(&missing).expect("missing dir is not an error");
+        assert_eq!(with.len(), presets.len());
+    }
+
+    #[test]
+    fn bundled_presets_list_every_file_in_presets_dir() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                p.is_file() && p.extension().and_then(std::ffi::OsStr::to_str) == Some("json")
+            })
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        on_disk.sort();
+        let embedded: Vec<String> = BUNDLED_PRESETS
+            .iter()
+            .map(|(n, _)| (*n).to_string())
+            .collect();
+        assert_eq!(embedded, on_disk, "add new preset files to BUNDLED_PRESETS");
+
+        let ids: HashSet<String> = bundled_presets()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            embedded.len(),
+            "bundled preset ids must be unique"
+        );
+    }
+
+    #[test]
+    fn load_with_overrides_reports_a_broken_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "sct_preset_broken_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard(dir.clone());
+        std::fs::write(dir.join("bad.json"), "{").unwrap();
+
+        assert!(load_with_overrides(&dir).is_err());
+    }
+
+    #[test]
+    fn load_with_overrides_replaces_by_id_and_adds_new() {
+        let dir = std::env::temp_dir().join(format!(
+            "sct_preset_override_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard(dir.clone());
+
+        let mut replaced = valid_preset();
+        replaced.id = "gt3".to_string();
+        replaced.name = "GT3 local".to_string();
+        let mut added = valid_preset();
+        added.id = "local-extra".to_string();
+        std::fs::write(
+            dir.join("a.json"),
+            serde_json::to_string(&replaced).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("b.json"), serde_json::to_string(&added).unwrap()).unwrap();
+
+        let bundled = bundled_presets().unwrap();
+        let loaded = load_with_overrides(&dir).unwrap();
+        assert_eq!(loaded.len(), bundled.len() + 1);
+        let gt3 = loaded.iter().find(|p| p.id == "gt3").unwrap();
+        assert_eq!(gt3.name, "GT3 local");
+        assert!(loaded.iter().any(|p| p.id == "local-extra"));
     }
 
     #[test]

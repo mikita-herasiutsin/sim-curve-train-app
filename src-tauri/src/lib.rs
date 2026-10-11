@@ -15,7 +15,9 @@ use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
 use sct_core::drill_engine::DrillEvent;
-use sct_core::preset::{Preset, find_drill, find_warm_up_drill, load_dir};
+use sct_core::preset::{
+    Preset, bundled_presets, find_drill, find_warm_up_drill, load_with_overrides,
+};
 use sct_core::profile::{DeviceProfile, ProfileStore};
 use sct_core::stream::SampleBatch;
 use tauri::Manager;
@@ -302,13 +304,17 @@ fn list_warm_up_runs(
         .map_err(|e| e.to_string())
 }
 
-/// Loads the bundled presets from `<resource dir>/presets`.
+/// Loads the presets compiled into the binary. An optional `presets/` folder in the
+/// resource dir (next to the exe) replaces presets by id or adds new ones.
 fn load_presets(app: &tauri::AppHandle) -> Result<Vec<Preset>, String> {
-    let resources = app
-        .path()
-        .resource_dir()
-        .map_err(|e| format!("Failed to get resource dir: {e}"))?;
-    load_dir(&resources.join("presets")).map_err(|e| format!("Failed to load presets: {e}"))
+    let dir = match app.path().resource_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("Presets: no resource dir ({e}), using the bundled presets");
+            return bundled_presets().map_err(|e| format!("Failed to load presets: {e}"));
+        }
+    };
+    load_with_overrides(&dir.join("presets")).map_err(|e| format!("Failed to load presets: {e}"))
 }
 
 /// Lists all bundled drill presets.

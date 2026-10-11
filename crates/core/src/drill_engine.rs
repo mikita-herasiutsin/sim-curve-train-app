@@ -20,8 +20,9 @@ use crate::scoring::{Grade, HoldParams, HoldScore, ValueSample, score_hold};
 use crate::set_summary::{SetSummary, summarize_set};
 use crate::trace_scoring::{RAMP_WINDOW_MS, TraceParams, TraceScore, score_trace};
 
-/// Default rest pause in milliseconds between repetitions.
-pub const DEFAULT_REST_MS: u32 = 2000;
+/// Default rest pause in milliseconds between repetitions, giving the same 3, 2, 1, GO countdown
+/// as the default lead-in.
+pub const DEFAULT_REST_MS: u32 = 4000;
 
 /// Extra recording margin in milliseconds after a trace rep ends for reaction lag estimation.
 pub const TRACE_LAG_MARGIN_MS: u32 = 300;

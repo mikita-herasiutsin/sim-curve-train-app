@@ -80,7 +80,9 @@
 
     <div class="header-right">
       <AudioControls />
-      <FrameTimeHud stream={pedalStream} />
+      {#if import.meta.env.DEV}
+        <FrameTimeHud stream={pedalStream} />
+      {/if}
     </div>
   </header>
 
@@ -107,17 +109,19 @@
           />
         </div>
 
-        <button
-          type="button"
-          class="btn-toggle"
-          class:active={latencyFlashEnabled}
-          onclick={() => (latencyFlashEnabled = !latencyFlashEnabled)}
-          aria-pressed={latencyFlashEnabled}
-          data-testid="latency-toggle"
-        >
-          <span class="indicator" aria-hidden="true"></span>
-          Latency check
-        </button>
+        {#if import.meta.env.DEV}
+          <button
+            type="button"
+            class="btn-toggle"
+            class:active={latencyFlashEnabled}
+            onclick={() => (latencyFlashEnabled = !latencyFlashEnabled)}
+            aria-pressed={latencyFlashEnabled}
+            data-testid="latency-toggle"
+          >
+            <span class="indicator" aria-hidden="true"></span>
+            Latency check
+          </button>
+        {/if}
       </div>
 
       <div class="graph-canvas-wrapper">
@@ -142,7 +146,9 @@
     </section>
   </main>
 
-  <LatencyFlash enabled={latencyFlashEnabled} stream={pedalStream} />
+  {#if import.meta.env.DEV}
+    <LatencyFlash enabled={latencyFlashEnabled} stream={pedalStream} />
+  {/if}
 </div>
 
 <style>

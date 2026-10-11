@@ -157,9 +157,9 @@ Each drill step duration is calculated as:
 `set_ms(reps) = lead_in_ms + reps * rep_ms + (reps - 1) * DEFAULT_REST_MS + reps * TRACE_LAG_MARGIN_MS` for trace drills.
 
 Where:
-- `lead_in_ms` is the drill lead-in countdown duration in milliseconds (`1000` to `10000` ms, default `3000` ms).
+- `lead_in_ms` is the drill lead-in countdown duration in milliseconds (`1000` to `10000` ms, default `4000` ms).
 - `rep_ms` is the duration of a single repetition in milliseconds: `holdMs` for hold drills, or the timestamp of the last control point for trace drills (0 if no points).
-- `DEFAULT_REST_MS` is the standard pause between repetitions (2000 ms).
+- `DEFAULT_REST_MS` is the standard pause between repetitions (4000 ms).
 - `TRACE_LAG_MARGIN_MS` is the time the engine keeps each trace repetition running after its last point, before the rest starts (300 ms). Hold drills add nothing for it.
 - A drill with a `throttleLeadIn` adds `reps * (holdMs + liftMs)` from the lead-in, with `liftMs` at its default of 300 ms when omitted. The wait for the throttle to reach the level has no fixed length, so the estimate leaves it out.
 - If `reps` is 0, the set duration equals `lead_in_ms`.
@@ -168,20 +168,20 @@ The total warm-up estimate is the sum of `set_ms` across all warm-up steps.
 
 #### Worked example
 
-Consider a warm-up step with drill `gt3-brake-hold-80` (`leadInMs`: 3000, `holdMs`: 1500) configured for 8 reps:
+Consider a warm-up step with drill `gt3-brake-hold-80` (`leadInMs`: 4000, `holdMs`: 1500) configured for 8 reps:
 - Rep duration: 1500 ms
-- Rest pauses: (8 - 1) * 2000 ms = 14000 ms
+- Rest pauses: (8 - 1) * 4000 ms = 28000 ms
 - Reps time: 8 * 1500 ms = 12000 ms
-- Lead-in: 3000 ms
-- Step set length: 3000 + 12000 + 14000 = 29000 ms (29.0 s)
+- Lead-in: 4000 ms
+- Step set length: 4000 + 12000 + 28000 = 44000 ms (44.0 s)
 
-A trace drill step adds the margin to each rep. Consider a step with drill `hairpin` (`leadInMs`: 2000, last point at 1500 ms) configured for 30 reps:
+A trace drill step adds the margin to each rep. Consider a step with drill `hairpin` (`leadInMs`: 4000, last point at 1500 ms) configured for 30 reps:
 - Rep duration: 1500 ms
-- Rest pauses: (30 - 1) * 2000 ms = 58000 ms
+- Rest pauses: (30 - 1) * 4000 ms = 116000 ms
 - Reps time: 30 * 1500 ms = 45000 ms
 - Trace margin: 30 * 300 ms = 9000 ms
-- Lead-in: 2000 ms
-- Step set length: 2000 + 45000 + 58000 + 9000 = 114000 ms (114.0 s)
+- Lead-in: 4000 ms
+- Step set length: 4000 + 45000 + 116000 + 9000 = 174000 ms (174.0 s)
 
 Summing this set duration for all steps in the preset yields the total warm-up duration estimate.
 

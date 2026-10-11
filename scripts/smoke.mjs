@@ -836,6 +836,13 @@ async function main() {
     const drill = findDrill("sample", "hairpin");
     const traceMode = () =>
       ev(`document.querySelector('[data-testid="trace-view"]')?.dataset.mode ?? null`);
+    // TraceView renders only during a run, so the default is read from the idle toggle.
+    assert(
+      (await ev(
+        `document.querySelector('.view-toggle button[aria-pressed="true"]')?.textContent?.trim() ?? null`,
+      )) === "Ghost",
+      "trace view is not Ghost by default on a fresh data dir",
+    );
     await click("button", "Ghost", `document.querySelector(".view-toggle")`);
     assert(
       (await ev(`localStorage.getItem("sct:trace_view")`)) === "ghost",

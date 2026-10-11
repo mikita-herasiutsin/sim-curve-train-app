@@ -1,5 +1,7 @@
 # Latency test
 
+The Latency check button and the fps readout appear only in dev builds (`npm run tauri dev`).
+
 ## Why
 Measure input-to-photon latency from brake pedal press to visible flash. Target is under 50 ms at 60 Hz. Target is under 20 ms at 144 Hz.
 

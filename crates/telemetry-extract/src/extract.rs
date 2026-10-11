@@ -183,7 +183,7 @@ fn corner_drills(
         name,
         pedal,
         reps: 5,
-        lead_in_ms: 2000,
+        lead_in_ms: 4000,
         tolerance: options.tolerance,
         decimals: None,
         throttle_lead_in: None,

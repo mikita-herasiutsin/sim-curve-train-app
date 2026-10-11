@@ -274,9 +274,43 @@ describe("Drill page", () => {
     });
     const card = (await screen.findByText("Set Summary")).closest("div")!;
     expect(card).toHaveTextContent("Best: 90");
-    expect(card).toHaveTextContent("Average: 80 (B)");
+    expect(card).toHaveTextContent("Average: 80 B");
     expect(card).toHaveTextContent("Consistency: 88%");
     expect(card).not.toHaveTextContent("NaN");
+  });
+
+  it("shows a grade letter next to best, average, consistency and each rep", async () => {
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 70 } });
+    drillChannel!.onmessage({ event: "repScored", rep: 1, score: { ...holdScore, total: 90 } });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [70, 90],
+        best: 90,
+        average: 80,
+        grade: "B",
+        consistency: 87.5,
+        stdDev: 10,
+      },
+    });
+    const card = (await screen.findByText("Set Summary")).closest("div")!;
+    const [best, average, consistency] = Array.from(
+      card.querySelectorAll<HTMLElement>(".summary-stats > div"),
+    );
+    expect(best).toHaveTextContent("Best: 90 A");
+    expect(best.querySelector(".grade-letter")).toHaveClass("grade-A");
+    expect(average).toHaveTextContent("Average: 80 B");
+    expect(average.querySelector(".grade-letter")).toHaveClass("grade-B");
+    expect(consistency).toHaveTextContent("Consistency: 88% A");
+    expect(consistency.querySelector(".grade-letter")).toHaveClass("grade-A");
+    const pills = card.querySelectorAll<HTMLElement>(".rep-pill");
+    expect(pills[0]).toHaveTextContent("#1: 70");
+    expect(pills[0].querySelector(".grade-letter")).toHaveTextContent("B");
+    expect(pills[1]).toHaveTextContent("#2: 90");
+    expect(pills[1].querySelector(".grade-letter")).toHaveTextContent("A");
   });
 
   // Field names and shapes exactly as sct_core::scoring::HoldScore serializes them.
@@ -549,18 +583,28 @@ describe("Drill page", () => {
     expect(info).toHaveTextContent("Tolerance: ±6%");
   });
 
-  it("shows the Playhead and Ghost view toggle for a trace drill and saves Ghost", async () => {
+  it("shows the Ghost and Playhead curve toggle for a trace drill, defaults to Ghost and saves Playhead", async () => {
     presetsList = [tracePreset];
     render(DrillPage);
     const info = (await screen.findByText("Type:")).closest(".drill-info")!;
-    const playhead = within(info as HTMLElement).getByRole("button", { name: "Playhead" });
+    expect(within(info as HTMLElement).getByRole("group", { name: "Curve" })).toBeInTheDocument();
     const ghost = within(info as HTMLElement).getByRole("button", { name: "Ghost" });
-    expect(playhead).toHaveAttribute("aria-pressed", "true");
-    expect(ghost).toHaveAttribute("aria-pressed", "false");
-
-    await fireEvent.click(ghost);
-    expect(localStorage.getItem("sct:trace_view")).toBe("ghost");
+    const playhead = within(info as HTMLElement).getByRole("button", { name: "Playhead" });
     expect(ghost).toHaveAttribute("aria-pressed", "true");
+    expect(playhead).toHaveAttribute("aria-pressed", "false");
+
+    await fireEvent.click(playhead);
+    expect(localStorage.getItem("sct:trace_view")).toBe("playhead");
+    expect(playhead).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("shows the drill and preset names while a drill runs", async () => {
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    expect(await screen.findByTestId("run-drill")).toHaveTextContent("Brake hold 70%");
+    expect(screen.getByTestId("run-preset")).toHaveTextContent("Starter Drills");
+    expect(screen.getByTestId("run-preset")).not.toHaveTextContent("warm-up");
   });
 
   it("renders trace-view and trace-hud showing Target after repStarted for a trace drill", async () => {

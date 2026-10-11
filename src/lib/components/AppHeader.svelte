@@ -100,6 +100,17 @@
     </button>
     <AudioControls />
     {#if info}
+      {#if info.build}<span
+          class="badge"
+          data-testid="build-info"
+          title="Worktree: {info.build.worktree}">{info.build.branch} @ {info.build.commit}</span
+        >{/if}
+      {#if info.testData}<span class="badge badge--warn" data-testid="test-data-badge"
+          >TEST DATA</span
+        >{/if}
+      {#if info.simPedals}<span class="badge badge--warn" data-testid="sim-pedals-badge"
+          >SIM PEDALS</span
+        >{/if}
       <span class="version" data-testid="app-version">{formatVersion(info.version)}</span>
     {:else if failed}
       <span class="version version--error" data-testid="app-version">version unavailable</span>
@@ -169,6 +180,27 @@
 
   .version--error {
     color: var(--brake);
+  }
+
+  .badge {
+    padding: 0.25rem 0.625rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+    max-width: 16rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .badge[data-testid="build-info"] {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  .badge--warn {
+    color: var(--brake);
+    border-color: var(--brake);
   }
 
   .header-actions {

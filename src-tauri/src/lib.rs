@@ -9,7 +9,6 @@ use std::collections::HashMap;
 
 use audio::AudioFeedback;
 use input::InputService;
-use sct_core::AppInfo;
 use sct_core::attempts::{Attempt, AttemptStore, NewAttempt, NewWarmUpRun, WarmUpRun};
 use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
@@ -20,8 +19,24 @@ use sct_core::preset::{
 };
 use sct_core::profile::{DeviceProfile, ProfileStore};
 use sct_core::stream::SampleBatch;
+use sct_core::{AppInfo, BuildInfo};
 use tauri::Manager;
 use tauri::ipc::Channel;
+
+fn current_app_info(app: &tauri::AppHandle) -> AppInfo {
+    let mut info = AppInfo::new(app.package_info().version.to_string());
+    info.build = build_info();
+    info.test_data = data_dir_override().is_some();
+    #[cfg(debug_assertions)]
+    {
+        info.sim_pedals = sim_pedals::enabled_by_env();
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        info.sim_pedals = false;
+    }
+    info
+}
 
 /// Returns the app name and version for the UI header.
 #[tauri::command]
@@ -30,7 +45,7 @@ use tauri::ipc::Channel;
     reason = "Tauri injects command arguments by value"
 )]
 fn app_info(app: tauri::AppHandle) -> AppInfo {
-    AppInfo::new(app.package_info().version.to_string())
+    current_app_info(&app)
 }
 
 /// Returns the connected game controllers. Changes arrive via the `devices-changed` event.
@@ -395,21 +410,79 @@ fn audio_set_volume(volume: f32, audio: tauri::State<'_, AudioFeedback>) {
     audio.set_volume(volume);
 }
 
+/// The absolute `SCT_DATA_DIR` a debug build uses instead of the app data directory.
+#[cfg(debug_assertions)]
+fn data_dir_override() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var_os("SCT_DATA_DIR")?);
+    if dir.is_absolute() {
+        Some(dir)
+    } else {
+        eprintln!("ignoring SCT_DATA_DIR: it must be an absolute path");
+        None
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn data_dir_override() -> Option<std::path::PathBuf> {
+    None
+}
+
+#[cfg(debug_assertions)]
+fn run_git_cmd(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(env!("CARGO_MANIFEST_DIR"))
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+#[cfg(debug_assertions)]
+fn build_info() -> Option<BuildInfo> {
+    static CACHE: std::sync::OnceLock<Option<BuildInfo>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let branch = run_git_cmd(&["rev-parse", "--abbrev-ref", "HEAD"])?;
+            let commit = run_git_cmd(&["rev-parse", "--short", "HEAD"])?;
+            let toplevel = run_git_cmd(&["rev-parse", "--show-toplevel"])?;
+            let worktree = std::path::Path::new(toplevel.trim_end_matches(['/', '\\']))
+                .file_name()?
+                .to_str()?
+                .to_owned();
+            Some(BuildInfo {
+                branch,
+                commit,
+                worktree,
+            })
+        })
+        .clone()
+}
+
+#[cfg(not(debug_assertions))]
+fn build_info() -> Option<BuildInfo> {
+    None
+}
+
 /// The directory for the profile and attempts database. Debug builds honour an absolute
 /// `SCT_DATA_DIR`, so automated runs (`npm run smoke`) use a throwaway directory instead of the
 /// user's real data. An empty or relative value is ignored.
 fn data_dir(app: &tauri::App) -> tauri::Result<std::path::PathBuf> {
-    #[cfg(debug_assertions)]
-    if let Some(dir) = std::env::var_os("SCT_DATA_DIR") {
-        let dir = std::path::PathBuf::from(dir);
-        if dir.is_absolute() {
-            eprintln!(
-                "SCT_DATA_DIR is set: using {} for saved data",
-                dir.display()
-            );
-            return Ok(dir);
-        }
-        eprintln!("ignoring SCT_DATA_DIR: it must be an absolute path");
+    if let Some(dir) = data_dir_override() {
+        eprintln!(
+            "SCT_DATA_DIR is set: using {} for saved data",
+            dir.display()
+        );
+        return Ok(dir);
     }
     app.path().app_data_dir()
 }
@@ -452,6 +525,15 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             window::fit_main_window(app);
+            if let Some(title) = current_app_info(app.handle()).window_title() {
+                if let Some(main_window) = app.get_webview_window("main") {
+                    if let Err(error) = main_window.set_title(&title) {
+                        eprintln!("failed to set window title to {title:?}: {error}");
+                    }
+                } else {
+                    eprintln!("failed to get main window to set title");
+                }
+            }
             let store = open_profile_store(app);
             let audio = AudioFeedback::new();
             app.manage(InputService::spawn(

@@ -1,9 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/** Git state of a dev build, so several worktree builds can be told apart. */
+export interface BuildInfo {
+  branch: string;
+  commit: string;
+  worktree: string;
+}
+
 /** Mirrors `sct_core::AppInfo` on the Rust side. */
 export interface AppInfo {
   name: string;
   version: string;
+  build?: BuildInfo;
+  testData?: boolean;
+  simPedals?: boolean;
 }
 
 /** Fetches app name and version from the Rust core. */

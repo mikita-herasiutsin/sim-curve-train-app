@@ -304,16 +304,17 @@ fn list_warm_up_runs(
         .map_err(|e| e.to_string())
 }
 
-/// Loads the presets compiled into the binary, plus any in `<resource dir>/presets`.
-///
-/// The portable build has no resource folder, so the embedded presets must be enough.
+/// Loads the presets compiled into the binary. An optional `presets/` folder in the
+/// resource dir (next to the exe) replaces presets by id or adds new ones.
 fn load_presets(app: &tauri::AppHandle) -> Result<Vec<Preset>, String> {
-    let dir = app.path().resource_dir().ok().map(|d| d.join("presets"));
-    match dir {
-        Some(dir) => load_with_overrides(&dir),
-        None => bundled_presets(),
-    }
-    .map_err(|e| format!("Failed to load presets: {e}"))
+    let dir = match app.path().resource_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            eprintln!("Presets: no resource dir ({e}), using the bundled presets");
+            return bundled_presets().map_err(|e| format!("Failed to load presets: {e}"));
+        }
+    };
+    load_with_overrides(&dir.join("presets")).map_err(|e| format!("Failed to load presets: {e}"))
 }
 
 /// Lists all bundled drill presets.

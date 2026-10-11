@@ -1042,35 +1042,52 @@ const BUNDLED_PRESETS: &[(&str, &str)] = &[
 ///
 /// # Errors
 ///
-/// Returns [`PresetError::InFile`] if an embedded file fails to parse or validate.
+/// Returns [`PresetError::InFile`] if an embedded file fails to parse or validate,
+/// or if two embedded files share a preset id.
 pub fn bundled_presets() -> Result<Vec<Preset>, PresetError> {
-    BUNDLED_PRESETS
-        .iter()
-        .map(|(name, json)| {
-            parse_preset(json).map_err(|source| PresetError::InFile {
+    let mut presets = Vec::with_capacity(BUNDLED_PRESETS.len());
+    let mut seen_ids = HashSet::new();
+    for (name, json) in BUNDLED_PRESETS {
+        let preset = parse_preset(json).map_err(|source| PresetError::InFile {
+            path: PathBuf::from(name),
+            source: Box::new(source),
+        })?;
+        if !seen_ids.insert(preset.id.clone()) {
+            return Err(PresetError::InFile {
                 path: PathBuf::from(name),
-                source: Box::new(source),
-            })
-        })
-        .collect()
+                source: Box::new(PresetError::Invalid {
+                    drill: None,
+                    message: format!("duplicate preset id '{}'", preset.id),
+                }),
+            });
+        }
+        presets.push(preset);
+    }
+    Ok(presets)
 }
 
-/// Returns the bundled presets, with the presets in `dir` added on top.
+/// Returns the bundled presets, with the presets in `dir` applied on top.
 ///
-/// A file in `dir` replaces the bundled preset with the same id. A missing `dir`
-/// is not an error: the bundled presets alone are returned.
+/// Only a missing `dir` is ignored: the bundled presets are returned unchanged.
+/// For any other case, including a `dir` that is a file or cannot be read, the
+/// error from [`load_dir`] is returned. A broken file in `dir` fails the whole
+/// load, so a preset author sees the error. A file in `dir` replaces the bundled
+/// preset with the same id. Any other preset is appended after the bundled ones,
+/// in file-name order.
 ///
 /// # Errors
 ///
-/// Returns the error from [`bundled_presets`] or, when `dir` exists, from [`load_dir`].
+/// Returns the error from [`bundled_presets`] or from [`load_dir`].
 pub fn load_with_overrides(dir: &Path) -> Result<Vec<Preset>, PresetError> {
     let mut presets = bundled_presets()?;
-    if dir.is_dir() {
-        for preset in load_dir(dir)? {
-            match presets.iter_mut().find(|p| p.id == preset.id) {
-                Some(slot) => *slot = preset,
-                None => presets.push(preset),
-            }
+    match std::fs::metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(presets),
+        _ => {}
+    }
+    for preset in load_dir(dir)? {
+        match presets.iter_mut().find(|p| p.id == preset.id) {
+            Some(slot) => *slot = preset,
+            None => presets.push(preset),
         }
     }
     Ok(presets)
@@ -2067,7 +2084,15 @@ mod tests {
     fn bundled_presets_load_without_a_directory() {
         let presets = bundled_presets().expect("embedded presets are valid");
         assert!(presets.iter().any(|p| p.id == "gt3"));
-        let missing = std::env::temp_dir().join("sct-no-such-presets-dir");
+        let missing = std::env::temp_dir().join(format!(
+            "sct_no_such_presets_dir_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!missing.exists());
         let with = load_with_overrides(&missing).expect("missing dir is not an error");
         assert_eq!(with.len(), presets.len());
     }
@@ -2078,7 +2103,9 @@ mod tests {
         let mut on_disk: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().path())
-            .filter(|p| p.extension().and_then(std::ffi::OsStr::to_str) == Some("json"))
+            .filter(|p| {
+                p.is_file() && p.extension().and_then(std::ffi::OsStr::to_str) == Some("json")
+            })
             .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
             .collect();
         on_disk.sort();
@@ -2087,6 +2114,34 @@ mod tests {
             .map(|(n, _)| (*n).to_string())
             .collect();
         assert_eq!(embedded, on_disk, "add new preset files to BUNDLED_PRESETS");
+
+        let ids: HashSet<String> = bundled_presets()
+            .unwrap()
+            .into_iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            ids.len(),
+            embedded.len(),
+            "bundled preset ids must be unique"
+        );
+    }
+
+    #[test]
+    fn load_with_overrides_reports_a_broken_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "sct_preset_broken_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard(dir.clone());
+        std::fs::write(dir.join("bad.json"), "{").unwrap();
+
+        assert!(load_with_overrides(&dir).is_err());
     }
 
     #[test]

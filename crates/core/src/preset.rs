@@ -1032,6 +1032,50 @@ pub fn find_warm_up_drill(
     Ok(drill)
 }
 
+/// Preset files compiled into the binary, so a portable build works with no files beside it.
+const BUNDLED_PRESETS: &[(&str, &str)] = &[
+    ("gt3.json", include_str!("../../../presets/gt3.json")),
+    ("sample.json", include_str!("../../../presets/sample.json")),
+];
+
+/// Parses the presets compiled into the binary, sorted by file name.
+///
+/// # Errors
+///
+/// Returns [`PresetError::InFile`] if an embedded file fails to parse or validate.
+pub fn bundled_presets() -> Result<Vec<Preset>, PresetError> {
+    BUNDLED_PRESETS
+        .iter()
+        .map(|(name, json)| {
+            parse_preset(json).map_err(|source| PresetError::InFile {
+                path: PathBuf::from(name),
+                source: Box::new(source),
+            })
+        })
+        .collect()
+}
+
+/// Returns the bundled presets, with the presets in `dir` added on top.
+///
+/// A file in `dir` replaces the bundled preset with the same id. A missing `dir`
+/// is not an error: the bundled presets alone are returned.
+///
+/// # Errors
+///
+/// Returns the error from [`bundled_presets`] or, when `dir` exists, from [`load_dir`].
+pub fn load_with_overrides(dir: &Path) -> Result<Vec<Preset>, PresetError> {
+    let mut presets = bundled_presets()?;
+    if dir.is_dir() {
+        for preset in load_dir(dir)? {
+            match presets.iter_mut().find(|p| p.id == preset.id) {
+                Some(slot) => *slot = preset,
+                None => presets.push(preset),
+            }
+        }
+    }
+    Ok(presets)
+}
+
 /// Loads and validates all preset files from a directory.
 ///
 /// Reads every `*.json` file in `dir` (non-recursively), sorted by file name.
@@ -2017,6 +2061,15 @@ mod tests {
         assert!((trace.tolerance_fraction() - 0.06).abs() < 1e-6);
         let curve = trace.trace_curve().unwrap();
         assert_eq!(curve.duration_ms(), 1500);
+    }
+
+    #[test]
+    fn bundled_presets_load_without_a_directory() {
+        let presets = bundled_presets().expect("embedded presets are valid");
+        assert!(presets.iter().any(|p| p.id == "gt3"));
+        let missing = std::env::temp_dir().join("sct-no-such-presets-dir");
+        let with = load_with_overrides(&missing).expect("missing dir is not an error");
+        assert_eq!(with.len(), presets.len());
     }
 
     #[test]

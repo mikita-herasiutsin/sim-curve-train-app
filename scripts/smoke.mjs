@@ -772,7 +772,7 @@ async function main() {
       totals.every((t) => t >= 95),
       `rep totals ${totals.join(",")} are not all >= 95`,
     );
-    const summaryGrade = snap.summary.match(/Average:\s*\d+\s*\((\w)\)/)?.[1];
+    const summaryGrade = snap.summary.match(/Average:\s*\d+\s*([SABCD])\b/)?.[1];
     assert(summaryGrade === "S", `set grade ${summaryGrade}, expected S`);
 
     // The drill page saves the finished set. The save is async, so poll for it.
@@ -1345,11 +1345,13 @@ async function main() {
       `[...document.querySelectorAll(".warm-up-table tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent.trim()))`,
     );
     assert(rows.length === 4, `expected 4 rows in warm-up summary, got ${rows.length}`);
-    const row1Score = Number(rows[0][1]);
+    // A score cell reads "<score> <grade letter>", e.g. "100 S".
+    const row1 = rows[0][1].match(/^(\d+)\s*([SABCD])$/);
     assert(
-      !Number.isNaN(row1Score) && row1Score >= 90,
-      `expected row 1 score to be a number >= 90, got ${rows[0][1]}`,
+      row1 !== null && Number(row1[1]) >= 90 && (row1[2] === "S" || row1[2] === "A"),
+      `expected row 1 to read a score >= 90 with grade S or A, got ${rows[0][1]}`,
     );
+    const row1Score = Number(row1[1]);
     for (let i = 1; i < 4; i++) {
       assert(
         rows[i][1] === "Skipped",

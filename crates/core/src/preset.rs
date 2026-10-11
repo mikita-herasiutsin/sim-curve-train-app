@@ -2077,8 +2077,9 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets");
         let mut on_disk: Vec<String> = std::fs::read_dir(dir)
             .unwrap()
-            .map(|e| e.unwrap().file_name().into_string().unwrap())
-            .filter(|n| n.ends_with(".json"))
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().and_then(std::ffi::OsStr::to_str) == Some("json"))
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
             .collect();
         on_disk.sort();
         let embedded: Vec<String> = BUNDLED_PRESETS

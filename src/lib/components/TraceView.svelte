@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from "svelte";
   import { pedalStream, type PedalStream } from "$lib/pedals/stream";
   import { readThemeColors, type AppThemeColors } from "$lib/pedals/theme";
-  import { onThemeChange, type TraceViewMode } from "$lib/settings";
+  import { DEFAULT_TRACE_VIEW, onThemeChange, type TraceViewMode } from "$lib/settings";
   import { toleranceOf, type TraceDrill } from "$lib/drill";
   import {
     drawTrace,
@@ -33,7 +33,7 @@
     active,
     countdownEndsUs = 0,
     countingDown = false,
-    mode = "playhead",
+    mode = DEFAULT_TRACE_VIEW,
   }: Props = $props();
 
   let lastShownStartUs = 0;

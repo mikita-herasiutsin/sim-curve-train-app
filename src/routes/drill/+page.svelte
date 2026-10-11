@@ -107,6 +107,9 @@
   let errorMessage = $state<string | null>(null);
   // Set once the user aborts; the engine still ends the set with a final `setFinished`.
   let aborting = $state(false);
+  // The warm-up step (0-based) whose set is on screen. `warmUp.index` moves on as soon as the set
+  // finishes, so the run panel reads this instead.
+  let runStepIndex = $state(0);
 
   // The target band on the graph, while a hold rep is active or during the GO second.
   const graphBand = $derived<TargetBand | null>(
@@ -305,6 +308,7 @@
       warmUp,
     };
     activeRecord = record;
+    runStepIndex = warmUp?.index ?? 0;
     // The engine ends every run with `setFinished`: after the last rep, on abort, and when the
     // stream stops. The record is saved then, even for a run the screen has given up on.
     const onEvent = (e: DrillEvent) => {
@@ -790,7 +794,7 @@
             <p class="run-drill" data-testid="run-drill">{selectedDrill?.name}</p>
             <p class="run-preset" data-testid="run-preset">
               {selectedPreset?.name}{warmUp
-                ? ` · warm-up, drill ${warmUp.index + 1} of ${warmUp.plan.drills.length}`
+                ? ` · warm-up, drill ${runStepIndex + 1} of ${warmUp.plan.drills.length}`
                 : ""}
             </p>
             <h3>Rep {view.currentRep + 1} / {selectedDrill?.reps}</h3>
@@ -920,11 +924,9 @@
               <div class="rep-totals">
                 {#each view.reps as r (r.rep)}
                   <span class="rep-pill"
-                    >#{r.rep + 1}: {r.total === null
-                      ? "failed"
-                      : Math.round(r.total)}{#if r.total !== null}
-                      <span class="grade-letter grade-{gradeOf(r.total)}">{gradeOf(r.total)}</span>
-                    {/if}</span
+                    >#{r.rep + 1}: {#if r.total === null}failed{:else}{Math.round(r.total)}
+                      <span class="grade-letter grade-{gradeOf(r.total)}">{gradeOf(r.total)}</span
+                      >{/if}</span
                   >
                 {/each}
               </div>

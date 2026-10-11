@@ -31,10 +31,6 @@ fn current_app_info(app: &tauri::AppHandle) -> AppInfo {
     {
         info.sim_pedals = sim_pedals::enabled_by_env();
     }
-    #[cfg(not(debug_assertions))]
-    {
-        info.sim_pedals = false;
-    }
     info
 }
 
@@ -413,13 +409,18 @@ fn audio_set_volume(volume: f32, audio: tauri::State<'_, AudioFeedback>) {
 /// The absolute `SCT_DATA_DIR` a debug build uses instead of the app data directory.
 #[cfg(debug_assertions)]
 fn data_dir_override() -> Option<std::path::PathBuf> {
-    let dir = std::path::PathBuf::from(std::env::var_os("SCT_DATA_DIR")?);
-    if dir.is_absolute() {
-        Some(dir)
-    } else {
-        eprintln!("ignoring SCT_DATA_DIR: it must be an absolute path");
-        None
-    }
+    static CACHE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let dir = std::path::PathBuf::from(std::env::var_os("SCT_DATA_DIR")?);
+            if dir.is_absolute() {
+                Some(dir)
+            } else {
+                eprintln!("ignoring SCT_DATA_DIR: it must be an absolute path");
+                None
+            }
+        })
+        .clone()
 }
 
 #[cfg(not(debug_assertions))]
@@ -427,24 +428,44 @@ fn data_dir_override() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Arguments that make `git rev-parse` print the worktree path, the full commit hash and the
+/// branch, one per line. `rev-parse` prints `--show-toplevel` when it parses it, and
+/// `--abbrev-ref` applies to every later revision, so the order matters.
 #[cfg(debug_assertions)]
-fn run_git_cmd(args: &[&str]) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(env!("CARGO_MANIFEST_DIR"))
-        .args(args)
-        .output()
-        .ok()?;
-    if !output.status.success() {
+const GIT_BUILD_ARGS: [&str; 5] = [
+    "rev-parse",
+    "--show-toplevel",
+    "HEAD",
+    "--abbrev-ref",
+    "HEAD",
+];
+
+/// Parses the output of `git` with [`GIT_BUILD_ARGS`]: worktree path, full hash, branch.
+#[cfg_attr(
+    not(debug_assertions),
+    expect(dead_code, reason = "release builds report no git state")
+)]
+fn parse_build_info(output: &str) -> Option<BuildInfo> {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let &[toplevel, hash, branch] = lines.as_slice() else {
         return None;
-    }
-    let text = String::from_utf8(output.stdout).ok()?;
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
+    };
+    let commit = hash.get(..7)?;
+    let branch = if branch == "HEAD" { "detached" } else { branch };
+    let worktree = toplevel
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())?;
+    Some(BuildInfo {
+        branch: branch.to_owned(),
+        commit: commit.to_owned(),
+        worktree: worktree.to_owned(),
+    })
 }
 
 #[cfg(debug_assertions)]
@@ -452,18 +473,16 @@ fn build_info() -> Option<BuildInfo> {
     static CACHE: std::sync::OnceLock<Option<BuildInfo>> = std::sync::OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let branch = run_git_cmd(&["rev-parse", "--abbrev-ref", "HEAD"])?;
-            let commit = run_git_cmd(&["rev-parse", "--short", "HEAD"])?;
-            let toplevel = run_git_cmd(&["rev-parse", "--show-toplevel"])?;
-            let worktree = std::path::Path::new(toplevel.trim_end_matches(['/', '\\']))
-                .file_name()?
-                .to_str()?
-                .to_owned();
-            Some(BuildInfo {
-                branch,
-                commit,
-                worktree,
-            })
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(env!("CARGO_MANIFEST_DIR"))
+                .args(GIT_BUILD_ARGS)
+                .output()
+                .ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            parse_build_info(&String::from_utf8(output.stdout).ok()?)
         })
         .clone()
 }
@@ -576,4 +595,67 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_build_info;
+
+    const HASH: &str = "0e9d0d84ee53946f1f8074281ef53683ca496265";
+
+    #[test]
+    fn parses_branch_commit_and_worktree() {
+        let info = parse_build_info(&format!(
+            "D:/workspace/projects/sct-wt-ui-polish\n{HASH}\nui-polish\n"
+        ))
+        .expect("three lines parse");
+        assert_eq!(info.branch, "ui-polish");
+        assert_eq!(info.commit, "0e9d0d8");
+        assert_eq!(info.worktree, "sct-wt-ui-polish");
+    }
+
+    #[test]
+    fn detached_head_is_named_detached() {
+        let info =
+            parse_build_info(&format!("D:/workspace/sct-wt-x\n{HASH}\nHEAD\n")).expect("parses");
+        assert_eq!(info.branch, "detached");
+        assert_eq!(info.commit, "0e9d0d8");
+        assert_eq!(info.worktree, "sct-wt-x");
+    }
+
+    #[test]
+    fn windows_path_with_trailing_separator_uses_last_component() {
+        let info =
+            parse_build_info(&format!("D:\\a\\sct-wt-x\\\r\n{HASH}\r\nmain\r\n")).expect("parses");
+        assert_eq!(info.worktree, "sct-wt-x");
+    }
+
+    #[test]
+    fn two_lines_are_rejected() {
+        assert_eq!(parse_build_info(&format!("D:/a/x\n{HASH}\n")), None);
+    }
+
+    /// Runs the real `git` call, so a change to the argument order that breaks the line order
+    /// fails here.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn real_git_output_parses() {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(env!("CARGO_MANIFEST_DIR"))
+            .args(super::GIT_BUILD_ARGS)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git rev-parse failed");
+        let info = parse_build_info(&String::from_utf8(output.stdout).unwrap()).expect("parses");
+        assert_eq!(info.commit.len(), 7);
+        assert!(info.commit.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!info.worktree.contains(['/', '\\']));
+    }
+
+    #[test]
+    fn empty_output_is_rejected() {
+        assert_eq!(parse_build_info(""), None);
+        assert_eq!(parse_build_info("\n \n"), None);
+    }
 }

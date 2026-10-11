@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use sct_core::preset::{DrillKind, parse_preset};
+use sct_core::preset::{DEFAULT_LEAD_IN_MS, DrillKind, parse_preset};
 
 use crate::csv::{LapTelemetry, parse_filename_metadata, parse_lap_time_str, read_csv_file};
 use crate::extract::{ExtractOptions, extract_preset_from_laps, extract_with_warnings};
@@ -570,6 +570,7 @@ fn test_corner_grouping_and_options() {
     // All drills should omit tolerance (None)
     for drill in &preset.drills {
         assert_eq!(drill.tolerance, None);
+        assert_eq!(drill.lead_in_ms, DEFAULT_LEAD_IN_MS);
         assert!((drill.tolerance_fraction() - 0.10).abs() < 1e-4);
         assert!(drill.id.starts_with("track-name-c"));
     }

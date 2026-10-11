@@ -40,7 +40,7 @@ describe("AppHeader", () => {
     render(AppHeader);
 
     const buildInfo = await screen.findByTestId("build-info");
-    expect(buildInfo).toHaveTextContent("ui-polish @ abc1234");
+    expect(buildInfo).toHaveTextContent("ui-polish @ abc1234 · sct-wt-ui-polish");
     expect(buildInfo).toHaveAttribute("title", "Worktree: sct-wt-ui-polish");
 
     const testData = screen.getByTestId("test-data-badge");

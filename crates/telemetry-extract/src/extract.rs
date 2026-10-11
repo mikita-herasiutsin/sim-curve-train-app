@@ -1,6 +1,6 @@
 //! Extraction of pedal zones into validated preset JSON drills.
 
-use sct_core::preset::{Drill, DrillKind, Pedal, Preset, SCHEMA_VERSION};
+use sct_core::preset::{DEFAULT_LEAD_IN_MS, Drill, DrillKind, Pedal, Preset, SCHEMA_VERSION};
 use std::path::Path;
 
 use crate::csv::LapTelemetry;
@@ -183,7 +183,7 @@ fn corner_drills(
         name,
         pedal,
         reps: 5,
-        lead_in_ms: 4000,
+        lead_in_ms: DEFAULT_LEAD_IN_MS,
         tolerance: options.tolerance,
         decimals: None,
         throttle_lead_in: None,

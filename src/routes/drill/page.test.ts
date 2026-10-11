@@ -311,6 +311,9 @@ describe("Drill page", () => {
     expect(pills[0].querySelector(".grade-letter")).toHaveTextContent("B");
     expect(pills[1]).toHaveTextContent("#2: 90");
     expect(pills[1].querySelector(".grade-letter")).toHaveTextContent("A");
+    // The grade letter is separated from the number by a space: "#1: 70 B".
+    expect(pills[0].textContent).toMatch(/^#1: \d+ [SABCD]$/);
+    expect(pills[1].textContent).toMatch(/^#2: \d+ [SABCD]$/);
   });
 
   // Field names and shapes exactly as sct_core::scoring::HoldScore serializes them.
@@ -1221,8 +1224,21 @@ describe("Drill page", () => {
     expect(within(summaryElem).getByText("Hold Drill 2")).toBeInTheDocument();
     expect(within(summaryElem).getByText("Skipped")).toBeInTheDocument();
 
+    // The scored row shows the grade letter for 82 (B); the skipped row has none.
+    const scoredRow = within(summaryElem).getByText("Hold Drill 1").closest("tr")!;
+    const rowLetter = scoredRow.querySelector(".grade-letter");
+    expect(rowLetter).toHaveTextContent("B");
+    expect(rowLetter).toHaveClass("grade-B");
+    expect(
+      within(summaryElem).getByText("Hold Drill 2").closest("tr")!.querySelector(".grade-letter"),
+    ).toBeNull();
+
     const scoreElem = screen.getByTestId("warm-up-score");
     expect(scoreElem).toHaveTextContent("41");
+    // The overall score of 41 is grade D, shown next to the total.
+    const overallLetter = summaryElem.querySelector(".warm-up-overall .grade-letter");
+    expect(overallLetter).toHaveTextContent("D");
+    expect(overallLetter).toHaveClass("grade-D");
     expect(screen.getByText("Skipped drills count as 0.")).toBeInTheDocument();
 
     expect(await screen.findByText("Saved.")).toBeInTheDocument();
@@ -1232,6 +1248,36 @@ describe("Drill page", () => {
       { drillId: "warmup-hold-1", reps: 2, skipped: false, attemptId: 1, score: 82.0 },
       { drillId: "warmup-hold-2", reps: 3, skipped: true, attemptId: null, score: null },
     ]);
+  });
+
+  it("keeps the warm-up step number on the run panel after the set finishes", async () => {
+    presetsList = [warmUpPreset];
+    mockUrl = new URL("http://localhost/drill?preset=warmup-preset&warmup=1");
+    render(DrillPage);
+
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    expect(screen.getByTestId("run-preset")).toHaveTextContent("drill 1 of 2");
+
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: { ...holdScore, total: 80.0 } });
+    drillChannel!.onmessage({ event: "repScored", rep: 1, score: { ...holdScore, total: 84.0 } });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: {
+        repTotals: [80.0, 84.0],
+        best: 84.0,
+        average: 82.0,
+        grade: "B",
+        consistency: 95.0,
+        stdDev: 2.0,
+      },
+    });
+
+    // Next Drill appears once the finished step is recorded, which moves warmUp.index on.
+    const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
+    await waitFor(() => expect(nextBtn).toBeEnabled());
+    expect(screen.getByTestId("run-preset")).toHaveTextContent("drill 1 of 2");
+    expect(screen.getByTestId("run-preset")).not.toHaveTextContent("drill 2 of 2");
   });
 
   it("Skip during a set aborts the run and records the step as skipped with the attempt id of the saved partial set", async () => {

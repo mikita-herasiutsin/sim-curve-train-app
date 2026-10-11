@@ -103,7 +103,8 @@
       {#if info.build}<span
           class="badge"
           data-testid="build-info"
-          title="Worktree: {info.build.worktree}">{info.build.branch} @ {info.build.commit}</span
+          title="Worktree: {info.build.worktree}"
+          >{info.build.branch} @ {info.build.commit} · {info.build.worktree}</span
         >{/if}
       {#if info.testData}<span class="badge badge--warn" data-testid="test-data-badge"
           >TEST DATA</span
@@ -188,7 +189,7 @@
     border-radius: 999px;
     color: var(--text-muted);
     font-size: 0.8125rem;
-    max-width: 16rem;
+    max-width: 24rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

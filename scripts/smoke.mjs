@@ -856,6 +856,13 @@ async function main() {
       { timeout: 15_000, interval: 50, what: "GO in the countdown overlay" },
     );
     assert((await traceMode()) === "ghost", "trace view is not in ghost mode at GO");
+    const runDrill = await ev(
+      `document.querySelector('[data-testid="run-drill"]')?.textContent.trim() ?? null`,
+    );
+    assert(
+      runDrill === drill.name,
+      `run panel shows ${JSON.stringify(runDrill)}, expected ${JSON.stringify(drill.name)}`,
+    );
     await waitFor(nowLineDrawn, { timeout: 5_000, what: "the ghost now-line on the canvas" });
     await waitFor(
       () =>
@@ -1138,6 +1145,20 @@ async function main() {
     assert(
       cardCount === playable.length,
       `home lists ${cardCount} presets, expected ${playable.length}`,
+    );
+    // The header badges: the smoke run uses a throwaway data dir and simulated pedals.
+    for (const badge of ["test-data-badge", "sim-pedals-badge"]) {
+      assert(
+        await ev(`Boolean(document.querySelector('[data-testid="${badge}"]'))`),
+        `header has no ${badge}`,
+      );
+    }
+    const buildText = await ev(
+      `document.querySelector('[data-testid="build-info"]')?.textContent ?? ""`,
+    );
+    assert(
+      buildText.includes(" @ "),
+      `build-info reads ${JSON.stringify(buildText)}, expected "<branch> @ <commit> · <worktree>"`,
     );
     const names = await ev(
       `[...document.querySelectorAll(".preset-name")].map((e) => e.textContent.trim())`,

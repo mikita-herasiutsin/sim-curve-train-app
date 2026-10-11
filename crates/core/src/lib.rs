@@ -64,7 +64,10 @@ impl AppInfo {
     pub fn window_title(&self) -> Option<String> {
         let mut parts = vec![self.name.clone()];
         if let Some(build) = &self.build {
-            parts.push(format!("{} @ {}", build.branch, build.commit));
+            parts.push(format!(
+                "{} @ {} ({})",
+                build.branch, build.commit, build.worktree
+            ));
         }
         if self.test_data {
             parts.push("TEST DATA".to_string());
@@ -146,7 +149,7 @@ mod tests {
         });
         assert_eq!(
             info.window_title(),
-            Some("SimCurveTrainApp · main @ abc1234".to_string())
+            Some("SimCurveTrainApp · main @ abc1234 (sct)".to_string())
         );
     }
 
@@ -162,7 +165,7 @@ mod tests {
         info.sim_pedals = true;
         assert_eq!(
             info.window_title(),
-            Some("SimCurveTrainApp · main @ abc1234 · TEST DATA · SIM PEDALS".to_string())
+            Some("SimCurveTrainApp · main @ abc1234 (sct) · TEST DATA · SIM PEDALS".to_string())
         );
     }
 

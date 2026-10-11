@@ -78,4 +78,14 @@ describe("Live page (page.test.ts)", () => {
     expect(toggleBtn).toHaveAttribute("aria-pressed", "false");
     expect(screen.queryByTestId("latency-hint")).not.toBeInTheDocument();
   });
+
+  it("hides the latency check toggle in a release build", async () => {
+    vi.stubEnv("DEV", false);
+    try {
+      render(LivePage);
+      expect(screen.queryByTestId("latency-toggle")).toBeNull();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

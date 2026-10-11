@@ -28,7 +28,7 @@ Every drill shares a set of common fields, plus specific fields determined by th
 | `type` | string | Required | `"hold"` or `"trace"` | Kind of practice drill. |
 | `pedal` | string | Required | `"throttle"`, `"brake"`, `"clutch"` | Target pedal hardware axis to monitor. |
 | `reps` | integer | Optional (default: `5`) | `1` to `50` | Number of repetitions to complete the drill. |
-| `leadInMs` | integer | Optional (default: `3000`) | `1000` to `10000` | Lead-in preparation countdown before each repetition in milliseconds. GO shows for its last 1000 ms. |
+| `leadInMs` | integer | Optional (default: `4000`) | `1000` to `10000` | Lead-in preparation countdown before each repetition in milliseconds. GO shows for its last 1000 ms. |
 | `tolerance` | number | Optional (default: `10`, D-17) | `0.5` to `50.0` | Half-width of the tolerance band in percentage points: `5` means the target ±5%. |
 | `decimals` | integer | Optional (default: `0`) | `0` or `1` | Digits after the decimal point when the UI shows percentages for this drill. |
 | `throttleLeadIn` | object | Optional | `level`: `20` to `100`, `holdMs`: `500` to `5000`, `liftMs` (optional, default `300`): `0` to `3000` | Requires holding the throttle at a set level before starting a brake repetition (see [Throttle lead-in](#throttle-lead-in)). |

@@ -2073,6 +2073,55 @@ mod tests {
     }
 
     #[test]
+    fn bundled_presets_list_every_file_in_presets_dir() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../presets");
+        let mut on_disk: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".json"))
+            .collect();
+        on_disk.sort();
+        let embedded: Vec<String> = BUNDLED_PRESETS
+            .iter()
+            .map(|(n, _)| (*n).to_string())
+            .collect();
+        assert_eq!(embedded, on_disk, "add new preset files to BUNDLED_PRESETS");
+    }
+
+    #[test]
+    fn load_with_overrides_replaces_by_id_and_adds_new() {
+        let dir = std::env::temp_dir().join(format!(
+            "sct_preset_override_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _guard = TempDirGuard(dir.clone());
+
+        let mut replaced = valid_preset();
+        replaced.id = "gt3".to_string();
+        replaced.name = "GT3 local".to_string();
+        let mut added = valid_preset();
+        added.id = "local-extra".to_string();
+        std::fs::write(
+            dir.join("a.json"),
+            serde_json::to_string(&replaced).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("b.json"), serde_json::to_string(&added).unwrap()).unwrap();
+
+        let bundled = bundled_presets().unwrap();
+        let loaded = load_with_overrides(&dir).unwrap();
+        assert_eq!(loaded.len(), bundled.len() + 1);
+        let gt3 = loaded.iter().find(|p| p.id == "gt3").unwrap();
+        assert_eq!(gt3.name, "GT3 local");
+        assert!(loaded.iter().any(|p| p.id == "local-extra"));
+    }
+
+    #[test]
     fn sample_json_file_is_valid() {
         let json = include_str!("../../../presets/sample.json");
         let preset = parse_preset(json).expect("presets/sample.json must be valid");

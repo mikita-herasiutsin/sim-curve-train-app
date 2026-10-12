@@ -1,6 +1,6 @@
 # MVP Backlog (v0.1.0)
 
-Each ticket is a **small, working slice**: when it is done there is something you can run and see or test. Sizes: **S** is about half a day to a day, **M** is 1–3 days. Tickets are listed in rough implementation order. `Deps` lists the tickets that must be finished first.
+Each ticket is a **small, working slice**: when it is done there is something you can run and see or test. Sizes: **S** is about half a day to a day, **M** is 1-3 days. Tickets are listed in rough implementation order. `Deps` lists the tickets that must be finished first.
 
 Status: ⬜ todo · 🟨 in progress · ✅ done
 
@@ -8,12 +8,12 @@ Status: ⬜ todo · 🟨 in progress · ✅ done
 
 | Milestone | Tickets | Outcome |
 |---|---|---|
-| **M0 Foundation** | SCT-001 – SCT-003 | Empty app builds locally, CI is green, and a tag produces an `.exe` |
-| **M1 See my pedals** (risk spike) | SCT-010 – SCT-015, SCT-020 – SCT-022 | VNM pedals detected and calibrated; live bars and graph; latency measured |
-| **M2 First drill** | SCT-030 – SCT-033, SCT-038 | Hold drill with reps, scoring, results and audio |
-| **M3 Traces** | SCT-034 – SCT-037 | Trace drills in both views with scoring |
-| **M4 Content** | SCT-040 – SCT-046 | GT3, NASCAR, MX-5 and Caterham presets and the pre-race warm-up |
-| **M5 Progress & release** | SCT-023, SCT-050 – SCT-051, SCT-060 – SCT-062 | Personal bests and leaderboard, theme, onboarding, v0.1.0 release |
+| **M0 Foundation** | SCT-001 to SCT-003 | Empty app builds locally, CI is green, and a tag produces an `.exe` |
+| **M1 See my pedals** (risk spike) | SCT-010 to SCT-015, SCT-020 to SCT-022 | VNM pedals detected and calibrated; live bars and graph; latency measured |
+| **M2 First drill** | SCT-030 to SCT-033, SCT-038 | Hold drill with reps, scoring, results and audio |
+| **M3 Traces** | SCT-034 to SCT-037 | Trace drills in both views with scoring |
+| **M4 Content** | SCT-040 to SCT-046 | GT3, NASCAR, MX-5 and Caterham presets and the pre-race warm-up |
+| **M5 Progress & release** | SCT-023, SCT-050 to SCT-051, SCT-060 to SCT-062 | Personal bests and leaderboard, theme, onboarding, v0.1.0 release |
 
 ---
 
@@ -76,7 +76,7 @@ Prompts: "Press **brake** fully and release", then the same for throttle (clutch
 - **Deps:** SCT-011
 
 ### SCT-014 · Calibration (min/max, invert, deadzone) ✅ · S
-Sweep each pedal to capture its range. Set invert and a deadzone at the low and high ends. Output is 0–100% (the value the game sees).
+Sweep each pedal to capture its range. Set invert and a deadzone at the low and high ends. Output is 0-100% (the value the game sees).
 - **AC:**
   - A released pedal reads 0%, a fully pressed pedal reads 100%.
   - Deadzones work.
@@ -177,7 +177,7 @@ A brake drill starts with the throttle pressed, as on track: the user holds the 
 
 ## M4: Content
 
-### SCT-040 · Preset picker ⬜ · S
+### SCT-040 · Preset picker ✅ · S
 A home screen shows the preset cards (GT3, NASCAR and Road/MX-5). Opening a card lists its drills with type, pedal and best score; clicking a drill starts it.
 - **AC:** presets are loaded from bundled JSON; the last preset used is remembered.
 - **Deps:** SCT-030, SCT-033
@@ -186,7 +186,7 @@ A home screen shows the preset cards (GT3, NASCAR and Road/MX-5). Opening a card
 A Rust workspace binary tool at `crates/telemetry-extract` (re-scoped from Python `.ibt` script to Garage 61 CSV exports; native `.ibt` support deferred as a post-MVP follow-up):
 1. Reads Garage 61 60 Hz CSV exports and parses car/track/lap time metadata.
 2. Finds brake zones (hysteresis thresholds, duration gating, gap merging), lift zones, and throttle exit zones (from throttle minimum after braking to sustained $\ge 98\%$).
-3. Normalises coordinates and simplifies curves using RDP into 5–15 points.
+3. Normalises coordinates and simplifies curves using RDP into 5-15 points.
 4. Outputs validated draft drill JSON (trace drills and plateau hold drills) via `sct-core` validation.
 5. Computes statistical pedal metrics (`stats` subcommand) per car reporting median and IQR (and JSON).
 
@@ -220,7 +220,7 @@ Same structure as GT3, from the Caterham 420R laps (light car, short sharp brake
 - **Deps:** SCT-044, SCT-036
 
 ### SCT-045 · Pre-race warm-up ✅ · M
-One button on each preset card runs a 3–5 minute routine: a chain of the preset's drills with the warm-up's own rep counts (D-25). It ends with a summary.
+One button on each preset card runs a 3-5 minute warm-up: a chain of the preset's drills with the warm-up's own rep counts (D-25). It ends with a summary.
 - **AC:** the routine is defined in the preset JSON ([D-19](../decisions/README.md)); you can skip a drill; the summary shows a score per drill and an overall warm-up score; each warm-up run is saved (per-drill scores and the overall score) for the per-warm-up leaderboard in SCT-051.
 - **Status:** a preset defines its warm-up in a `warmUp` block ([preset format](../preset-format.md)); the GT3 and Sample presets have one. Each step has its own rep count and the chain is validated to an estimated 3-5 minutes ([D-25](../decisions/README.md)). The overall score is the mean of the set averages, with skipped drills counted as 0 ([D-26](../decisions/README.md)). Finished runs go to the `warm_up_run` and `warm_up_step` tables (migration 3); a run left halfway is not stored, though its sets are.
 - **Deps:** SCT-040, at least one preset

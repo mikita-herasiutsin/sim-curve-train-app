@@ -21,7 +21,8 @@
     "rust:fmt": "cargo fmt --all --check",
     "rust:lint": "cargo clippy --workspace --all-targets --locked -- -D warnings",
     "rust:test": "cargo test --workspace --locked",
-    "verify": "npm run check && npm run lint && npm run test && npm run rust:fmt && npm run rust:lint && npm run rust:test",
+    "verify": "npm run check && npm run lint && npm run test && npm run rust:fmt && npm run rust:lint && npm run rust:test && npm run docs:check",
+    "docs:check": "node scripts/check-docs.mjs",
     "tauri": "tauri",
     "smoke": "node scripts/smoke.mjs",
     "release": "node scripts/release.mjs"

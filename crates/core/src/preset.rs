@@ -604,7 +604,7 @@ fn is_valid_id(id: &str) -> bool {
 #[derive(Clone, Debug)]
 pub struct TraceCurve {
     points: Vec<(u32, f32)>,
-    /// Final Fritsch–Carlson tangent at each point, in fraction per ms.
+    /// Final Fritsch-Carlson tangent at each point, in fraction per ms.
     tangents: Vec<f64>,
 }
 
@@ -636,7 +636,7 @@ impl TraceCurve {
         &self.points
     }
 
-    /// Computes the target value at `t_ms` by monotone cubic (Fritsch–Carlson) interpolation
+    /// Computes the target value at `t_ms` by monotone cubic (Fritsch-Carlson) interpolation
     /// with zero slope at both ends, so the curve is rounded and never overshoots its points.
     ///
     /// Timestamps outside `[0, duration]` are clamped to the first or last point value.
@@ -787,7 +787,7 @@ fn sliding_extreme(grid: &[f32], window: usize, drop: fn(f32, f32) -> bool) -> V
     out
 }
 
-/// Final Fritsch–Carlson tangents at each point of `points`, in fraction per ms, with zero
+/// Final Fritsch-Carlson tangents at each point of `points`, in fraction per ms, with zero
 /// slope at both ends. One sequential pass: limiting segment `j` may lower the tangents at
 /// both of its ends, and after it `m_j` is final.
 fn fritsch_carlson_tangents(points: &[(u32, f32)]) -> Vec<f64> {

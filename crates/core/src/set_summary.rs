@@ -23,7 +23,7 @@ pub struct SetSummary {
     pub average: f32,
     /// Grade of the average total.
     pub grade: Grade,
-    /// 0–100; 100 when all reps scored the same. `None` with fewer than two reps.
+    /// 0-100; 100 when all reps scored the same. `None` with fewer than two reps.
     pub consistency: Option<f32>,
     /// Population standard deviation of the rep totals.
     pub std_dev: f32,

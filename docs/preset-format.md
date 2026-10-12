@@ -2,7 +2,7 @@
 
 Preset files define collections of sim-racing pedal drills (such as threshold braking, trail-off traces, or throttle modulation) with configurable repetitions, preparation countdowns, and tolerances.
 
-Files use JSON. The app ships its presets in the bundled `presets/` folder (importing your own files is planned, see SCT-081). All keys use `camelCase`. Values are expressed in human-readable units: pedal travel is given in percent (`0` to `100`) and durations in milliseconds (`ms`). Unknown keys are strictly rejected.
+Files use JSON. The app compiles the files in `presets/` into the exe (`BUNDLED_PRESETS` in `crates/core/src/preset.rs`). A `presets/` folder next to the exe replaces the bundled preset with the same `id` and adds any other preset in it. Importing your own files from the UI is planned (SCT-081). All keys use `camelCase`. Values are expressed in human-readable units: pedal travel is given in percent (`0` to `100`) and durations in milliseconds (`ms`). Unknown keys are strictly rejected.
 
 ## Top-Level Preset Fields
 
@@ -207,88 +207,6 @@ The parser validates all presets strictly upon loading:
 12. Unknown fields are rejected at both the preset and drill level.
 13. Directories loaded via the directory loader must not contain duplicate preset IDs across different files.
 
-## Sample Preset
+## Sample preset
 
-Here is the complete `presets/sample.json` file included with the repository:
-
-```json
-{
-  "schemaVersion": 1,
-  "id": "sample",
-  "name": "Sample",
-  "description": "Sample threshold braking and throttle control drills.",
-  "drills": [
-    {
-      "id": "brake-hold-70",
-      "name": "Brake hold 70%",
-      "type": "hold",
-      "pedal": "brake",
-      "target": 70,
-      "tolerance": 5,
-      "holdMs": 2000,
-      "reps": 5,
-      "leadInMs": 3000
-    },
-    {
-      "id": "throttle-hold-50",
-      "name": "Throttle hold 50%",
-      "type": "hold",
-      "pedal": "throttle",
-      "target": 50,
-      "tolerance": 5,
-      "holdMs": 2000,
-      "reps": 5,
-      "leadInMs": 3000
-    },
-    {
-      "id": "hairpin",
-      "name": "Hairpin trace",
-      "type": "trace",
-      "pedal": "brake",
-      "tolerance": 6,
-      "reps": 5,
-      "leadInMs": 2000,
-      "points": [
-        [0, 0],
-        [150, 100],
-        [300, 95],
-        [600, 70],
-        [1000, 40],
-        [1500, 0]
-      ]
-    },
-    {
-      "id": "throttle-rolling-start-35",
-      "name": "Rolling start: throttle hold 35%",
-      "type": "hold",
-      "pedal": "throttle",
-      "target": 35,
-      "tolerance": 2,
-      "decimals": 1,
-      "holdMs": 10000,
-      "reps": 3,
-      "leadInMs": 3000
-    }
-  ],
-  "warmUp": {
-    "steps": [
-      {
-        "drill": "brake-hold-70",
-        "reps": 12
-      },
-      {
-        "drill": "throttle-hold-50",
-        "reps": 12
-      },
-      {
-        "drill": "hairpin",
-        "reps": 12
-      },
-      {
-        "drill": "throttle-rolling-start-35",
-        "reps": 4
-      }
-    ]
-  }
-}
-```
+[`presets/sample.json`](../presets/sample.json) is a complete example: hold and trace drills for both pedals, a brake trace with a throttle lead-in, and a warm-up. [`presets/gt3.json`](../presets/gt3.json) is the full GT3 preset.

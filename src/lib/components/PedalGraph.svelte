@@ -3,6 +3,7 @@
   import { pedalStream, type PedalStream } from "$lib/pedals/stream";
   import { readThemeColors, type AppThemeColors } from "$lib/pedals/theme";
   import { onThemeChange } from "$lib/settings";
+  import { createFrameColumns, type FrameColumns } from "$lib/pedals/history";
   import { ColumnDecimator, drawGraph, type TargetBand } from "$lib/pedals/graphDraw";
   import { getGraphX } from "$lib/pedals/geometry";
 
@@ -26,6 +27,7 @@
   let dpr = 1;
   let theme: AppThemeColors | null = null;
   let decimator: ColumnDecimator | null = null;
+  let columns: FrameColumns | null = null;
 
   function updateResolution(): void {
     if (!canvasEl || width <= 0 || height <= 0) return;
@@ -67,10 +69,18 @@
     decimator.reset();
     const cols = decimator.numCols;
 
-    stream.history.forEachSince(tMinUs, (frame) => {
-      const xDevice = Math.floor(getGraphX(frame.t, nowUs, windowUs, cols));
-      decimator?.accumulate(xDevice, frame.brake, frame.throttle);
-    });
+    if (!columns || columns.t.length < stream.history.capacity) {
+      columns = createFrameColumns(stream.history.capacity);
+    }
+
+    const n = stream.history.copySince(tMinUs, columns);
+    for (let i = 0; i < n; i++) {
+      decimator.accumulate(
+        Math.floor(getGraphX(columns.t[i], nowUs, windowUs, cols)),
+        columns.brake[i],
+        columns.throttle[i],
+      );
+    }
 
     drawGraph(
       ctx,

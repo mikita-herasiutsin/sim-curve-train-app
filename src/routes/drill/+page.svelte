@@ -94,7 +94,7 @@
   // Time left in the active trace rep, in ms (0..durationMs), refreshed every frame.
   let remainingMs = $state(0);
   let currentTargetFrac = $state<number | null>(null);
-  let currentRangeFrac = $state<[number, number] | null>(null);
+  let currentRangeFrac = $state.raw<[number, number] | null>(null);
   let currentFrac = $state(0);
   // While remaining > GO_LEAD_MS show the number; while remaining <= GO_LEAD_MS show "GO".
   const countdownText = $derived(

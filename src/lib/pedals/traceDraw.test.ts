@@ -40,12 +40,16 @@ describe("TraceCurve", () => {
     expect(emptyCurve.durationMs).toBe(0);
     expect(emptyCurve.valueAt(500)).toBe(0);
     expect(emptyCurve.envelopeAt(500)).toEqual([0, 0]);
+    expect(emptyCurve.envelopeLo(500)).toBe(emptyCurve.envelopeAt(500)[0]);
+    expect(emptyCurve.envelopeHi(500)).toBe(emptyCurve.envelopeAt(500)[1]);
 
     const singleCurve = new TraceCurve([[100, 60]]);
     expect(singleCurve.durationMs).toBe(100);
     expect(singleCurve.valueAt(50)).toBe(0.6);
     expect(singleCurve.valueAt(200)).toBe(0.6);
     expect(singleCurve.envelopeAt(50)).toEqual([0.6, 0.6]);
+    expect(singleCurve.envelopeLo(50)).toBe(singleCurve.envelopeAt(50)[0]);
+    expect(singleCurve.envelopeHi(50)).toBe(singleCurve.envelopeAt(50)[1]);
   });
 
   it("returns first value for non-finite or timestamps before first point", () => {
@@ -101,30 +105,48 @@ describe("TraceCurve", () => {
     const [lo225, hi225] = curve.envelopeAt(225);
     expect(lo225).toBeCloseTo(0.5, 5);
     expect(hi225).toBeCloseTo(1, 5);
+    expect(curve.envelopeLo(225)).toBe(lo225);
+    expect(curve.envelopeHi(225)).toBe(hi225);
 
     const [lo450, hi450] = curve.envelopeAt(450);
     expect(lo450).toBeCloseTo(0.7, 5);
     expect(hi450).toBeCloseTo(0.95, 5);
+    expect(curve.envelopeLo(450)).toBe(lo450);
+    expect(curve.envelopeHi(450)).toBe(hi450);
 
     const [lo800, hi800] = curve.envelopeAt(800);
     expect(lo800).toBeCloseTo(0.438229, 5);
     expect(hi800).toBeCloseTo(0.661042, 5);
+    expect(curve.envelopeLo(800)).toBe(lo800);
+    expect(curve.envelopeHi(800)).toBe(hi800);
 
     const [lo1250, hi1250] = curve.envelopeAt(1250);
     expect(lo1250).toBeCloseTo(0.0292, 4);
     expect(hi1250).toBeCloseTo(0.3088, 4);
+    expect(curve.envelopeLo(1250)).toBe(lo1250);
+    expect(curve.envelopeHi(1250)).toBe(hi1250);
 
     const [lo1500, hi1500] = curve.envelopeAt(1500);
     expect(lo1500).toBeCloseTo(0, 5);
     expect(hi1500).toBeCloseTo(0.061988, 5);
+    expect(curve.envelopeLo(1500)).toBe(lo1500);
+    expect(curve.envelopeHi(1500)).toBe(hi1500);
 
     // Before the rep the envelope only reaches values within the window
     expect(curve.envelopeAt(-500)).toEqual([0, 0]);
+    expect(curve.envelopeLo(-500)).toBe(0);
+    expect(curve.envelopeHi(-500)).toBe(0);
     expect(curve.envelopeAt(-1000)).toEqual([0, 0]);
+    expect(curve.envelopeLo(-1000)).toBe(0);
+    expect(curve.envelopeHi(-1000)).toBe(0);
     const [loPre, hiPre] = curve.envelopeAt(-100);
     expect(loPre).toBe(0);
     expect(hiPre).toBeCloseTo(curve.valueAt(50), 9);
+    expect(curve.envelopeLo(-100)).toBe(loPre);
+    expect(curve.envelopeHi(-100)).toBe(hiPre);
     expect(curve.envelopeAt(2000)).toEqual([0, 0]);
+    expect(curve.envelopeLo(2000)).toBe(0);
+    expect(curve.envelopeHi(2000)).toBe(0);
   });
 
   it("matches second reference curve values", () => {
@@ -149,22 +171,32 @@ describe("TraceCurve", () => {
     const [lo440, hi440] = curve.envelopeAt(440);
     expect(lo440).toBeCloseTo(0.200836, 5);
     expect(hi440).toBeCloseTo(0.589164, 5);
+    expect(curve.envelopeLo(440)).toBe(lo440);
+    expect(curve.envelopeHi(440)).toBe(hi440);
 
     const [lo880, hi880] = curve.envelopeAt(880);
     expect(lo880).toBeCloseTo(0.728965, 5);
     expect(hi880).toBeCloseTo(0.79, 5);
+    expect(curve.envelopeLo(880)).toBe(lo880);
+    expect(curve.envelopeHi(880)).toBe(hi880);
 
     const [lo1400, hi1400] = curve.envelopeAt(1400);
     expect(lo1400).toBeCloseTo(0.743817, 5);
     expect(hi1400).toBeCloseTo(0.780187, 5);
+    expect(curve.envelopeLo(1400)).toBe(lo1400);
+    expect(curve.envelopeHi(1400)).toBe(hi1400);
 
     const [lo1930, hi1930] = curve.envelopeAt(1930);
     expect(lo1930).toBeCloseTo(0.547242, 5);
     expect(hi1930).toBeCloseTo(0.68729, 5);
+    expect(curve.envelopeLo(1930)).toBe(lo1930);
+    expect(curve.envelopeHi(1930)).toBe(hi1930);
 
     const [lo3245, hi3245] = curve.envelopeAt(3245);
     expect(lo3245).toBeCloseTo(0.001883, 5);
     expect(hi3245).toBeCloseTo(0.014693, 5);
+    expect(curve.envelopeLo(3245)).toBe(lo3245);
+    expect(curve.envelopeHi(3245)).toBe(hi3245);
   });
 
   it("envelope on a flat curve equals the value", () => {
@@ -173,8 +205,26 @@ describe("TraceCurve", () => {
       [1000, 50],
     ]);
     expect(flatCurve.envelopeAt(500)).toEqual([0.5, 0.5]);
+    expect(flatCurve.envelopeLo(500)).toBe(0.5);
+    expect(flatCurve.envelopeHi(500)).toBe(0.5);
     expect(flatCurve.envelopeAt(0)).toEqual([0.5, 0.5]);
+    expect(flatCurve.envelopeLo(0)).toBe(0.5);
+    expect(flatCurve.envelopeHi(0)).toBe(0.5);
     expect(flatCurve.envelopeAt(1000)).toEqual([0.5, 0.5]);
+    expect(flatCurve.envelopeLo(1000)).toBe(0.5);
+    expect(flatCurve.envelopeHi(1000)).toBe(0.5);
+  });
+
+  it("does not change valueAt when input points inner tuple is mutated", () => {
+    const inputPoints: [number, number][] = [
+      [0, 0],
+      [500, 50],
+      [1000, 100],
+    ];
+    const curve = new TraceCurve(inputPoints);
+    const initialVal = curve.valueAt(500);
+    inputPoints[1][1] = 99;
+    expect(curve.valueAt(500)).toBe(initialVal);
   });
 
   it("matches brute-force envelope calculation for hairpin curve at every index", () => {

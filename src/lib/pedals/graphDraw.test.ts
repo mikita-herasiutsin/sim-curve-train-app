@@ -3,7 +3,7 @@ import {
   ColumnDecimator,
   computeHorizontalGridLines,
   computeVerticalGridLines,
-  buildSignalSegments,
+  strokeSignal,
   drawGraph,
 } from "./graphDraw";
 import type { AppThemeColors } from "./theme";
@@ -74,47 +74,79 @@ describe("graphDraw pure math and decimation", () => {
     });
   });
 
-  describe("buildSignalSegments", () => {
-    it("preserves min and max spikes in column decimation", () => {
+  describe("strokeSignal", () => {
+    interface CanvasOp {
+      op: "moveTo" | "lineTo";
+      x: number;
+      y: number;
+    }
+
+    function makeMockSignalCtx() {
+      const ops: CanvasOp[] = [];
+      const ctx = {
+        beginPath: vi.fn(),
+        stroke: vi.fn(),
+        moveTo: vi.fn((x: number, y: number) => {
+          ops.push({ op: "moveTo", x, y });
+        }),
+        lineTo: vi.fn((x: number, y: number) => {
+          ops.push({ op: "lineTo", x, y });
+        }),
+      } as unknown as CanvasRenderingContext2D;
+      return { ctx, ops };
+    }
+
+    /**
+     * Rounds y to 3 decimals. Float32 columns store 0.1 as 0.10000000149, so y comes out as
+     * 89.99999985 instead of 90.
+     */
+    function roundOps(ops: CanvasOp[]): CanvasOp[] {
+      return ops.map((o) => ({ ...o, y: Math.round(o.y * 1000) / 1000 }));
+    }
+
+    it("draws a spike at a segment start with the min point first", () => {
       const decimator = new ColumnDecimator(5);
       decimator.reset();
-
       decimator.accumulate(0, 0.0, 0);
-      decimator.accumulate(1, 0.0, 0);
-      // Spike at column 2: both 0.0 and 1.0 occur in this column
-      decimator.accumulate(2, 0.0, 0);
-      decimator.accumulate(2, 1.0, 0);
-      decimator.accumulate(3, 0.0, 0);
+      decimator.accumulate(0, 1.0, 0);
 
-      const segments = buildSignalSegments(
-        decimator.hasData,
-        decimator.brakeMin,
-        decimator.brakeMax,
-        5,
-        100,
-        0,
-        0,
-      );
+      const { ctx, ops } = makeMockSignalCtx();
+      strokeSignal(ctx, decimator.hasData, decimator.brakeMin, decimator.brakeMax, 5, 100, 0, 0);
 
-      expect(segments).toHaveLength(1);
-      const points = segments[0];
-
-      // Points must contain column 2 with both high (y=0) and low (y=100) values
-      const col2Points = points.filter((p) => p.x === 2);
-      expect(col2Points).toHaveLength(2);
-      expect(col2Points.some((p) => p.y === 0)).toBe(true);
-      expect(col2Points.some((p) => p.y === 100)).toBe(true);
+      expect(roundOps(ops)).toEqual([
+        { op: "moveTo", x: 0, y: 100 },
+        { op: "lineTo", x: 0, y: 0 },
+      ]);
     });
 
-    it("splits segments when column gap exceeds threshold", () => {
+    it("draws a spike after a high point with the point nearer the previous y first", () => {
+      const decimator = new ColumnDecimator(5);
+      decimator.reset();
+      decimator.accumulate(0, 1.0, 0);
+      decimator.accumulate(1, 0.0, 0);
+      decimator.accumulate(1, 1.0, 0);
+
+      const { ctx, ops } = makeMockSignalCtx();
+      strokeSignal(ctx, decimator.hasData, decimator.brakeMin, decimator.brakeMax, 5, 100, 0, 0);
+
+      expect(roundOps(ops)).toEqual([
+        { op: "moveTo", x: 0, y: 0 },
+        { op: "lineTo", x: 1, y: 0 },
+        { op: "lineTo", x: 1, y: 100 },
+      ]);
+    });
+
+    it("splits segments when column gap exceeds maxColGap", () => {
       const decimator = new ColumnDecimator(10);
       decimator.reset();
       decimator.accumulate(0, 0.1, 0);
       decimator.accumulate(1, 0.1, 0);
-      // Gap from 1 to 8 (> 4 cols)
+      // Gap from 1 to 8 (7 columns, more than maxColGap 4)
       decimator.accumulate(8, 0.1, 0);
 
-      const segments = buildSignalSegments(
+      const { ctx, ops } = makeMockSignalCtx();
+      strokeSignal(
+        ctx,
         decimator.hasData,
         decimator.brakeMin,
         decimator.brakeMax,
@@ -122,8 +154,25 @@ describe("graphDraw pure math and decimation", () => {
         100,
         0,
         0,
+        4,
       );
-      expect(segments).toHaveLength(2);
+
+      expect(roundOps(ops)).toEqual([
+        { op: "moveTo", x: 0, y: 90 },
+        { op: "lineTo", x: 1, y: 90 },
+        { op: "moveTo", x: 8, y: 90 },
+      ]);
+    });
+
+    it("calls beginPath and stroke once", () => {
+      const decimator = new ColumnDecimator(5);
+      decimator.reset();
+      decimator.accumulate(1, 0.5, 0.5);
+
+      const { ctx } = makeMockSignalCtx();
+      strokeSignal(ctx, decimator.hasData, decimator.brakeMin, decimator.brakeMax, 5, 100, 0, 0);
+      expect(ctx.beginPath).toHaveBeenCalledTimes(1);
+      expect(ctx.stroke).toHaveBeenCalledTimes(1);
     });
   });
 

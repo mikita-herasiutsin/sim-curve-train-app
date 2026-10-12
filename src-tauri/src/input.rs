@@ -61,6 +61,7 @@ enum Command {
     Start {
         token: u64,
         device_id: u32,
+        raw: bool,
         channel: Channel<SampleBatch>,
     },
     /// Stops the stream only if it is still the one started with `token`, so a late stop from
@@ -189,10 +190,12 @@ impl InputService {
     }
 
     /// Starts streaming samples of `device_id` to `channel`, replacing any active stream.
+    /// Batches carry raw samples only when `raw` is set.
     /// Returns a token that `stop_stream` needs, so a stale stop can't end a newer stream.
     pub fn start_stream(
         &self,
         device_id: u32,
+        raw: bool,
         channel: Channel<SampleBatch>,
     ) -> Result<u64, String> {
         let profile = self.load_profile(device_id)?;
@@ -209,6 +212,7 @@ impl InputService {
         self.send(Command::Start {
             token,
             device_id,
+            raw,
             channel,
         })?;
         Ok(token)
@@ -387,6 +391,8 @@ fn panic_message(payload: &(dyn Any + Send)) -> &str {
 struct Stream {
     token: u64,
     device_id: u32,
+    /// Whether batches carry the raw samples. Only the device setup screens need them.
+    raw: bool,
     channel: Channel<SampleBatch>,
     pending: Vec<RawSample>,
     last_send: Instant,
@@ -395,10 +401,11 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(token: u64, device_id: u32, channel: Channel<SampleBatch>) -> Self {
+    fn new(token: u64, device_id: u32, raw: bool, channel: Channel<SampleBatch>) -> Self {
         Self {
             token,
             device_id,
+            raw,
             channel,
             pending: Vec::with_capacity(32),
             last_send: Instant::now(),
@@ -534,13 +541,14 @@ fn drain_commands(
             Ok(Command::Start {
                 token,
                 device_id,
+                raw,
                 channel,
             }) => {
                 end_stream(stream);
                 // Cleared here, not in `start_stream`, so no sample of the previous
                 // stream can land after the clear.
                 lock(&service.recent).clear();
-                *stream = Some(Stream::new(token, device_id, channel));
+                *stream = Some(Stream::new(token, device_id, raw, channel));
                 *next_tick = Instant::now();
             }
             Ok(Command::Stop { token }) => {
@@ -734,8 +742,15 @@ fn send_batch(stream: &mut Stream, service: &InputService, epoch: Instant) -> bo
             _ => Vec::new(),
         }
     };
+    let samples = if stream.raw {
+        std::mem::take(&mut stream.pending)
+    } else {
+        // Keeps the capacity of `pending` for the next batch.
+        stream.pending.clear();
+        Vec::new()
+    };
     let batch = SampleBatch {
-        samples: std::mem::take(&mut stream.pending),
+        samples,
         frames,
         stats: StreamStats {
             sample_rate_hz: stream.rate.rate_hz(),
@@ -810,7 +825,7 @@ mod tests {
     }
 
     fn stream() -> Stream {
-        Stream::new(1, 1, Channel::new(|_| Ok(())))
+        Stream::new(1, 1, true, Channel::new(|_| Ok(())))
     }
 
     fn brake_profile() -> DeviceProfile {
@@ -1139,5 +1154,69 @@ mod tests {
                 "setFinished"
             ]
         );
+    }
+
+    /// An input service whose active stream (token 1) has the brake profile.
+    fn service() -> InputService {
+        let (commands, _) = mpsc::channel();
+        InputService {
+            snapshot: Arc::default(),
+            recent: Arc::new(Mutex::new(RingBuffer::with_capacity(RECENT_CAPACITY))),
+            commands,
+            store: Arc::default(),
+            active: Arc::new(Mutex::new(ActiveStream {
+                token: 1,
+                device_id: Some(1),
+                profile: Some(brake_profile()),
+            })),
+            audio: None,
+            #[cfg(debug_assertions)]
+            sim: None,
+        }
+    }
+
+    /// Sends one batch of three samples from a stream started with `raw` and returns the
+    /// JSON body and the stream.
+    fn send_three(raw: bool) -> (String, Stream) {
+        let (sink, log) = mpsc::channel();
+        let channel = Channel::new(move |body| {
+            if let tauri::ipc::InvokeResponseBody::Json(json) = body {
+                let _ = sink.send(json);
+            }
+            Ok(())
+        });
+        let mut stream = Stream::new(1, 1, raw, channel);
+        for ms in 1..=3 {
+            stream.pending.push(sample_at(ms * 1000, 0.5));
+        }
+        let service = service();
+        assert!(send_batch(&mut stream, &service, Instant::now()));
+        assert_eq!(lock(&service.recent).len(), 3);
+        (log.try_recv().unwrap(), stream)
+    }
+
+    /// The samples and frames parts of a batch body.
+    fn split_batch(body: &str) -> (&str, &str) {
+        let (samples, rest) = body.split_once("\"frames\":").unwrap();
+        (samples, rest.split_once("\"stats\":").unwrap().0)
+    }
+
+    #[test]
+    fn a_stream_without_raw_samples_sends_only_frames() {
+        let (body, stream) = send_three(false);
+        let (samples, frames) = split_batch(&body);
+        assert!(samples.contains("\"samples\":[]"), "{body}");
+        assert_eq!(frames.matches("\"tUs\"").count(), 3, "{body}");
+        assert_eq!(stream.pending, Vec::<RawSample>::new());
+        assert!(stream.pending.capacity() >= 3);
+    }
+
+    #[test]
+    fn a_raw_stream_sends_samples_and_frames() {
+        let (body, stream) = send_three(true);
+        let (samples, frames) = split_batch(&body);
+        assert_eq!(samples.matches("\"tUs\"").count(), 3, "{body}");
+        assert_eq!(frames.matches("\"tUs\"").count(), 3, "{body}");
+        assert_eq!(stream.pending, Vec::<RawSample>::new());
     }
 }

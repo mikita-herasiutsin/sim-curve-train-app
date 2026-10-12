@@ -15,7 +15,8 @@ export class TraceCurve {
   private readonly maxArr: Float64Array;
 
   constructor(points: [number, number][]) {
-    this.points = points.slice();
+    // Callers may pass Svelte state proxies, and reading proxies in the per-frame draw allocates.
+    this.points = points.map(([t, v]) => [t, v] as [number, number]);
     this.durationMs = traceDurationMs(this.points);
 
     const n = this.points.length;
@@ -170,14 +171,27 @@ export class TraceCurve {
     return v / 100;
   }
 
-  /** [min, max] of valueAt over integer ms offsets -window..+window around round(tMs); fractions. */
-  envelopeAt(tMs: number): [number, number] {
+  /** Lower bound of valueAt over integer ms offsets -window..+window around round(tMs); fractions. */
+  envelopeLo(tMs: number): number {
     const i = Math.round(tMs) + TRACE_RAMP_WINDOW_MS;
     if (!(i >= 0 && i < this.minArr.length)) {
-      const v = this.valueAt(tMs);
-      return [v, v];
+      return this.valueAt(tMs);
     }
-    return [this.minArr[i], this.maxArr[i]];
+    return this.minArr[i];
+  }
+
+  /** Upper bound of valueAt over integer ms offsets -window..+window around round(tMs); fractions. */
+  envelopeHi(tMs: number): number {
+    const i = Math.round(tMs) + TRACE_RAMP_WINDOW_MS;
+    if (!(i >= 0 && i < this.maxArr.length)) {
+      return this.valueAt(tMs);
+    }
+    return this.maxArr[i];
+  }
+
+  /** [min, max] of valueAt over integer ms offsets -window..+window around round(tMs); fractions. */
+  envelopeAt(tMs: number): [number, number] {
+    return [this.envelopeLo(tMs), this.envelopeHi(tMs)];
   }
 }
 
@@ -264,7 +278,7 @@ export function traceViewPhase(i: TracePhaseInput): TracePhase {
 export type TimeToX = (tMs: number) => number;
 export type ValueToY = (fraction: number) => number;
 
-/** Fills the ±150 ms envelope band (D-21): upper min(1, hi + tolerance), lower max(0, lo - tolerance) from curve.envelopeAt(t), at the times times[from..to) (ascending, half-open). Sets ctx.fillStyle = color. No-op when to - from < 2. */
+/** Fills the ±150 ms envelope band (D-21): upper min(1, hi + tolerance) from curve.envelopeHi(t), lower max(0, lo - tolerance) from curve.envelopeLo(t), at the times times[from..to) (ascending, half-open). Sets ctx.fillStyle = color. No-op when to - from < 2. */
 export function drawTraceBand(
   ctx: CanvasRenderingContext2D,
   curve: TraceCurve,
@@ -282,7 +296,7 @@ export function drawTraceBand(
   ctx.beginPath();
   for (let i = from; i < to; i++) {
     const t = times[i];
-    const [, hi] = curve.envelopeAt(t);
+    const hi = curve.envelopeHi(t);
     const topVal = Math.min(1, hi + tolerance);
     const x = xOf(t);
     const y = yOf(topVal);
@@ -294,7 +308,7 @@ export function drawTraceBand(
   }
   for (let i = to - 1; i >= from; i--) {
     const t = times[i];
-    const [lo] = curve.envelopeAt(t);
+    const lo = curve.envelopeLo(t);
     const botVal = Math.max(0, lo - tolerance);
     const x = xOf(t);
     const y = yOf(botVal);

@@ -366,7 +366,7 @@ function runImpact(baseRef, repoRoot) {
   process.exit(1);
 }
 
-// Runs static checks over tracked docs and code comments.
+// Runs static checks over the docs and code comments, including files not yet committed.
 function runStatic(repoRoot) {
   const tracked = execSync("git ls-files --cached --others --exclude-standard", {
     encoding: "utf8",
@@ -374,7 +374,7 @@ function runStatic(repoRoot) {
   })
     .split(/\r?\n/)
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter((f) => f && existsSync(resolve(repoRoot, f)));
 
   const docSet = tracked.filter((f) => f.endsWith(".md"));
   const proseSet = docSet.filter(

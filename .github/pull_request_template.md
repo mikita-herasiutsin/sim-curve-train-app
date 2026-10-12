@@ -12,6 +12,12 @@
 
 - [ ] AC 1
 
+## Docs
+
+<!-- List the docs this pull request updates. If no doc needs a change, keep the line below and replace REASON with the reason; CI reads it. Delete it otherwise. -->
+
+Docs: none, REASON
+
 ## Testing
 
 - [ ] `npm run verify` passes locally
@@ -20,5 +26,5 @@
 
 ## Checklist
 
-- [ ] Docs updated (README, decisions, backlog status) where relevant
+- [ ] Docs, comments and UI text follow [docs/writing-style.md](https://github.com/mikita-herasiutsin/sim-curve-train-app/blob/main/docs/writing-style.md)
 - [ ] No network calls, telemetry or analytics added (ADR-0003)

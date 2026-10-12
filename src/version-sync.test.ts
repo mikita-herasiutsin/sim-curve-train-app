@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-// The release version lives in the Cargo workspace (Tauri reads it from there);
-// package.json must stay in sync so npm tooling and the app agree.
+// The app version lives in the Cargo workspace (Tauri reads it from there); package.json must
+// stay in sync so npm tooling and the app agree. Main holds the 0.0.0-dev placeholder; the
+// Release workflow sets the real version with scripts/set-version.mjs.
 const read = (path: string) => readFileSync(resolve(import.meta.dirname, "..", path), "utf8");
 
 /** Returns the body of a TOML table, up to the next `[header]` line. */
@@ -26,6 +27,11 @@ describe("version sync", () => {
 
     expect(cargoVersion).toBeDefined();
     expect(npmVersion).toBe(cargoVersion);
+  });
+
+  // Release builds get their version from the tag (scripts/set-version.mjs), never from a commit.
+  it("main holds the 0.0.0-dev placeholder version", () => {
+    expect(JSON.parse(read("package.json")).version).toBe("0.0.0-dev");
   });
 
   it("tauri.conf.json does not override the Cargo version", () => {

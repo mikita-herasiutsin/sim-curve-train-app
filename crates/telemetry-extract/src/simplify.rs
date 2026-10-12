@@ -217,7 +217,7 @@ pub fn pchip_resample(raw_samples: &[f32], total_duration_ms: f64) -> Vec<(f64, 
 /// Prepares and simplifies a pedal segment into drill trace points `[(t_ms, target_percent)]`.
 ///
 /// Anchors `t=0` at the lead-in start, resamples with monotonic PCHIP, normalizes coordinates,
-/// runs RDP simplification to 5–15 points, and verifies strict monotonicity of timestamps.
+/// runs RDP simplification to 5-15 points, and verifies strict monotonicity of timestamps.
 /// Returns no points when the trace breaks the preset limits on duration or point count.
 #[must_use]
 pub fn process_trace_segment(

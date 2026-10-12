@@ -1,42 +1,66 @@
 # Releasing
 
-Releases are built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when a `v*` tag is pushed. The workflow creates a **draft** GitHub Release; nothing is public until you publish it.
+Releasing takes one workflow run. The Release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) builds the app from `main`, attests the files and publishes the GitHub Release, which creates the `v<version>` tag.
 
-## Steps
+The committed version on `main` is the placeholder `0.0.0-dev`, which dev builds show in the header. Release builds get their version from the tag. The workflow runs `node scripts/set-version.mjs <version>` on the runner before it builds, so version bumps never go through a pull request. To build a tagged version from source with the right version number, run the same script after checking out the tag.
 
-1. **Bump the version** on a branch, in both places (`src/version-sync.test.ts` checks that they match):
-   - `version` under `[workspace.package]` in `Cargo.toml`
-   - `package.json`: run `npm version <x.y.z> --no-git-tag-version`
+## Before releasing
 
-   Then run `cargo metadata --format-version 1 > /dev/null` to refresh `Cargo.lock`, and merge the change to `main` through a pull request as usual.
-2. **Tag the merge commit on `main`** and push the tag:
+The release publishes without a manual check, so try the build first. CI's `Release build` job uploads `SimCurveTrainApp-<sha>` for every push to `main`. It is a release build, so it applies the Content Security Policy, which `tauri dev` skips. Download the one for the HEAD of `main` from its Actions run and start it once on Windows 11. Nothing tests the NSIS installer before it goes public; if it turns out broken, release a new patch.
 
-   ```sh
-   git switch main && git pull
-   git tag v<x.y.z>
-   git push origin v<x.y.z>
-   ```
+## How to release
 
-   The workflow refuses to build if the tag doesn't equal `v` + the app version, or if the tagged commit isn't on `main`. A tag with a pre-release suffix (e.g. `v0.2.0-rc.1`) creates a pre-release.
-3. **Wait for the Release workflow** (Actions tab, about 10–15 minutes). The draft release appears under Releases with:
-   - `SimCurveTrainApp_<x.y.z>_x64-setup.exe`: the NSIS installer
-   - `SimCurveTrainApp_windows_x64.exe`: the portable exe (`target/release/SimCurveTrainApp.exe`, renamed by `tauri-action`)
-4. **Smoke-test both files on a clean Windows 11 machine** (a fresh VM or Windows Sandbox works). `tauri dev` never applies the CSP on desktop, so this is the first time the CSP is exercised:
-   - The installer installs, the app starts from the Start menu, and the header shows the new version.
-   - The portable exe starts from a plain folder (e.g. `Downloads`).
-   - SmartScreen shows the expected "unknown publisher" warning (see below), and nothing else.
-5. **Edit the draft notes** if needed and click **Publish release**.
+1. In the Actions tab, open the Release workflow, click **Run workflow** and keep branch `main`.
+2. Or run the release script locally, with `gh` logged in. It starts the same workflow, follows it and prints the release URL.
 
-## If the build fails or the files are wrong
+```sh
+npm run release                    # next patch, as a pre-release
+npm run release -- 0.1.0           # this version, as a pre-release
+npm run release -- 0.1.0 --full    # this version, as a full release
+```
 
-The release is still a draft, so it's safe to redo. Delete the draft release and the tag, fix the problem on `main`, then tag again:
+Workflow inputs:
+
+- `version`. Empty picks the next patch after the highest `v*` tag. If the highest tag is a pre-release such as `v0.2.0-rc.1`, enter the version. If `main`'s HEAD already carries the highest tag, the run builds that tag, or fails when it is already released.
+- `prerelease`. On by default; turn it off (`--full` in the script) for a full release, which GitHub marks as Latest. A version with a `-` suffix like `0.2.0-rc.1` is always a pre-release.
+
+Pushing a `v*` tag by hand on a `main` commit still works:
+
+```sh
+git switch main && git pull
+git tag v<x.y.z>
+git push origin v<x.y.z>
+```
+
+The workflow takes the version from the tag. The tag must still be the highest `v*` tag. A hand-pushed tag makes a full release unless it has a `-` suffix.
+
+## What the workflow does
+
+1. It checks that the run is on `main` and that the version is valid semver and higher than every existing `v*` tag.
+2. It writes the version into the build with `scripts/set-version.mjs`.
+3. It builds the installer and the portable exe, which takes about 10 to 15 minutes.
+4. It attests both files and checks that both are attached.
+5. It publishes the release, which creates the tag on the `main` commit the run started from. The release exists as a draft until this step, so a failed check never leaves a broken public release.
+
+The release has two assets:
+
+- `SimCurveTrainApp_<x.y.z>_x64-setup.exe`: the NSIS installer
+- `SimCurveTrainApp_windows_x64.exe`: the portable exe (`target/release/SimCurveTrainApp.exe`, renamed by `tauri-action`)
+
+## If a run fails
+
+A failed run leaves at most a draft release and no tag. Click **Re-run failed jobs** in Actions, and the run reuses that draft. A new run of the same version on a later `main` commit deletes the old draft and starts a fresh one. The workflow refuses to touch a release that is already published.
+
+Release runs queue one at a time. GitHub keeps only one waiting run, so starting a third release while one runs and one waits cancels the waiting one.
+
+To give up on that version instead, delete the draft release. If you pushed the tag by hand, delete it too:
 
 ```sh
 git push --delete origin v<x.y.z>
 git tag -d v<x.y.z>
 ```
 
-Never move a tag after its release has been published; release a new patch version instead.
+Never move or delete a published tag. Release a new patch version instead.
 
 ## Code signing and SmartScreen
 

@@ -14,7 +14,7 @@ export function getBarFillHeight(value: number, maxBarHeight: number): number {
 }
 
 /**
- * Returns the rounded integer percentage (0–100) for a normalized 0..1 value.
+ * Returns the rounded integer percentage (0-100) for a normalized 0..1 value.
  */
 export function getPercentLabel(value: number): number {
   const clamped = clamp01(value);

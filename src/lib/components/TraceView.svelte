@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { pedalStream, type PedalStream } from "$lib/pedals/stream";
+  import { createFrameColumns, type FrameColumns } from "$lib/pedals/history";
   import { readThemeColors, type AppThemeColors } from "$lib/pedals/theme";
   import { DEFAULT_TRACE_VIEW, onThemeChange, type TraceViewMode } from "$lib/settings";
   import { toleranceOf, type TraceDrill } from "$lib/drill";
@@ -48,6 +49,9 @@
   let height = 0;
   let dpr = 1;
   let theme: AppThemeColors | null = null;
+  let columns: FrameColumns | null = null;
+  const userPool: [number, number][] = [];
+  const user: [number, number][] = [];
 
   function updateResolution(): void {
     if (!canvasEl || width <= 0 || height <= 0) return;
@@ -87,17 +91,25 @@
     const shownStartUs = phase.shownStartUs;
     const playheadMs = phase.playheadMs;
 
-    const user: [number, number][] = [];
+    if (!columns) {
+      columns = createFrameColumns(stream.history.capacity);
+    }
+
+    let k = 0;
     if (shownStartUs > 0) {
       const windowStartUs = shownStartUs - GO_LEAD_MS * 1000;
       const windowEndUs = shownStartUs + durationMs * 1000;
-      stream.history.forEachSince(windowStartUs, (frame) => {
-        if (frame.t <= windowEndUs) {
-          const val = pedal === "brake" ? frame.brake : frame.throttle;
-          user.push([(frame.t - shownStartUs) / 1000, val]);
+      const n = stream.history.copySince(windowStartUs, columns);
+      for (let i = 0; i < n; i++) {
+        if (columns.t[i] <= windowEndUs) {
+          const p = (userPool[k] ??= [0, 0]);
+          p[0] = (columns.t[i] - shownStartUs) / 1000;
+          p[1] = pedal === "brake" ? columns.brake[i] : columns.throttle[i];
+          user[k++] = p;
         }
-      });
+      }
     }
+    user.length = k;
 
     let inBand = false;
     if (playheadMs !== null) {

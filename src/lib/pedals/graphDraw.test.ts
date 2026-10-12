@@ -3,7 +3,7 @@ import {
   ColumnDecimator,
   computeHorizontalGridLines,
   computeVerticalGridLines,
-  buildSignalSegments,
+  strokeSignal,
   drawGraph,
 } from "./graphDraw";
 import type { AppThemeColors } from "./theme";
@@ -74,7 +74,28 @@ describe("graphDraw pure math and decimation", () => {
     });
   });
 
-  describe("buildSignalSegments", () => {
+  describe("strokeSignal", () => {
+    interface CanvasOp {
+      op: "moveTo" | "lineTo";
+      x: number;
+      y: number;
+    }
+
+    function makeMockSignalCtx() {
+      const ops: CanvasOp[] = [];
+      const ctx = {
+        beginPath: vi.fn(),
+        stroke: vi.fn(),
+        moveTo: vi.fn((x: number, y: number) => {
+          ops.push({ op: "moveTo", x, y });
+        }),
+        lineTo: vi.fn((x: number, y: number) => {
+          ops.push({ op: "lineTo", x, y });
+        }),
+      } as unknown as CanvasRenderingContext2D;
+      return { ctx, ops };
+    }
+
     it("preserves min and max spikes in column decimation", () => {
       const decimator = new ColumnDecimator(5);
       decimator.reset();
@@ -86,24 +107,16 @@ describe("graphDraw pure math and decimation", () => {
       decimator.accumulate(2, 1.0, 0);
       decimator.accumulate(3, 0.0, 0);
 
-      const segments = buildSignalSegments(
-        decimator.hasData,
-        decimator.brakeMin,
-        decimator.brakeMax,
-        5,
-        100,
-        0,
-        0,
-      );
+      const { ctx, ops } = makeMockSignalCtx();
+      strokeSignal(ctx, decimator.hasData, decimator.brakeMin, decimator.brakeMax, 5, 100, 0, 0);
 
-      expect(segments).toHaveLength(1);
-      const points = segments[0];
+      const moveOps = ops.filter((o) => o.op === "moveTo");
+      expect(moveOps).toHaveLength(1);
 
-      // Points must contain column 2 with both high (y=0) and low (y=100) values
-      const col2Points = points.filter((p) => p.x === 2);
-      expect(col2Points).toHaveLength(2);
-      expect(col2Points.some((p) => p.y === 0)).toBe(true);
-      expect(col2Points.some((p) => p.y === 100)).toBe(true);
+      const col2Ops = ops.filter((o) => o.x === 2);
+      expect(col2Ops).toHaveLength(2);
+      expect(col2Ops.some((o) => o.y === 0)).toBe(true);
+      expect(col2Ops.some((o) => o.y === 100)).toBe(true);
     });
 
     it("splits segments when column gap exceeds threshold", () => {
@@ -114,16 +127,21 @@ describe("graphDraw pure math and decimation", () => {
       // Gap from 1 to 8 (> 4 cols)
       decimator.accumulate(8, 0.1, 0);
 
-      const segments = buildSignalSegments(
-        decimator.hasData,
-        decimator.brakeMin,
-        decimator.brakeMax,
-        10,
-        100,
-        0,
-        0,
-      );
-      expect(segments).toHaveLength(2);
+      const { ctx, ops } = makeMockSignalCtx();
+      strokeSignal(ctx, decimator.hasData, decimator.brakeMin, decimator.brakeMax, 10, 100, 0, 0);
+      const moveOps = ops.filter((o) => o.op === "moveTo");
+      expect(moveOps).toHaveLength(2);
+    });
+
+    it("calls beginPath and stroke once", () => {
+      const decimator = new ColumnDecimator(5);
+      decimator.reset();
+      decimator.accumulate(1, 0.5, 0.5);
+
+      const { ctx } = makeMockSignalCtx();
+      strokeSignal(ctx, decimator.hasData, decimator.brakeMin, decimator.brakeMax, 5, 100, 0, 0);
+      expect(ctx.beginPath).toHaveBeenCalledTimes(1);
+      expect(ctx.stroke).toHaveBeenCalledTimes(1);
     });
   });
 

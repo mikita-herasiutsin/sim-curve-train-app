@@ -58,7 +58,7 @@ export function startRealSource(
           onStatus(lastLive ? { kind: "disconnected", device: lastLive } : { kind: "noProfile" });
           continue;
         }
-        const next = new DeviceStream(target.id);
+        const next = new DeviceStream(target.id, false);
         next.subscribe(({ frames }) => {
           if (frames.length === 0) return;
           stream.ingest(

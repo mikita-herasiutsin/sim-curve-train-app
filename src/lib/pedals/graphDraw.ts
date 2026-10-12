@@ -15,11 +15,6 @@ export interface HorizontalGridLine {
   boundary: boolean;
 }
 
-export interface Point {
-  x: number;
-  y: number;
-}
-
 export class ColumnDecimator {
   numCols: number;
   hasData: Uint8Array;
@@ -123,10 +118,13 @@ export function computeVerticalGridLines(
 }
 
 /**
- * Builds continuous segments of points for a signal from decimated columns.
- * If min !== max in a column, both values are included so spikes are not lost.
+ * Strokes one signal from decimated columns as polylines, starting a new subpath where the gap
+ * between columns with data exceeds `maxColGap`. A column whose min and max differ by 0.5 px or
+ * more gets both points, ordered so the one nearer the previous point comes first, so spikes are
+ * not lost. Calls ctx.beginPath() once and ctx.stroke() once; allocates nothing.
  */
-export function buildSignalSegments(
+export function strokeSignal(
+  ctx: CanvasRenderingContext2D,
   hasData: Uint8Array,
   minVals: Float32Array,
   maxVals: Float32Array,
@@ -136,10 +134,12 @@ export function buildSignalSegments(
   paddingBottom = 24,
   maxColGap = 4,
   dpr = 1,
-): Point[][] {
-  const segments: Point[][] = [];
-  let currentSegment: Point[] = [];
+): void {
+  ctx.beginPath();
+
+  let inSegment = false;
   let lastColWithData = -1;
+  let lastY = 0;
 
   for (let col = 0; col < numCols; col++) {
     if (hasData[col] === 0) {
@@ -147,10 +147,7 @@ export function buildSignalSegments(
     }
 
     if (lastColWithData !== -1 && col - lastColWithData > maxColGap) {
-      if (currentSegment.length > 0) {
-        segments.push(currentSegment);
-        currentSegment = [];
-      }
+      inSegment = false;
     }
 
     const x = col / dpr;
@@ -158,28 +155,31 @@ export function buildSignalSegments(
     const yMax = getGraphY(maxVals[col], height, paddingTop, paddingBottom);
 
     if (Math.abs(yMin - yMax) < 0.5) {
-      currentSegment.push({ x, y: yMin });
-    } else {
-      // In canvas coordinates, higher pedal value has lower Y
-      // Order points to keep line smooth
-      const lastPoint = currentSegment[currentSegment.length - 1];
-      if (!lastPoint || Math.abs(lastPoint.y - yMin) <= Math.abs(lastPoint.y - yMax)) {
-        currentSegment.push({ x, y: yMin });
-        currentSegment.push({ x, y: yMax });
+      if (!inSegment) {
+        ctx.moveTo(x, yMin);
+        inSegment = true;
       } else {
-        currentSegment.push({ x, y: yMax });
-        currentSegment.push({ x, y: yMin });
+        ctx.lineTo(x, yMin);
       }
+      lastY = yMin;
+    } else {
+      const yFirst = !inSegment || Math.abs(lastY - yMin) <= Math.abs(lastY - yMax) ? yMin : yMax;
+      const ySecond = yFirst === yMin ? yMax : yMin;
+
+      if (!inSegment) {
+        ctx.moveTo(x, yFirst);
+        inSegment = true;
+      } else {
+        ctx.lineTo(x, yFirst);
+      }
+      ctx.lineTo(x, ySecond);
+      lastY = ySecond;
     }
 
     lastColWithData = col;
   }
 
-  if (currentSegment.length > 0) {
-    segments.push(currentSegment);
-  }
-
-  return segments;
+  ctx.stroke();
 }
 
 /** A target band (target +- tolerance, as 0..1 fractions) for one pedal. */
@@ -286,7 +286,12 @@ export function drawGraph(
   if (band) drawTargetBand(ctx, width, height, band, theme, paddingTop, paddingBottom, bandInBand);
 
   // Draw Brake line
-  const brakeSegments = buildSignalSegments(
+  ctx.strokeStyle = theme.brake;
+  ctx.lineWidth = 2.5;
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  strokeSignal(
+    ctx,
     decimator.hasData,
     decimator.brakeMin,
     decimator.brakeMax,
@@ -298,23 +303,11 @@ export function drawGraph(
     dpr,
   );
 
-  ctx.strokeStyle = theme.brake;
-  ctx.lineWidth = 2.5;
-  ctx.lineJoin = "round";
-  ctx.lineCap = "round";
-
-  for (const segment of brakeSegments) {
-    if (segment.length === 0) continue;
-    ctx.beginPath();
-    ctx.moveTo(segment[0].x, segment[0].y);
-    for (let i = 1; i < segment.length; i++) {
-      ctx.lineTo(segment[i].x, segment[i].y);
-    }
-    ctx.stroke();
-  }
-
   // Draw Throttle line
-  const throttleSegments = buildSignalSegments(
+  ctx.strokeStyle = theme.throttle;
+  ctx.lineWidth = 2.5;
+  strokeSignal(
+    ctx,
     decimator.hasData,
     decimator.throttleMin,
     decimator.throttleMax,
@@ -325,17 +318,4 @@ export function drawGraph(
     Math.max(4, Math.round(4 * dpr)),
     dpr,
   );
-
-  ctx.strokeStyle = theme.throttle;
-  ctx.lineWidth = 2.5;
-
-  for (const segment of throttleSegments) {
-    if (segment.length === 0) continue;
-    ctx.beginPath();
-    ctx.moveTo(segment[0].x, segment[0].y);
-    for (let i = 1; i < segment.length; i++) {
-      ctx.lineTo(segment[i].x, segment[i].y);
-    }
-    ctx.stroke();
-  }
 }

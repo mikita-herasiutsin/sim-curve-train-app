@@ -2,6 +2,22 @@ import type { PedalFrame } from "./types";
 
 const DEFAULT_CAPACITY = 20000;
 
+/** Reusable output buffers for `FrameHistory.copySince`. */
+export interface FrameColumns {
+  t: Float64Array;
+  brake: Float32Array;
+  throttle: Float32Array;
+}
+
+/** Allocates buffers that hold `capacity` frames; create once per consumer, not per frame. */
+export function createFrameColumns(capacity: number): FrameColumns {
+  return {
+    t: new Float64Array(capacity),
+    brake: new Float32Array(capacity),
+    throttle: new Float32Array(capacity),
+  };
+}
+
 export class FrameHistory {
   readonly capacity: number;
   private readonly tArray: Float64Array;
@@ -60,10 +76,10 @@ export class FrameHistory {
     this.count = 0;
   }
 
-  forEachSince(tMinUs: number, cb: (f: PedalFrame) => void): void {
+  private firstIndexSince(tMinUs: number): number {
     const count = this.count;
     if (count === 0) {
-      return;
+      return 0;
     }
 
     const capacity = this.capacity;
@@ -83,11 +99,57 @@ export class FrameHistory {
         high = mid;
       }
     }
+    return low;
+  }
+
+  forEachSince(tMinUs: number, cb: (f: PedalFrame) => void): void {
+    const count = this.count;
+    if (count === 0) {
+      return;
+    }
+
+    const low = this.firstIndexSince(tMinUs);
+    const capacity = this.capacity;
+    const oldestIdx = count < capacity ? 0 : this.writeIndex;
 
     for (let k = low; k < count; k++) {
       const phys = (oldestIdx + k) % capacity;
       cb(this.getFrameAt(phys));
     }
+  }
+
+  /**
+   * Copies the frames with t >= tMinUs into `out`, oldest first, and returns how many it copied.
+   * Allocates nothing. Throws if `out.t.length < this.capacity`.
+   */
+  copySince(tMinUs: number, out: FrameColumns): number {
+    if (out.t.length < this.capacity) {
+      throw new Error(
+        `Output buffer size ${out.t.length} is smaller than history capacity ${this.capacity}`,
+      );
+    }
+    const count = this.count;
+    if (count === 0) {
+      return 0;
+    }
+
+    const low = this.firstIndexSince(tMinUs);
+    const copiedCount = count - low;
+    if (copiedCount <= 0) {
+      return 0;
+    }
+
+    const capacity = this.capacity;
+    const oldestIdx = count < capacity ? 0 : this.writeIndex;
+    let outIdx = 0;
+    for (let k = low; k < count; k++) {
+      const phys = (oldestIdx + k) % capacity;
+      out.t[outIdx] = this.tArray[phys];
+      out.brake[outIdx] = this.brakeArray[phys];
+      out.throttle[outIdx] = this.throttleArray[phys];
+      outIdx++;
+    }
+    return copiedCount;
   }
 
   getStatsSince(tMinUs: number): { count: number; oldestT: number; newestT: number } | null {
@@ -96,26 +158,14 @@ export class FrameHistory {
       return null;
     }
 
-    const capacity = this.capacity;
-    const oldestIdx = count < capacity ? 0 : this.writeIndex;
-
-    let low = 0;
-    let high = count;
-    while (low < high) {
-      const mid = (low + high) >>> 1;
-      const phys = (oldestIdx + mid) % capacity;
-      if (this.tArray[phys] < tMinUs) {
-        low = mid + 1;
-      } else {
-        high = mid;
-      }
-    }
-
+    const low = this.firstIndexSince(tMinUs);
     const matchingCount = count - low;
     if (matchingCount === 0) {
       return null;
     }
 
+    const capacity = this.capacity;
+    const oldestIdx = count < capacity ? 0 : this.writeIndex;
     const oldestPhys = (oldestIdx + low) % capacity;
     const newestPhys = (oldestIdx + count - 1) % capacity;
     return {

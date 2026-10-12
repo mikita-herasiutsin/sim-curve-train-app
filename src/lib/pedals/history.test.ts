@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { FrameHistory } from "./history";
+import { FrameHistory, createFrameColumns } from "./history";
 import type { PedalFrame } from "./types";
 
 describe("FrameHistory", () => {
@@ -128,5 +128,63 @@ describe("FrameHistory", () => {
     const seen: number[] = [];
     history.forEachSince(0, (f) => seen.push(f.t));
     expect(seen).toEqual([3, 4, 5]);
+  });
+
+  describe("copySince", () => {
+    it("returns the same sequence as forEachSince for a partly filled buffer", () => {
+      const history = new FrameHistory(10);
+      for (let i = 1; i <= 5; i++) {
+        history.push({ t: i * 100, brake: i * 0.1, throttle: 1 - i * 0.1 });
+      }
+
+      const expected: PedalFrame[] = [];
+      history.forEachSince(250, (f) => expected.push(f));
+
+      const out = createFrameColumns(history.capacity);
+      const n = history.copySince(250, out);
+
+      expect(n).toBe(expected.length);
+      for (let i = 0; i < n; i++) {
+        expect(out.t[i]).toBe(expected[i].t);
+        expect(out.brake[i]).toBeCloseTo(expected[i].brake);
+        expect(out.throttle[i]).toBeCloseTo(expected[i].throttle);
+      }
+    });
+
+    it("returns the same sequence as forEachSince for a wrapped buffer with a cut-off in the middle", () => {
+      const history = new FrameHistory(5);
+      for (let i = 1; i <= 8; i++) {
+        history.push({ t: i * 100, brake: i * 0.1, throttle: 1 - i * 0.1 });
+      }
+
+      const expected: PedalFrame[] = [];
+      history.forEachSince(550, (f) => expected.push(f));
+
+      const out = createFrameColumns(history.capacity);
+      const n = history.copySince(550, out);
+
+      expect(n).toBe(expected.length);
+      for (let i = 0; i < n; i++) {
+        expect(out.t[i]).toBe(expected[i].t);
+        expect(out.brake[i]).toBeCloseTo(expected[i].brake);
+        expect(out.throttle[i]).toBeCloseTo(expected[i].throttle);
+      }
+    });
+
+    it("returns 0 for a cut-off past the newest frame", () => {
+      const history = new FrameHistory(5);
+      history.push({ t: 100, brake: 0.1, throttle: 0.2 });
+      history.push({ t: 200, brake: 0.3, throttle: 0.4 });
+
+      const out = createFrameColumns(history.capacity);
+      const n = history.copySince(300, out);
+      expect(n).toBe(0);
+    });
+
+    it("throws for a too-small out buffer", () => {
+      const history = new FrameHistory(5);
+      const smallOut = createFrameColumns(4);
+      expect(() => history.copySince(0, smallOut)).toThrow();
+    });
   });
 });

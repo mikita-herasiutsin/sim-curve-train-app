@@ -37,6 +37,7 @@ function createMockState() {
   };
   const calls = {
     startStream: [] as number[],
+    startRaw: [] as unknown[],
     stopStream: [] as number[],
   };
   let token = 0;
@@ -50,6 +51,7 @@ function createMockState() {
       case "start_stream":
         token += 1;
         calls.startStream.push((args as { deviceId: number }).deviceId);
+        calls.startRaw.push((args as { raw: unknown }).raw);
         return token;
       case "stop_stream":
         calls.stopStream.push((args as { token: number }).token);
@@ -100,6 +102,8 @@ describe("startRealSource", () => {
       expect(statuses[statuses.length - 1]).toMatchObject({ kind: "live", device: pedals });
       expect(calls.startStream).toContain(1);
     });
+    // The live view reads only frames, so it asks for no raw samples.
+    expect(calls.startRaw).toEqual([false]);
   });
 
   it("prefers the profiled simulated device over real ones listed before it", async () => {

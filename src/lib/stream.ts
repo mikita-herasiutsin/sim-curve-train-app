@@ -25,6 +25,7 @@ export interface PedalFrame {
 
 /** Mirrors `sct_core::stream::SampleBatch`. */
 export interface SampleBatch {
+  /** Raw samples; empty for streams started without raw samples. */
   samples: RawSample[];
   /** The samples with the device profile applied; empty while the device has none. */
   frames: PedalFrame[];
@@ -33,15 +34,17 @@ export interface SampleBatch {
 
 /**
  * Starts streaming one device's samples (about 1 kHz, in batches every ≤8 ms).
+ * `raw` selects whether batches carry raw samples, which only the device setup screens need.
  * Resolves to a function that stops the stream.
  */
 export async function startStream(
   deviceId: number,
   onBatch: (batch: SampleBatch) => void,
+  raw = true,
 ): Promise<{ token: number; stop: () => Promise<void> }> {
   const channel = new Channel<SampleBatch>();
   channel.onmessage = onBatch;
-  const token = await invoke<number>("start_stream", { deviceId, onBatch: channel });
+  const token = await invoke<number>("start_stream", { deviceId, raw, onBatch: channel });
   return { token, stop: () => invoke<void>("stop_stream", { token }) };
 }
 
@@ -53,6 +56,7 @@ export function normaliseRaw(raw: number): number {
 /**
  * One device's sample stream shared by several consumers (raw monitor, axis wizard, …).
  * Consumers read `latest` when they need it or subscribe to every batch.
+ * `latest` stays null when the stream was started with `raw = false`.
  */
 export class DeviceStream {
   latest: RawSample | null = null;
@@ -63,19 +67,26 @@ export class DeviceStream {
   private stopFn: (() => Promise<void>) | undefined;
   private stopped = false;
 
-  constructor(readonly deviceId: number) {}
+  constructor(
+    readonly deviceId: number,
+    private readonly raw = true,
+  ) {}
 
   public streamToken: number | null = null;
 
   /** Starts the Rust stream. Rejects if the device is gone. */
   async start(): Promise<void> {
-    const { token, stop } = await startStream(this.deviceId, (batch) => {
-      const last = batch.samples.at(-1);
-      if (last) this.latest = last;
-      this.latestFrame = batch.frames.at(-1) ?? null;
-      this.stats = batch.stats;
-      for (const listener of this.listeners) listener(batch);
-    });
+    const { token, stop } = await startStream(
+      this.deviceId,
+      (batch) => {
+        const last = batch.samples.at(-1);
+        if (last) this.latest = last;
+        this.latestFrame = batch.frames.at(-1) ?? null;
+        this.stats = batch.stats;
+        for (const listener of this.listeners) listener(batch);
+      },
+      this.raw,
+    );
     this.streamToken = token;
     if (this.stopped) await stop();
     else this.stopFn = stop;

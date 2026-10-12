@@ -54,8 +54,9 @@ fn list_devices(input: tauri::State<'_, InputService>) -> DevicesSnapshot {
     input.snapshot()
 }
 
-/// Streams raw samples of one device to `on_batch` (about every 8 ms) until `stop_stream`
-/// is called with the returned token.
+/// Streams samples of one device to `on_batch` (about every 8 ms) until `stop_stream`
+/// is called with the returned token. `raw` selects whether batches carry raw samples,
+/// which only the device setup screens need.
 #[tauri::command]
 #[expect(
     clippy::needless_pass_by_value,
@@ -63,10 +64,11 @@ fn list_devices(input: tauri::State<'_, InputService>) -> DevicesSnapshot {
 )]
 fn start_stream(
     device_id: u32,
+    raw: bool,
     on_batch: Channel<SampleBatch>,
     input: tauri::State<'_, InputService>,
 ) -> Result<u64, String> {
-    input.start_stream(device_id, on_batch)
+    input.start_stream(device_id, raw, on_batch)
 }
 
 /// Stops the stream started with `token`, unless a newer stream has replaced it.

@@ -368,7 +368,10 @@ function runImpact(baseRef, repoRoot) {
 
 // Runs static checks over tracked docs and code comments.
 function runStatic(repoRoot) {
-  const tracked = execSync("git ls-files", { encoding: "utf8", cwd: repoRoot })
+  const tracked = execSync("git ls-files --cached --others --exclude-standard", {
+    encoding: "utf8",
+    cwd: repoRoot,
+  })
     .split(/\r?\n/)
     .map((s) => s.trim())
     .filter(Boolean);

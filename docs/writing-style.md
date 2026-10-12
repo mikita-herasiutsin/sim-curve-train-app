@@ -17,8 +17,8 @@ The general rules are adapted from the [unslop skill](https://github.com/cursor/
 1. **Say what it does.** Name the mechanism, the command or the number. "Pedals are read at 1000 Hz" beats "fast, responsive input". If a sentence could appear unchanged in another project's docs, cut it.
 2. **One idea per sentence.** If the reader has to read a sentence twice, split it.
 3. **Active voice.** Name the actor: "the input thread drops the sample", not "the sample is dropped".
-4. **Plain words.** Use "use", not "utilize" or "leverage"; "help", not "facilitate"; "to", not "in order to"; "is" and "has", not "serves as" or "boasts".
-5. **No filler or hedging.** Cut "it is important to note that", "could potentially", "very", and closing summaries such as "this makes the app better".
+4. **Plain words.** Write `use`, not `utilize` or `leverage`; `help`, not `facilitate`; `to`, not `in order to`; `is` and `has`, not `serves as` or `boasts`.
+5. **No filler or hedging.** Cut `it is important to note that`, `could potentially`, `very`, and closing summaries such as "this makes the app better".
 6. **State the point directly.** Drop "not just X, but Y" framing, forced groups of three, and metaphors where a literal word exists.
 7. **Write whole sentences.** Keep the articles and verbs. Spell out arrows and abbreviations the reader may not know.
 8. **Punctuation.** No em dashes or en dashes: use a period or a comma, and write ranges as "3 to 5 minutes" or "3-5 minutes". Straight quotes only. Colons go before a list or an example, not in the middle of a sentence.

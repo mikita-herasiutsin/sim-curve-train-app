@@ -40,43 +40,45 @@ function startWorkflow({ version, full }) {
   return /\/actions\/runs\/(\d+)/.exec(output)?.[1];
 }
 
-/** Older gh versions don't print the run URL: take the newest dispatch run since `since`. */
-async function findRunId(since) {
+const latestRunId = () =>
+  JSON.parse(
+    gh(
+      "run",
+      "list",
+      "--workflow",
+      "release.yml",
+      "--event",
+      "workflow_dispatch",
+      "--limit",
+      "1",
+      "--json",
+      "databaseId",
+    ),
+  )[0]?.databaseId ?? 0;
+
+const publishedTags = () =>
+  JSON.parse(gh("release", "list", "--limit", "20", "--exclude-drafts", "--json", "tagName")).map(
+    (r) => r.tagName,
+  );
+
+/** Older gh versions don't print the run URL, so wait for a run newer than `previousId`. */
+async function findRunId(previousId) {
   for (let attempt = 0; attempt < 20; attempt++) {
-    const runs = JSON.parse(
-      gh(
-        "run",
-        "list",
-        "--workflow",
-        "release.yml",
-        "--event",
-        "workflow_dispatch",
-        "--limit",
-        "1",
-        "--json",
-        "databaseId,createdAt",
-      ),
-    );
-    if (runs[0] && Date.parse(runs[0].createdAt) >= since - 10_000) {
-      return String(runs[0].databaseId);
-    }
+    const id = latestRunId();
+    if (id > previousId) return String(id);
     await sleep(3000);
   }
   fail("No Release run appeared within 60 s. Check the Release workflow in the Actions tab.");
 }
 
-/** The release this run published: the newest one published after `since`. */
-function publishedRelease(since) {
-  const releases = JSON.parse(
-    gh("release", "list", "--limit", "5", "--exclude-drafts", "--json", "tagName,publishedAt"),
-  );
-  const release = releases.find((r) => Date.parse(r.publishedAt) >= since);
-  if (!release) return undefined;
-  // `gh release list` has no url field.
-  return {
-    tag: release.tagName,
-    ...JSON.parse(gh("release", "view", release.tagName, "--json", "url")),
-  };
+/** Returns the release this run published, which is the one missing from `before`. */
+async function newRelease(before) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const tag = publishedTags().find((t) => !before.includes(t));
+    if (tag) return { tag, ...JSON.parse(gh("release", "view", tag, "--json", "url")) };
+    await sleep(2000);
+  }
+  return undefined;
 }
 
 async function main() {
@@ -84,15 +86,16 @@ async function main() {
   if (spawnSync("gh", ["auth", "status"], { stdio: "ignore" }).status !== 0) {
     fail("The GitHub CLI isn't logged in. Run 'gh auth login' first.");
   }
-  const since = Date.now();
-  const runId = startWorkflow(options) ?? (await findRunId(since));
+  const previousRunId = latestRunId();
+  const before = publishedTags();
+  const runId = startWorkflow(options) ?? (await findRunId(previousRunId));
   const runUrl = gh("run", "view", runId, "--json", "url", "--jq", ".url").trim();
   console.log(`Release run: ${runUrl}`);
 
   const watch = spawnSync("gh", ["run", "watch", runId, "--exit-status"], { stdio: "inherit" });
   if (watch.status !== 0) fail(`Release failed: ${runUrl}`);
 
-  const release = publishedRelease(since);
+  const release = await newRelease(before);
   if (!release) fail(`The run passed but no new release was found. Check ${runUrl}`);
   console.log(`Published ${release.tag}: ${release.url}`);
 }

@@ -1,9 +1,10 @@
 name: Release
 
-# Run it from the Actions tab (or `npm run release`) on main: it tags main with the next
-# version, builds the NSIS installer and the portable exe, and publishes a GitHub Release with
-# both attached. Pushing a `v*` tag by hand does the same for that tag. The committed version
-# is a dev placeholder; the release version comes from the tag. See docs/releasing.md.
+# Run it from the Actions tab (or `npm run release`) on main. It builds the NSIS installer and
+# the portable exe for the next version and publishes a GitHub Release with both attached, which
+# also creates the tag on that main commit. Pushing a `v*` tag by hand does the same for that
+# tag. The committed version is a dev placeholder, and the release version comes from the tag.
+# See docs/releasing.md.
 on:
   push:
     tags: ["v*"]
@@ -42,9 +43,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Only release what passed CI: the commit must be on the protected main branch. A new
+      # Only release what passed CI, so the commit must be on the protected main branch. The
       # version must sort above every existing v* tag. A tag that already points at this commit
-      # is reused (a re-run, or a tag pushed by hand) unless its release is already published.
+      # (pushed by hand) is reused unless its release is already published. The tag itself is
+      # created when the release is published, so a failed run leaves at most a draft.
       - name: Resolve version
         shell: bash
         env:
@@ -63,7 +65,8 @@ jobs:
             latest="$(tags | head -n 1)"
             if [ -z "$version" ] && [ -n "$latest" ] &&
               [ "$(git rev-parse "refs/tags/$latest^{commit}")" = "$GITHUB_SHA" ]; then
-              # A re-run after this run already tagged main: release that tag, not the next patch.
+              # main's HEAD already has the highest tag. Rebuild that tag (the check below refuses
+            # it if it is already released) instead of skipping to the next patch.
               version="${latest#v}"
             elif [ -z "$version" ]; then
               if [[ ! "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
@@ -94,19 +97,19 @@ jobs:
             exit 1
           fi
           if [ -n "$existing" ]; then
-            # Fail closed: only "release not found" means there is nothing published to overwrite.
-            if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2> "$RUNNER_TEMP/gh-error.txt")"; then
+            # Fail closed. Only "release not found" means there is nothing published to overwrite.
+            err="$(mktemp)"
+            if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2> "$err")"; then
               if [ "$draft" = false ]; then
                 echo "::error::$tag is already released; release a new version instead"
                 exit 1
               fi
-            elif ! grep -q "release not found" "$RUNNER_TEMP/gh-error.txt"; then
-              echo "::error::Can't check for an existing $tag release: $(cat "$RUNNER_TEMP/gh-error.txt")"
+            elif ! grep -q "release not found" "$err"; then
+              echo "::error::Can't check for an existing $tag release: $(cat "$err")"
               exit 1
             fi
           else
-            git tag "$tag" "$GITHUB_SHA"
-            echo "PUSH_TAG=true" >> "$GITHUB_ENV"
+            git tag "$tag" "$GITHUB_SHA" # local only, for the sort check below
           fi
           if [ "$(tags | head -n 1)" != "$tag" ]; then
             echo "::error::$tag is not higher than the latest tag $(tags | grep -vxF "$tag" | head -n 1)"
@@ -116,13 +119,6 @@ jobs:
           echo "TAG=$tag" >> "$GITHUB_ENV"
           echo "PRERELEASE=$prerelease" >> "$GITHUB_ENV"
           echo "Releasing $tag (prerelease: $prerelease) from $GITHUB_SHA"
-
-      # A tag pushed with GITHUB_TOKEN doesn't start the push: tags trigger, so this is the
-      # only build of it.
-      - name: Push tag
-        if: env.PUSH_TAG == 'true'
-        shell: bash
-        run: git push origin "refs/tags/$TAG"
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -147,7 +143,8 @@ jobs:
         with:
           tagName: ${{ env.TAG }}
           releaseName: SimCurveTrainApp ${{ env.TAG }}
-          # Drafted first and published by the last step, once every check passed.
+          # Drafted first and published by the last step, once every check passed. Publishing
+          # creates the tag on releaseCommitish, which defaults to this run's commit.
           releaseDraft: true
           prerelease: ${{ env.PRERELEASE == 'true' }}
           generateReleaseNotes: true

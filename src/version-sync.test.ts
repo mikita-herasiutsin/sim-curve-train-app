@@ -29,6 +29,11 @@ describe("version sync", () => {
     expect(npmVersion).toBe(cargoVersion);
   });
 
+  // Release builds get their version from the tag (scripts/set-version.mjs), never from a commit.
+  it("main holds the 0.0.0-dev placeholder version", () => {
+    expect(JSON.parse(read("package.json")).version).toBe("0.0.0-dev");
+  });
+
   it("tauri.conf.json does not override the Cargo version", () => {
     expect(JSON.parse(read("src-tauri/tauri.conf.json"))).not.toHaveProperty("version");
   });

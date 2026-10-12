@@ -1,8 +1,8 @@
 # Releasing
 
-A release is one click. The Release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) tags `main`, builds the app, attests the files and publishes the GitHub Release.
+Releasing takes one workflow run. The Release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) builds the app from `main`, attests the files and publishes the GitHub Release, which creates the `v<version>` tag.
 
-The committed version on `main` is the placeholder `0.0.0-dev`, which dev builds show in the header. Release builds get their version from the tag: the workflow runs `node scripts/set-version.mjs <version>` on the runner before it builds. Version bumps never go through a pull request.
+The committed version on `main` is the placeholder `0.0.0-dev`, which dev builds show in the header. Release builds get their version from the tag. The workflow runs `node scripts/set-version.mjs <version>` on the runner before it builds, so version bumps never go through a pull request. To build a tagged version from source with the right version number, run the same script after checking out the tag.
 
 ## Before releasing
 
@@ -37,11 +37,10 @@ The workflow takes the version from the tag. The tag must still be the highest `
 ## What the workflow does
 
 1. It checks that the run is on `main` and that the version is valid semver and higher than every existing `v*` tag.
-2. It tags the `main` commit `v<version>`.
-3. It writes the version into the build with `scripts/set-version.mjs`.
-4. It builds the installer and the portable exe, which takes about 10 to 15 minutes.
-5. It attests both files and checks that both are attached.
-6. It publishes the release. The release exists as a draft until this step, so a failed check never leaves a broken public release.
+2. It writes the version into the build with `scripts/set-version.mjs`.
+3. It builds the installer and the portable exe, which takes about 10 to 15 minutes.
+4. It attests both files and checks that both are attached.
+5. It publishes the release, which creates the tag on the `main` commit the run started from. The release exists as a draft until this step, so a failed check never leaves a broken public release.
 
 The release has two assets:
 
@@ -50,9 +49,9 @@ The release has two assets:
 
 ## If a run fails
 
-Click **Re-run failed jobs** in Actions. The workflow reuses a tag it already pushed to the same commit, and it refuses to touch a release that is already published.
+A failed run leaves at most a draft release and no tag. Click **Re-run failed jobs** in Actions, and the run reuses that draft. The workflow refuses to touch a release that is already published.
 
-To give up on that version instead, delete the draft release and the tag:
+To give up on that version instead, delete the draft release. If you pushed the tag by hand, delete it too:
 
 ```sh
 git push --delete origin v<x.y.z>

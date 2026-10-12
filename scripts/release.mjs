@@ -1,62 +1,50 @@
-// Triggers the Release workflow on main via the GitHub CLI and waits for it.
+// Starts the Release workflow on main via the GitHub CLI, follows it and prints the release URL.
+// See docs/releasing.md.
 //
 // Usage:
-//   npm run release
-//   npm run release -- <version>
-//
-// Examples:
-//   npm run release
-//   npm run release -- 0.1.0
-//   npm run release -- v0.1.0
+//   npm run release                   next patch, as a pre-release
+//   npm run release -- 0.1.0          that version, as a pre-release
+//   npm run release -- 0.1.0 --full   that version, as a full release (marked Latest)
 import { execFileSync, spawnSync } from "node:child_process";
 
 const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$/;
+const USAGE = "Usage: npm run release [-- [<version>] [--full]]";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function parseVersionArg(arg) {
-  if (!arg) return undefined;
-  const version = arg.startsWith("v") ? arg.slice(1) : arg;
-  if (!SEMVER_RE.test(version)) {
-    console.error(`Invalid semver version: '${arg}'.`);
-    console.error("Usage: npm run release [-- <version>]");
-    process.exit(1);
-  }
-  return version;
-}
-
-function checkAuth() {
-  const res = spawnSync("gh", ["auth", "status"], { stdio: "ignore" });
-  if (res.status !== 0) {
-    console.error("GitHub CLI is not authenticated. Please run 'gh auth login'.");
-    process.exit(1);
-  }
-}
-
-function triggerWorkflow(version) {
-  const recordedTime = Date.now();
-  const args = ["workflow", "run", "release.yml", "--ref", "main"];
-  if (version) {
-    args.push("-f", `version=${version}`);
-  }
-  const res = spawnSync("gh", args, { stdio: "inherit" });
-  if (res.status !== 0) {
-    console.error("Failed to trigger release workflow.");
-    process.exit(1);
-  }
-  return recordedTime;
-}
-
 const gh = (...args) => execFileSync("gh", args, { encoding: "utf8" });
 
-async function findRun(recordedTime) {
-  const threshold = recordedTime - 10_000;
-  const deadline = Date.now() + 60_000;
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
 
-  while (Date.now() < deadline) {
-    const res = spawnSync(
-      "gh",
-      [
+function parseArgs(args) {
+  const full = args.includes("--full");
+  const rest = args.filter((arg) => arg !== "--full");
+  if (rest.length > 1) fail(USAGE);
+  if (!rest[0]) return { full };
+  const version = rest[0].replace(/^v/, "");
+  if (!SEMVER_RE.test(version)) fail(`Invalid version '${rest[0]}'.\n${USAGE}`);
+  return { version, full };
+}
+
+/** Starts the workflow and returns its run id, or undefined when gh doesn't print the run URL. */
+function startWorkflow({ version, full }) {
+  const args = ["workflow", "run", "release.yml", "--ref", "main"];
+  if (version) args.push("-f", `version=${version}`);
+  if (full) args.push("-f", "prerelease=false");
+  const res = spawnSync("gh", args, { encoding: "utf8" });
+  const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+  process.stdout.write(output);
+  if (res.status !== 0) fail("Couldn't start the Release workflow.");
+  return /\/actions\/runs\/(\d+)/.exec(output)?.[1];
+}
+
+/** Older gh versions don't print the run URL: take the newest dispatch run since `since`. */
+async function findRunId(since) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const runs = JSON.parse(
+      gh(
         "run",
         "list",
         "--workflow",
@@ -64,71 +52,49 @@ async function findRun(recordedTime) {
         "--event",
         "workflow_dispatch",
         "--limit",
-        "5",
+        "1",
         "--json",
-        "databaseId,url,createdAt",
-      ],
-      { encoding: "utf8" },
+        "databaseId,createdAt",
+      ),
     );
-
-    if (res.status === 0 && res.stdout) {
-      try {
-        const runs = JSON.parse(res.stdout);
-        const matching = runs.filter((r) => new Date(r.createdAt).getTime() >= threshold);
-        if (matching.length > 0) {
-          matching.sort(
-            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-          );
-          const run = matching[0];
-          console.log(`Release run: ${run.url}`);
-          return run;
-        }
-      } catch {
-        // Retry on parse error
-      }
+    if (runs[0] && Date.parse(runs[0].createdAt) >= since - 10_000) {
+      return String(runs[0].databaseId);
     }
-
     await sleep(3000);
   }
-
-  console.error(`No release run found within 60 s. Check the Release workflow in the Actions tab.`);
-  process.exit(1);
+  fail("No Release run appeared within 60 s. Check the Release workflow in the Actions tab.");
 }
 
-function watchRun(run) {
-  const res = spawnSync("gh", ["run", "watch", String(run.databaseId), "--exit-status"], {
-    stdio: "inherit",
-  });
-  if (res.status !== 0) {
-    console.error(`Release failed: ${run.url}`);
-    process.exit(1);
-  }
-}
-
-/** The newest published release; `gh release list` has no url field, so view it by tag. */
-function getPublishedRelease() {
-  const [latest] = JSON.parse(
-    gh("release", "list", "--limit", "1", "--exclude-drafts", "--json", "tagName"),
+/** The release this run published: the newest one published after `since`. */
+function publishedRelease(since) {
+  const releases = JSON.parse(
+    gh("release", "list", "--limit", "5", "--exclude-drafts", "--json", "tagName,publishedAt"),
   );
-  if (!latest) {
-    console.error("No published release found.");
-    process.exit(1);
-  }
-  const { url } = JSON.parse(gh("release", "view", latest.tagName, "--json", "url"));
-  return { tagName: latest.tagName, url };
+  const release = releases.find((r) => Date.parse(r.publishedAt) >= since);
+  if (!release) return undefined;
+  // `gh release list` has no url field.
+  return {
+    tag: release.tagName,
+    ...JSON.parse(gh("release", "view", release.tagName, "--json", "url")),
+  };
 }
 
 async function main() {
-  const version = parseVersionArg(process.argv[2]);
-  checkAuth();
-  const recordedTime = triggerWorkflow(version);
-  const run = await findRun(recordedTime);
-  watchRun(run);
-  const { tagName, url } = getPublishedRelease();
-  console.log(`Published ${tagName}: ${url}`);
+  const options = parseArgs(process.argv.slice(2));
+  if (spawnSync("gh", ["auth", "status"], { stdio: "ignore" }).status !== 0) {
+    fail("The GitHub CLI isn't logged in. Run 'gh auth login' first.");
+  }
+  const since = Date.now();
+  const runId = startWorkflow(options) ?? (await findRunId(since));
+  const runUrl = gh("run", "view", runId, "--json", "url", "--jq", ".url").trim();
+  console.log(`Release run: ${runUrl}`);
+
+  const watch = spawnSync("gh", ["run", "watch", runId, "--exit-status"], { stdio: "inherit" });
+  if (watch.status !== 0) fail(`Release failed: ${runUrl}`);
+
+  const release = publishedRelease(since);
+  if (!release) fail(`The run passed but no new release was found. Check ${runUrl}`);
+  console.log(`Published ${release.tag}: ${release.url}`);
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+await main();

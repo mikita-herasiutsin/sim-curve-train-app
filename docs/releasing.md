@@ -1,10 +1,12 @@
 # Releasing
 
-The committed version on `main` is the placeholder `0.0.0-dev`. Dev builds show this placeholder in the header. Release builds get their version from the release tag. The release workflow runs `node scripts/set-version.mjs <version>` on the runner before building. Nobody bumps versions in a PR any more.
+A release is one click. The Release workflow ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) tags `main`, builds the app, attests the files and publishes the GitHub Release.
+
+The committed version on `main` is the placeholder `0.0.0-dev`, which dev builds show in the header. Release builds get their version from the tag: the workflow runs `node scripts/set-version.mjs <version>` on the runner before it builds. Version bumps never go through a pull request.
 
 ## Before releasing
 
-The CI `Release build` job uploads `SimCurveTrainApp-<sha>` for every push to `main`. This release executable is the only build that applies the Content Security Policy (CSP). Download the artifact for HEAD of `main` from the Actions run. Start it once on Windows 11 to confirm that it launches. That replaces the old clean-VM check on the draft.
+The release publishes without a manual check, so try the build first. CI's `Release build` job uploads `SimCurveTrainApp-<sha>` for every push to `main`. It is a release build, so it applies the Content Security Policy, which `tauri dev` skips. Download the one for the HEAD of `main` from its Actions run and start it once on Windows 11. Nothing tests the NSIS installer before it goes public; if it turns out broken, release a new patch.
 
 ## How to release
 
@@ -12,14 +14,15 @@ The CI `Release build` job uploads `SimCurveTrainApp-<sha>` for every push to `m
 2. Or run the release script locally, with `gh` logged in. It starts the same workflow, follows it and prints the release URL.
 
 ```sh
-npm run release
-# or specify an explicit version
-npm run release -- 0.1.0
+npm run release                    # next patch, as a pre-release
+npm run release -- 0.1.0           # this version, as a pre-release
+npm run release -- 0.1.0 --full    # this version, as a full release
 ```
 
 Workflow inputs:
-- `version`. Leaving this empty picks the next patch version after the highest existing `v*` tag.
-- `prerelease`. On by default; turn it off for a full release. A version with a `-` suffix like `0.2.0-rc.1` always makes a pre-release.
+
+- `version`. Empty picks the next patch after the highest `v*` tag. If the highest tag is a pre-release such as `v0.2.0-rc.1`, enter the version.
+- `prerelease`. On by default; turn it off (`--full` in the script) for a full release, which GitHub marks as Latest. A version with a `-` suffix like `0.2.0-rc.1` is always a pre-release.
 
 Pushing a `v*` tag by hand on a `main` commit still works:
 
@@ -29,19 +32,25 @@ git tag v<x.y.z>
 git push origin v<x.y.z>
 ```
 
-The workflow takes the version from the tag. A hand-pushed tag makes a full release unless it has a `-` suffix.
+The workflow takes the version from the tag. The tag must still be the highest `v*` tag. A hand-pushed tag makes a full release unless it has a `-` suffix.
 
 ## What the workflow does
 
-The workflow verifies that the version is higher than every existing `v*` tag. It tags the `main` commit `v<version>`. It writes the version into the build using `scripts/set-version.mjs`. It builds the installer and portable executable in about 10 to 15 minutes. It attests both files and confirms that both assets are attached. Finally, it publishes the release. The workflow creates the release as a draft first so a failed check never leaves a public broken release.
+1. It checks that the run is on `main` and that the version is valid semver and higher than every existing `v*` tag.
+2. It tags the `main` commit `v<version>`.
+3. It writes the version into the build with `scripts/set-version.mjs`.
+4. It builds the installer and the portable exe, which takes about 10 to 15 minutes.
+5. It attests both files and checks that both are attached.
+6. It publishes the release. The release exists as a draft until this step, so a failed check never leaves a broken public release.
 
-The release includes two assets:
+The release has two assets:
+
 - `SimCurveTrainApp_<x.y.z>_x64-setup.exe`: the NSIS installer
 - `SimCurveTrainApp_windows_x64.exe`: the portable exe (`target/release/SimCurveTrainApp.exe`, renamed by `tauri-action`)
 
 ## If a run fails
 
-Re-run failed jobs in Actions is safe. The version check accepts a tag that already exists at the same commit.
+Click **Re-run failed jobs** in Actions. The workflow reuses a tag it already pushed to the same commit, and it refuses to touch a release that is already published.
 
 To give up on that version instead, delete the draft release and the tag:
 

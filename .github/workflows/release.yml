@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 env:
@@ -60,9 +60,13 @@ jobs:
               exit 1
             fi
             version="${INPUT_VERSION#v}"
-            if [ -z "$version" ]; then
-              latest="$(tags | head -n 1)"
-              if [[ ! "$latest" =~ ^v([0-9]+).([0-9]+).([0-9]+)$ ]]; then
+            latest="$(tags | head -n 1)"
+            if [ -z "$version" ] && [ -n "$latest" ] &&
+              [ "$(git rev-parse "refs/tags/$latest^{commit}")" = "$GITHUB_SHA" ]; then
+              # A re-run after this run already tagged main: release that tag, not the next patch.
+              version="${latest#v}"
+            elif [ -z "$version" ]; then
+              if [[ ! "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
                 echo "::error::Can't pick the next patch after '$latest'; enter a version"
                 exit 1
               fi
@@ -73,7 +77,7 @@ jobs:
             version="${GITHUB_REF_NAME#v}"
             prerelease=false
           fi
-          if [[ ! "$version" =~ ^(0|[1-9][0-9]*).(0|[1-9][0-9]*).(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::'$version' is not a semver version like 1.2.3 or 1.2.3-rc.1"
             exit 1
           fi
@@ -90,19 +94,23 @@ jobs:
             exit 1
           fi
           if [ -n "$existing" ]; then
-            draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2> /dev/null || true)"
-            if [ "$draft" = false ]; then
-              echo "::error::$tag is already released; release a new version instead"
+            # Fail closed: only "release not found" means there is nothing published to overwrite.
+            if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2> "$RUNNER_TEMP/gh-error.txt")"; then
+              if [ "$draft" = false ]; then
+                echo "::error::$tag is already released; release a new version instead"
+                exit 1
+              fi
+            elif ! grep -q "release not found" "$RUNNER_TEMP/gh-error.txt"; then
+              echo "::error::Can't check for an existing $tag release: $(cat "$RUNNER_TEMP/gh-error.txt")"
               exit 1
             fi
           else
             git tag "$tag" "$GITHUB_SHA"
-            if [ "$(tags | head -n 1)" != "$tag" ]; then
-              git tag --delete "$tag" > /dev/null
-              echo "::error::$tag is not higher than the latest release $(tags | head -n 1)"
-              exit 1
-            fi
             echo "PUSH_TAG=true" >> "$GITHUB_ENV"
+          fi
+          if [ "$(tags | head -n 1)" != "$tag" ]; then
+            echo "::error::$tag is not higher than the latest tag $(tags | grep -vxF "$tag" | head -n 1)"
+            exit 1
           fi
           echo "APP_VERSION=$version" >> "$GITHUB_ENV"
           echo "TAG=$tag" >> "$GITHUB_ENV"
@@ -129,7 +137,8 @@ jobs:
       # Writes the version into Cargo.toml, package.json and both lockfiles on the runner, so
       # the file names and the in-app version match the tag.
       - name: Set version
-        run: node scripts/set-version.mjs ${{ env.APP_VERSION }}
+        shell: bash
+        run: node scripts/set-version.mjs "$APP_VERSION"
 
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         id: tauri

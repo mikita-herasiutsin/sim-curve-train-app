@@ -18,7 +18,7 @@ Releases are built by [`.github/workflows/release.yml`](../.github/workflows/rel
    ```
 
    The workflow refuses to build if the tag doesn't equal `v` + the app version, or if the tagged commit isn't on `main`. A tag with a pre-release suffix (e.g. `v0.2.0-rc.1`) creates a pre-release.
-3. **Wait for the Release workflow** (Actions tab, about 10–15 minutes). The draft release appears under Releases with:
+3. **Wait for the Release workflow** (Actions tab, about 10-15 minutes). The draft release appears under Releases with:
    - `SimCurveTrainApp_<x.y.z>_x64-setup.exe`: the NSIS installer
    - `SimCurveTrainApp_windows_x64.exe`: the portable exe (`target/release/SimCurveTrainApp.exe`, renamed by `tauri-action`)
 4. **Smoke-test both files on a clean Windows 11 machine** (a fresh VM or Windows Sandbox works). `tauri dev` never applies the CSP on desktop, so this is the first time the CSP is exercised:

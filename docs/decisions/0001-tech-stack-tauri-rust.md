@@ -13,9 +13,9 @@
 
 | Option | Pros | Cons |
 |---|---|---|
-| **Tauri 2 + Rust + web UI** | Modern UI tooling, small binary (~10 MB), Rust input thread at 1 kHz, mature CI action | Rendering goes through WebView2. Latency is still bounded by the frame rate, so the budget is ~10–20 ms at 144 Hz. |
+| **Tauri 2 + Rust + web UI** | Modern UI tooling, small binary (~10 MB), Rust input thread at 1 kHz, mature CI action | Rendering goes through WebView2. Latency is still bounded by the frame rate, so the budget is ~10-20 ms at 144 Hz. |
 | Rust + egui | Lowest latency, single binary | Looks like a tool rather than a polished app; harder to gamify |
-| C# .NET + WinUI/Avalonia | Mature Windows tooling, easy DirectInput | Self-contained exe is 60–100 MB |
+| C# .NET + WinUI/Avalonia | Mature Windows tooling, easy DirectInput | Self-contained exe is 60-100 MB |
 | Browser (Gamepad API) | No install | Input updates only once per frame (~60 Hz); some pedals are never detected. The competitors that went this way have exactly these problems. |
 
 ## Decision

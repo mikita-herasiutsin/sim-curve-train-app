@@ -772,7 +772,7 @@ async function main() {
       totals.every((t) => t >= 95),
       `rep totals ${totals.join(",")} are not all >= 95`,
     );
-    const summaryGrade = snap.summary.match(/Average:\s*\d+\s*\((\w)\)/)?.[1];
+    const summaryGrade = snap.summary.match(/Average:\s*\d+\s*([SABCD])\b/)?.[1];
     assert(summaryGrade === "S", `set grade ${summaryGrade}, expected S`);
 
     // The drill page saves the finished set. The save is async, so poll for it.
@@ -836,6 +836,13 @@ async function main() {
     const drill = findDrill("sample", "hairpin");
     const traceMode = () =>
       ev(`document.querySelector('[data-testid="trace-view"]')?.dataset.mode ?? null`);
+    // TraceView renders only during a run, so the default is read from the idle toggle.
+    assert(
+      (await ev(
+        `document.querySelector('.view-toggle button[aria-pressed="true"]')?.textContent?.trim() ?? null`,
+      )) === "Ghost",
+      "trace view is not Ghost by default on a fresh data dir",
+    );
     await click("button", "Ghost", `document.querySelector(".view-toggle")`);
     assert(
       (await ev(`localStorage.getItem("sct:trace_view")`)) === "ghost",
@@ -849,6 +856,13 @@ async function main() {
       { timeout: 15_000, interval: 50, what: "GO in the countdown overlay" },
     );
     assert((await traceMode()) === "ghost", "trace view is not in ghost mode at GO");
+    const runDrill = await ev(
+      `document.querySelector('[data-testid="run-drill"]')?.textContent.trim() ?? null`,
+    );
+    assert(
+      runDrill === drill.name,
+      `run panel shows ${JSON.stringify(runDrill)}, expected ${JSON.stringify(drill.name)}`,
+    );
     await waitFor(nowLineDrawn, { timeout: 5_000, what: "the ghost now-line on the canvas" });
     await waitFor(
       () =>
@@ -1132,6 +1146,20 @@ async function main() {
       cardCount === playable.length,
       `home lists ${cardCount} presets, expected ${playable.length}`,
     );
+    // The header badges: the smoke run uses a throwaway data dir and simulated pedals.
+    for (const badge of ["test-data-badge", "sim-pedals-badge"]) {
+      assert(
+        await ev(`Boolean(document.querySelector('[data-testid="${badge}"]'))`),
+        `header has no ${badge}`,
+      );
+    }
+    const buildText = await ev(
+      `document.querySelector('[data-testid="build-info"]')?.textContent ?? ""`,
+    );
+    assert(
+      buildText.includes(" @ "),
+      `build-info reads ${JSON.stringify(buildText)}, expected "<branch> @ <commit> · <worktree>"`,
+    );
     const names = await ev(
       `[...document.querySelectorAll(".preset-name")].map((e) => e.textContent.trim())`,
     );
@@ -1338,11 +1366,13 @@ async function main() {
       `[...document.querySelectorAll(".warm-up-table tbody tr")].map((tr) => [...tr.querySelectorAll("td")].map((td) => td.textContent.trim()))`,
     );
     assert(rows.length === 4, `expected 4 rows in warm-up summary, got ${rows.length}`);
-    const row1Score = Number(rows[0][1]);
+    // A score cell reads "<score> <grade letter>", e.g. "100 S".
+    const row1 = rows[0][1].match(/^(\d+)\s*([SABCD])$/);
     assert(
-      !Number.isNaN(row1Score) && row1Score >= 90,
-      `expected row 1 score to be a number >= 90, got ${rows[0][1]}`,
+      row1 !== null && Number(row1[1]) >= 90 && (row1[2] === "S" || row1[2] === "A"),
+      `expected row 1 to read a score >= 90 with grade S or A, got ${rows[0][1]}`,
     );
+    const row1Score = Number(row1[1]);
     for (let i = 1; i < 4; i++) {
       assert(
         rows[i][1] === "Skipped",

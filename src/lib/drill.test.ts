@@ -3,6 +3,7 @@ import {
   applyDrillEvent,
   DEFAULT_LIFT_MS,
   DEFAULT_TOLERANCE,
+  gradeOf,
   IDLE_VIEW,
   isPlayable,
   liftWindowMs,
@@ -401,5 +402,21 @@ describe("liftWindowMs", () => {
   it("returns explicit liftMs when specified", () => {
     expect(liftWindowMs({ liftMs: 450 })).toBe(450);
     expect(liftWindowMs({ liftMs: 0 })).toBe(0);
+  });
+});
+
+describe("gradeOf", () => {
+  it("maps scores to letter grades at the thresholds", () => {
+    expect(gradeOf(100)).toBe("S");
+    expect(gradeOf(95)).toBe("S");
+    expect(gradeOf(94.99)).toBe("A");
+    expect(gradeOf(85)).toBe("A");
+    expect(gradeOf(84.99)).toBe("B");
+    expect(gradeOf(70)).toBe("B");
+    expect(gradeOf(69.99)).toBe("C");
+    expect(gradeOf(55)).toBe("C");
+    expect(gradeOf(54.99)).toBe("D");
+    expect(gradeOf(0)).toBe("D");
+    expect(gradeOf(-10)).toBe("D");
   });
 });

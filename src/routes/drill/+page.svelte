@@ -18,6 +18,7 @@
     playableDrills,
     toleranceOf,
     liftWindowMs,
+    gradeOf,
     IDLE_VIEW,
     type Preset,
     type Drill,
@@ -106,6 +107,9 @@
   let errorMessage = $state<string | null>(null);
   // Set once the user aborts; the engine still ends the set with a final `setFinished`.
   let aborting = $state(false);
+  // The warm-up step (0-based) whose set is on screen. `warmUp.index` moves on as soon as the set
+  // finishes, so the run panel reads this instead.
+  let runStepIndex = $state(0);
 
   // The target band on the graph, while a hold rep is active or during the GO second.
   const graphBand = $derived<TargetBand | null>(
@@ -304,6 +308,7 @@
       warmUp,
     };
     activeRecord = record;
+    runStepIndex = warmUp?.index ?? 0;
     // The engine ends every run with `setFinished`: after the last rep, on abort, and when the
     // stream stops. The record is saved then, even for a run the screen has given up on.
     const onEvent = (e: DrillEvent) => {
@@ -482,6 +487,9 @@
                       Skipped
                     {:else if res.score !== null && res.score !== undefined}
                       {Math.round(res.score)}
+                      <span class="grade-letter grade-{gradeOf(res.score)}"
+                        >{gradeOf(res.score)}</span
+                      >
                     {:else}
                       —
                     {/if}
@@ -493,8 +501,13 @@
 
           <div class="warm-up-overall">
             <span>Overall score:</span>
-            <span class="warm-up-score" data-testid="warm-up-score">
-              {Math.round(warmUpScore(warmUp.results))}
+            <span>
+              <span class="warm-up-score" data-testid="warm-up-score">
+                {Math.round(warmUpScore(warmUp.results))}
+              </span>
+              <span class="grade-letter grade-{gradeOf(warmUpScore(warmUp.results))}"
+                >{gradeOf(warmUpScore(warmUp.results))}</span
+              >
             </span>
           </div>
           <p class="note">Skipped drills count as 0.</p>
@@ -579,7 +592,7 @@
                   {formatPercentValue(peak / 100, selectedDrill.decimals ?? 0)}%
                 </p>
                 <p><strong>Tolerance:</strong> &plusmn;{toleranceOf(selectedDrill)}%</p>
-                <p class="view-row"><strong>View:</strong> {@render traceViewToggle()}</p>
+                <p class="view-row"><strong>Curve:</strong> {@render traceViewToggle()}</p>
               {/if}
               {#if leadIn}
                 <p data-testid="lead-in-info">
@@ -778,11 +791,17 @@
           {/if}
 
           <div class="rep-info panel">
+            <p class="run-drill" data-testid="run-drill">{selectedDrill?.name}</p>
+            <p class="run-preset" data-testid="run-preset">
+              {selectedPreset?.name}{warmUp
+                ? ` · warm-up, drill ${runStepIndex + 1} of ${warmUp.plan.drills.length}`
+                : ""}
+            </p>
             <h3>Rep {view.currentRep + 1} / {selectedDrill?.reps}</h3>
             <p class="status-badge {view.runState}">{view.runState.toUpperCase()}</p>
             {#if selectedDrill?.type === "trace"}
               <p class="view-row rep-view-row">
-                <strong>View:</strong>
+                <strong>Curve:</strong>
                 {@render traceViewToggle()}
               </p>
             {/if}
@@ -877,23 +896,37 @@
             <div class="summary-card panel">
               <h3>Set Summary</h3>
               <div class="summary-stats">
-                <div><strong>Best:</strong> {Math.round(view.summary.best)}</div>
+                <div>
+                  <strong>Best:</strong>
+                  {Math.round(view.summary.best)}
+                  <span class="grade-letter grade-{gradeOf(view.summary.best)}"
+                    >{gradeOf(view.summary.best)}</span
+                  >
+                </div>
                 <div>
                   <strong>Average:</strong>
-                  {Math.round(view.summary.average)} ({view.summary.grade})
+                  {Math.round(view.summary.average)}
+                  <span class="grade-letter grade-{view.summary.grade}">{view.summary.grade}</span>
                 </div>
                 <div>
                   <strong>Consistency:</strong>
                   {view.summary.consistency === null
                     ? "n/a (one rep)"
                     : `${Math.round(view.summary.consistency)}%`}
+                  {#if view.summary.consistency !== null}
+                    <span class="grade-letter grade-{gradeOf(view.summary.consistency)}"
+                      >{gradeOf(view.summary.consistency)}</span
+                    >
+                  {/if}
                 </div>
               </div>
               <h4>All Reps:</h4>
               <div class="rep-totals">
                 {#each view.reps as r (r.rep)}
                   <span class="rep-pill"
-                    >#{r.rep + 1}: {r.total === null ? "failed" : Math.round(r.total)}</span
+                    >#{r.rep + 1}: {#if r.total === null}failed{:else}{Math.round(r.total)}
+                      <span class="grade-letter grade-{gradeOf(r.total)}">{gradeOf(r.total)}</span
+                      >{/if}</span
                   >
                 {/each}
               </div>
@@ -939,8 +972,8 @@
 {/snippet}
 
 {#snippet traceViewToggle()}
-  <span class="view-toggle" role="group" aria-label="Trace view">
-    {#each [["playhead", "Playhead"], ["ghost", "Ghost"]] as const as [mode, label] (mode)}
+  <span class="view-toggle" role="group" aria-label="Curve">
+    {#each [["ghost", "Ghost"], ["playhead", "Playhead"]] as const as [mode, label] (mode)}
       <button
         type="button"
         class:selected={traceView === mode}
@@ -1231,6 +1264,20 @@
 
   .rep-info h3 {
     margin: 0 0 0.5rem 0;
+  }
+  .run-drill {
+    margin: 0;
+    font-size: 1.05rem;
+    font-weight: 700;
+  }
+  .run-preset {
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+  .grade-letter {
+    font-weight: 700;
+    margin-left: 0.35em;
   }
   .status-badge {
     display: inline-block;

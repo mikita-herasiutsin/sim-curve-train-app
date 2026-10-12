@@ -246,7 +246,7 @@ export function saveLastPreset(id: string): void {
 }
 
 export type TraceViewMode = "playhead" | "ghost";
-export const DEFAULT_TRACE_VIEW: TraceViewMode = "playhead";
+export const DEFAULT_TRACE_VIEW: TraceViewMode = "ghost";
 const TRACE_VIEW_KEY = "sct:trace_view";
 
 export function loadTraceView(): TraceViewMode {

@@ -28,4 +28,20 @@ describe("getAppInfo", () => {
     await expect(getAppInfo()).resolves.toEqual({ name: "SimCurveTrainApp", version: "0.1.0" });
     expect(calls).toEqual(["app_info"]);
   });
+
+  it("returns build info and test flags when present", async () => {
+    const payload = {
+      name: "SimCurveTrainApp",
+      version: "0.1.0",
+      build: { branch: "ui-polish", commit: "abc1234", worktree: "sct-wt-ui-polish" },
+      testData: true,
+      simPedals: true,
+    };
+    mockIPC((cmd) => {
+      if (cmd === "app_info") return payload;
+      throw new Error(`unexpected command ${cmd}`);
+    });
+
+    await expect(getAppInfo()).resolves.toEqual(payload);
+  });
 });

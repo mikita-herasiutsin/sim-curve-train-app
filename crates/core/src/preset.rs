@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 pub const SCHEMA_VERSION: u32 = 1;
 
 pub const DEFAULT_REPS: u32 = 5;
-pub const DEFAULT_LEAD_IN_MS: u32 = 3000;
+pub const DEFAULT_LEAD_IN_MS: u32 = 4000;
 pub const DEFAULT_TOLERANCE: f32 = 10.0;
 
 /// Shortest allowed lead-in in milliseconds: the countdown shows GO for its last second.
@@ -109,7 +109,7 @@ pub struct Drill {
     /// Number of repetitions (`1..=50`, defaults to 5).
     #[serde(default = "default_reps")]
     pub reps: u32,
-    /// Lead-in preparation countdown before each rep in milliseconds (`1000..=10000`, defaults to 3000).
+    /// Lead-in preparation countdown before each rep in milliseconds (`1000..=10000`, defaults to 4000).
     #[serde(default = "default_lead_in")]
     pub lead_in_ms: u32,
     /// Permissible error tolerance in percent (`0.5..=50.0`).
@@ -1247,7 +1247,7 @@ mod tests {
         let parsed = parse_preset(json).expect("defaults should apply cleanly");
         assert_eq!(parsed.description, "");
         assert_eq!(parsed.drills[0].reps, 5);
-        assert_eq!(parsed.drills[0].lead_in_ms, 3000);
+        assert_eq!(parsed.drills[0].lead_in_ms, 4000);
     }
 
     #[test]
@@ -2319,15 +2319,15 @@ mod tests {
         assert_eq!(hold.rep_ms(), 2000);
         assert_eq!(hold.set_ms(0), 3000);
         assert_eq!(hold.set_ms(1), 3000 + 2000);
-        // reps 5: 3000 + 5 * 2000 + 4 * 2000 = 21000
-        assert_eq!(hold.set_ms(5), 21000);
+        // reps 5: 3000 + 5 * 2000 + 4 * 4000 = 29000
+        assert_eq!(hold.set_ms(5), 29000);
 
         let trace = valid_trace_drill(); // duration = 1500, lead_in_ms = 2000
         assert_eq!(trace.rep_ms(), 1500);
         assert_eq!(trace.set_ms(0), 2000);
         assert_eq!(trace.set_ms(1), 2000 + 1500 + 300);
-        // reps 4: 2000 + 4 * 1500 + 3 * 2000 + 4 * 300 = 15200
-        assert_eq!(trace.set_ms(4), 15200);
+        // reps 4: 2000 + 4 * 1500 + 3 * 4000 + 4 * 300 = 21200
+        assert_eq!(trace.set_ms(4), 21200);
     }
 
     #[test]
@@ -2339,8 +2339,8 @@ mod tests {
             lift_ms: Some(300),
         });
         assert_eq!(hold.set_ms(0), 3000);
-        // reps 5: 21000 without the lead-in + 5 * (1500 + 300) = 30000
-        assert_eq!(hold.set_ms(5), 30000);
+        // reps 5: 29000 without the lead-in + 5 * (1500 + 300) = 38000
+        assert_eq!(hold.set_ms(5), 38000);
 
         // An omitted lift window counts as DEFAULT_LIFT_MS.
         if let Some(lead_in) = hold.throttle_lead_in.as_mut() {
@@ -2409,10 +2409,10 @@ mod tests {
         let preset = parse_preset(json).expect("valid warm-up should parse");
         assert!(preset.warm_up.is_some());
         // Hand-computed:
-        // brake-hold-70: 3000 + 20 * 2000 + 19 * 2000 = 81_000 ms
-        // hairpin: 2000 + 30 * 1500 + 29 * 2000 + 30 * 300 = 114_000 ms
-        // Total: 81_000 + 114_000 = 195_000 ms
-        assert_eq!(preset.warm_up_estimate_ms(), Some(195_000));
+        // brake-hold-70: 3000 + 20 * 2000 + 19 * 4000 = 119_000 ms
+        // hairpin: 2000 + 30 * 1500 + 29 * 4000 + 30 * 300 = 172_000 ms
+        // Total: 119_000 + 172_000 = 291_000 ms
+        assert_eq!(preset.warm_up_estimate_ms(), Some(291_000));
     }
 
     #[test]
@@ -2595,13 +2595,13 @@ mod tests {
 
     #[test]
     fn warm_up_estimate_boundaries_are_inclusive() {
-        // Estimate with lead-in 1000 ms: 1000 + reps * (hold_ms + 2000) - 2000.
+        // Estimate with lead-in 1000 ms: 1000 + reps * (hold_ms + 4000) - 4000.
         let cases = [
             // (reps, hold_ms, estimate_ms, valid)
-            (9, 18_111, 179_999, false),
-            (4, 43_250, 180_000, true),
-            (5, 58_200, 300_000, true),
-            (23, 11_087, 300_001, false),
+            (9, 16_333, 179_997, false),
+            (4, 41_750, 180_000, true),
+            (5, 56_600, 300_000, true),
+            (23, 9_174, 300_002, false),
         ];
         for (reps, hold_ms, estimate_ms, valid) in cases {
             let preset = single_hold_warm_up(hold_ms, reps);

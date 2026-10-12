@@ -347,8 +347,8 @@ describe("settings", () => {
   });
 
   describe("loadTraceView & saveTraceView", () => {
-    it("defaults to playhead when nothing is in localStorage", () => {
-      expect(loadTraceView()).toBe(DEFAULT_TRACE_VIEW);
+    it("defaults to ghost when nothing is in localStorage", () => {
+      expect(loadTraceView()).toBe("ghost");
     });
 
     it("saves and loads both modes (round trip)", () => {

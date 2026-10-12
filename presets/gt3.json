@@ -13,7 +13,7 @@
       "tolerance": 7,
       "holdMs": 1500,
       "reps": 5,
-      "leadInMs": 3000
+      "leadInMs": 4000
     },
     {
       "id": "gt3-brake-hold-50",
@@ -24,7 +24,7 @@
       "tolerance": 7,
       "holdMs": 2000,
       "reps": 5,
-      "leadInMs": 3000
+      "leadInMs": 4000
     },
     {
       "id": "gt3-heavy-stop",
@@ -33,7 +33,7 @@
       "pedal": "brake",
       "tolerance": 7,
       "reps": 5,
-      "leadInMs": 2000,
+      "leadInMs": 4000,
       "points": [
         [0, 0],
         [200, 78],
@@ -52,7 +52,7 @@
       "pedal": "brake",
       "tolerance": 7,
       "reps": 5,
-      "leadInMs": 2000,
+      "leadInMs": 4000,
       "points": [
         [0, 0],
         [350, 52],
@@ -70,7 +70,7 @@
       "pedal": "brake",
       "tolerance": 7,
       "reps": 5,
-      "leadInMs": 2000,
+      "leadInMs": 4000,
       "throttleLeadIn": {
         "level": 100,
         "holdMs": 1500
@@ -93,7 +93,7 @@
       "pedal": "throttle",
       "tolerance": 7,
       "reps": 5,
-      "leadInMs": 2000,
+      "leadInMs": 4000,
       "points": [
         [0, 0],
         [150, 66],
@@ -108,7 +108,7 @@
       "pedal": "throttle",
       "tolerance": 7,
       "reps": 5,
-      "leadInMs": 2000,
+      "leadInMs": 4000,
       "points": [
         [0, 0],
         [200, 50],

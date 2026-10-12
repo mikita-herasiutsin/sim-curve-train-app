@@ -13,7 +13,7 @@
       "tolerance": 5,
       "holdMs": 2000,
       "reps": 5,
-      "leadInMs": 3000
+      "leadInMs": 4000
     },
     {
       "id": "throttle-hold-50",
@@ -24,7 +24,7 @@
       "tolerance": 5,
       "holdMs": 2000,
       "reps": 5,
-      "leadInMs": 3000
+      "leadInMs": 4000
     },
     {
       "id": "hairpin",
@@ -33,7 +33,7 @@
       "pedal": "brake",
       "tolerance": 6,
       "reps": 5,
-      "leadInMs": 2000,
+      "leadInMs": 4000,
       "points": [
         [0, 0],
         [150, 100],
@@ -53,7 +53,7 @@
       "decimals": 1,
       "holdMs": 10000,
       "reps": 3,
-      "leadInMs": 3000
+      "leadInMs": 4000
     },
     {
       "id": "hairpin-from-throttle",
@@ -62,7 +62,7 @@
       "pedal": "brake",
       "tolerance": 6,
       "reps": 5,
-      "leadInMs": 2000,
+      "leadInMs": 4000,
       "throttleLeadIn": {
         "level": 80,
         "holdMs": 1500

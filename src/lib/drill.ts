@@ -108,6 +108,17 @@ export interface TraceScore {
 
 export type RepScore = HoldScore | TraceScore;
 
+export type Grade = "S" | "A" | "B" | "C" | "D";
+
+/** Letter grade of a 0-100 score; mirrors `Grade::from_total` in crates/core/src/scoring.rs. */
+export function gradeOf(score: number): Grade {
+  if (score >= 95) return "S";
+  if (score >= 85) return "A";
+  if (score >= 70) return "B";
+  if (score >= 55) return "C";
+  return "D";
+}
+
 // Mirrors sct_core::set_summary::SetSummary (camelCase).
 export interface SetSummary {
   repTotals: number[];

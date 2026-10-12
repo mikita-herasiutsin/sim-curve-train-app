@@ -118,10 +118,10 @@ export function computeVerticalGridLines(
 }
 
 /**
- * Strokes one signal from decimated columns as polylines, starting a new subpath where the gap
+ * Strokes one signal from decimated columns as polylines. Starts a new subpath where the gap
  * between columns with data exceeds `maxColGap`. A column whose min and max differ by 0.5 px or
- * more gets both points, ordered so the one nearer the previous point comes first, so spikes are
- * not lost. Calls ctx.beginPath() once and ctx.stroke() once; allocates nothing.
+ * more gets both points, nearer point first, so spikes stay visible. Calls ctx.beginPath() and
+ * ctx.stroke() once and allocates nothing.
  */
 export function strokeSignal(
   ctx: CanvasRenderingContext2D,

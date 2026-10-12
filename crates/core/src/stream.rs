@@ -50,6 +50,7 @@ impl PedalFrame {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SampleBatch {
+    /// Raw samples; empty for streams started without raw samples (see `start_stream`).
     pub samples: Vec<RawSample>,
     /// The same samples with the active profile applied; empty without a profile.
     pub frames: Vec<PedalFrame>,

@@ -69,7 +69,7 @@
     decimator.reset();
     const cols = decimator.numCols;
 
-    if (!columns) {
+    if (!columns || columns.t.length < stream.history.capacity) {
       columns = createFrameColumns(stream.history.capacity);
     }
 

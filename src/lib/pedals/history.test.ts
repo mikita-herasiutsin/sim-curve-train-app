@@ -158,11 +158,12 @@ describe("FrameHistory", () => {
       }
 
       const expected: PedalFrame[] = [];
-      history.forEachSince(550, (f) => expected.push(f));
+      history.forEachSince(450, (f) => expected.push(f));
 
       const out = createFrameColumns(history.capacity);
-      const n = history.copySince(550, out);
+      const n = history.copySince(450, out);
 
+      expect(n).toBe(4);
       expect(n).toBe(expected.length);
       for (let i = 0; i < n; i++) {
         expect(out.t[i]).toBe(expected[i].t);
@@ -185,6 +186,10 @@ describe("FrameHistory", () => {
       const history = new FrameHistory(5);
       const smallOut = createFrameColumns(4);
       expect(() => history.copySince(0, smallOut)).toThrow();
+
+      const shortBrake = createFrameColumns(history.capacity);
+      shortBrake.brake = new Float32Array(4);
+      expect(() => history.copySince(0, shortBrake)).toThrow();
     });
   });
 });

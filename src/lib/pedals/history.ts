@@ -120,12 +120,13 @@ export class FrameHistory {
 
   /**
    * Copies the frames with t >= tMinUs into `out`, oldest first, and returns how many it copied.
-   * Allocates nothing. Throws if `out.t.length < this.capacity`.
+   * Allocates nothing. Throws if any buffer in `out` is shorter than the capacity.
    */
   copySince(tMinUs: number, out: FrameColumns): number {
-    if (out.t.length < this.capacity) {
+    const minLength = Math.min(out.t.length, out.brake.length, out.throttle.length);
+    if (minLength < this.capacity) {
       throw new Error(
-        `Output buffer size ${out.t.length} is smaller than history capacity ${this.capacity}`,
+        `Output buffer size ${minLength} is smaller than history capacity ${this.capacity}`,
       );
     }
     const count = this.count;

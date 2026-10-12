@@ -1,16 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/svelte";
+import { cleanup, render, screen, waitFor } from "@testing-library/svelte";
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import DevicePanel from "./DevicePanel.svelte";
 import type { DeviceInfo } from "$lib/devices";
 
 describe("DevicePanel component", () => {
+  let startStreamArgs: Record<string, unknown> | undefined;
+
   beforeEach(() => {
-    mockIPC((cmd) => {
+    startStreamArgs = undefined;
+    mockIPC((cmd, args) => {
       switch (cmd) {
         case "load_profile":
           return null;
         case "start_stream":
+          startStreamArgs = args as Record<string, unknown>;
           return 1;
         case "stop_stream":
           return null;
@@ -51,5 +55,12 @@ describe("DevicePanel component", () => {
 
     expect(await screen.findByText("SCT Simulated Pedals")).toBeInTheDocument();
     expect(await screen.findByText("Simulated")).toBeInTheDocument();
+  });
+
+  it("starts the stream with raw samples for the device setup screens", async () => {
+    render(DevicePanel, { device: baseDevice });
+
+    await waitFor(() => expect(startStreamArgs).toBeDefined());
+    expect(startStreamArgs).toMatchObject({ deviceId: baseDevice.id, raw: true });
   });
 });

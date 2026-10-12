@@ -91,7 +91,7 @@
     const shownStartUs = phase.shownStartUs;
     const playheadMs = phase.playheadMs;
 
-    if (!columns) {
+    if (!columns || columns.t.length < stream.history.capacity) {
       columns = createFrameColumns(stream.history.capacity);
     }
 
@@ -101,12 +101,11 @@
       const windowEndUs = shownStartUs + durationMs * 1000;
       const n = stream.history.copySince(windowStartUs, columns);
       for (let i = 0; i < n; i++) {
-        if (columns.t[i] <= windowEndUs) {
-          const p = (userPool[k] ??= [0, 0]);
-          p[0] = (columns.t[i] - shownStartUs) / 1000;
-          p[1] = pedal === "brake" ? columns.brake[i] : columns.throttle[i];
-          user[k++] = p;
-        }
+        if (columns.t[i] > windowEndUs) break;
+        const p = (userPool[k] ??= [0, 0]);
+        p[0] = (columns.t[i] - shownStartUs) / 1000;
+        p[1] = pedal === "brake" ? columns.brake[i] : columns.throttle[i];
+        user[k++] = p;
       }
     }
     user.length = k;
@@ -115,7 +114,8 @@
     if (playheadMs !== null) {
       const latest = stream.history.latest();
       const val = latest ? (pedal === "brake" ? latest.brake : latest.throttle) : 0;
-      const [lo, hi] = curve.envelopeAt(playheadMs);
+      const lo = curve.envelopeLo(playheadMs);
+      const hi = curve.envelopeHi(playheadMs);
       inBand = val >= lo - tolerance && val <= hi + tolerance;
     }
 

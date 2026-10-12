@@ -1,42 +1,56 @@
 # Releasing
 
-Releases are built by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when a `v*` tag is pushed. The workflow creates a **draft** GitHub Release; nothing is public until you publish it.
+The committed version on `main` is the placeholder `0.0.0-dev`. Dev builds show this placeholder in the header. Release builds get their version from the release tag. The release workflow runs `node scripts/set-version.mjs <version>` on the runner before building. Nobody bumps versions in a PR any more.
 
-## Steps
+## Before releasing
 
-1. **Bump the version** on a branch, in both places (`src/version-sync.test.ts` checks that they match):
-   - `version` under `[workspace.package]` in `Cargo.toml`
-   - `package.json`: run `npm version <x.y.z> --no-git-tag-version`
+The CI `Release build` job uploads `SimCurveTrainApp-<sha>` for every push to `main`. This release executable is the only build that applies the Content Security Policy (CSP). Download the artifact for HEAD of `main` from the Actions run. Start it once on Windows 11 to confirm that it launches. That replaces the old clean-VM check on the draft.
 
-   Then run `cargo metadata --format-version 1 > /dev/null` to refresh `Cargo.lock`, and merge the change to `main` through a pull request as usual.
-2. **Tag the merge commit on `main`** and push the tag:
+## How to release
 
-   ```sh
-   git switch main && git pull
-   git tag v<x.y.z>
-   git push origin v<x.y.z>
-   ```
+1. In the Actions tab, open the Release workflow, click **Run workflow** and keep branch `main`.
+2. Or run the release script locally, with `gh` logged in. It starts the same workflow, follows it and prints the release URL.
 
-   The workflow refuses to build if the tag doesn't equal `v` + the app version, or if the tagged commit isn't on `main`. A tag with a pre-release suffix (e.g. `v0.2.0-rc.1`) creates a pre-release.
-3. **Wait for the Release workflow** (Actions tab, about 10–15 minutes). The draft release appears under Releases with:
-   - `SimCurveTrainApp_<x.y.z>_x64-setup.exe`: the NSIS installer
-   - `SimCurveTrainApp_windows_x64.exe`: the portable exe (`target/release/SimCurveTrainApp.exe`, renamed by `tauri-action`)
-4. **Smoke-test both files on a clean Windows 11 machine** (a fresh VM or Windows Sandbox works). `tauri dev` never applies the CSP on desktop, so this is the first time the CSP is exercised:
-   - The installer installs, the app starts from the Start menu, and the header shows the new version.
-   - The portable exe starts from a plain folder (e.g. `Downloads`).
-   - SmartScreen shows the expected "unknown publisher" warning (see below), and nothing else.
-5. **Edit the draft notes** if needed and click **Publish release**.
+```sh
+npm run release
+# or specify an explicit version
+npm run release -- 0.1.0
+```
 
-## If the build fails or the files are wrong
+Workflow inputs:
+- `version`. Leaving this empty picks the next patch version after the highest existing `v*` tag.
+- `prerelease`. On by default; turn it off for a full release. A version with a `-` suffix like `0.2.0-rc.1` always makes a pre-release.
 
-The release is still a draft, so it's safe to redo. Delete the draft release and the tag, fix the problem on `main`, then tag again:
+Pushing a `v*` tag by hand on a `main` commit still works:
+
+```sh
+git switch main && git pull
+git tag v<x.y.z>
+git push origin v<x.y.z>
+```
+
+The workflow takes the version from the tag. A hand-pushed tag makes a full release unless it has a `-` suffix.
+
+## What the workflow does
+
+The workflow verifies that the version is higher than every existing `v*` tag. It tags the `main` commit `v<version>`. It writes the version into the build using `scripts/set-version.mjs`. It builds the installer and portable executable in about 10 to 15 minutes. It attests both files and confirms that both assets are attached. Finally, it publishes the release. The workflow creates the release as a draft first so a failed check never leaves a public broken release.
+
+The release includes two assets:
+- `SimCurveTrainApp_<x.y.z>_x64-setup.exe`: the NSIS installer
+- `SimCurveTrainApp_windows_x64.exe`: the portable exe (`target/release/SimCurveTrainApp.exe`, renamed by `tauri-action`)
+
+## If a run fails
+
+Re-run failed jobs in Actions is safe. The version check accepts a tag that already exists at the same commit.
+
+To give up on that version instead, delete the draft release and the tag:
 
 ```sh
 git push --delete origin v<x.y.z>
 git tag -d v<x.y.z>
 ```
 
-Never move a tag after its release has been published; release a new patch version instead.
+Never move or delete a published tag. Release a new patch version instead.
 
 ## Code signing and SmartScreen
 

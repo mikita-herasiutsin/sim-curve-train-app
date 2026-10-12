@@ -42,6 +42,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false # no step pushes; publishing creates the tag
 
       # Only release what passed CI, so the commit must be on the protected main branch. The
       # version must sort above every existing v* tag. A tag that already points at this commit
@@ -65,8 +66,8 @@ jobs:
             latest="$(tags | head -n 1)"
             if [ -z "$version" ] && [ -n "$latest" ] &&
               [ "$(git rev-parse "refs/tags/$latest^{commit}")" = "$GITHUB_SHA" ]; then
-              # main's HEAD already has the highest tag. Rebuild that tag (the check below refuses
-            # it if it is already released) instead of skipping to the next patch.
+              # main's HEAD already carries the highest tag (pushed by hand). Build that tag; the
+              # release check below fails if it is already published.
               version="${latest#v}"
             elif [ -z "$version" ]; then
               if [[ ! "$latest" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
@@ -96,23 +97,31 @@ jobs:
             echo "::error::Tag $tag already exists on another commit ($existing)"
             exit 1
           fi
-          if [ -n "$existing" ]; then
-            # Fail closed. Only "release not found" means there is nothing published to overwrite.
-            err="$(mktemp)"
-            if draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2> "$err")"; then
-              if [ "$draft" = false ]; then
-                echo "::error::$tag is already released; release a new version instead"
-                exit 1
-              fi
-            elif ! grep -q "release not found" "$err"; then
-              echo "::error::Can't check for an existing $tag release: $(cat "$err")"
-              exit 1
-            fi
-          else
+          if [ -z "$existing" ]; then
             git tag "$tag" "$GITHUB_SHA" # local only, for the sort check below
           fi
           if [ "$(tags | head -n 1)" != "$tag" ]; then
             echo "::error::$tag is not higher than the latest tag $(tags | grep -vxF "$tag" | head -n 1)"
+            exit 1
+          fi
+
+          # A draft for this tag comes from an earlier run. Reuse it when it targets this commit
+          # (a re-run). Otherwise delete it: publishing would put the tag on its old commit.
+          # Fail closed: only "release not found" means there is nothing to overwrite.
+          err="$(mktemp)"
+          if release="$(gh release view "$tag" --json isDraft,targetCommitish \
+            --jq '"\(.isDraft) \(.targetCommitish)"' 2> "$err")"; then
+            read -r draft target <<< "$release"
+            if [ "$draft" = false ]; then
+              echo "::error::$tag is already released on $target; enter a new version"
+              exit 1
+            fi
+            if [ "$target" != "$GITHUB_SHA" ]; then
+              echo "Deleting the $tag draft left by an earlier run on $target"
+              gh release delete "$tag" --yes
+            fi
+          elif ! grep -q "release not found" "$err"; then
+            echo "::error::Can't check for an existing $tag release: $(cat "$err")"
             exit 1
           fi
           echo "APP_VERSION=$version" >> "$GITHUB_ENV"

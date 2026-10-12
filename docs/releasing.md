@@ -21,7 +21,7 @@ npm run release -- 0.1.0 --full    # this version, as a full release
 
 Workflow inputs:
 
-- `version`. Empty picks the next patch after the highest `v*` tag. If the highest tag is a pre-release such as `v0.2.0-rc.1`, enter the version.
+- `version`. Empty picks the next patch after the highest `v*` tag. If the highest tag is a pre-release such as `v0.2.0-rc.1`, enter the version. If `main`'s HEAD already carries the highest tag, the run builds that tag, or fails when it is already released.
 - `prerelease`. On by default; turn it off (`--full` in the script) for a full release, which GitHub marks as Latest. A version with a `-` suffix like `0.2.0-rc.1` is always a pre-release.
 
 Pushing a `v*` tag by hand on a `main` commit still works:
@@ -49,7 +49,9 @@ The release has two assets:
 
 ## If a run fails
 
-A failed run leaves at most a draft release and no tag. Click **Re-run failed jobs** in Actions, and the run reuses that draft. The workflow refuses to touch a release that is already published.
+A failed run leaves at most a draft release and no tag. Click **Re-run failed jobs** in Actions, and the run reuses that draft. A new run of the same version on a later `main` commit deletes the old draft and starts a fresh one. The workflow refuses to touch a release that is already published.
+
+Release runs queue one at a time. GitHub keeps only one waiting run, so starting a third release while one runs and one waits cancels the waiting one.
 
 To give up on that version instead, delete the draft release. If you pushed the tag by hand, delete it too:
 

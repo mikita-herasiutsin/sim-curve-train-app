@@ -60,6 +60,7 @@ npm test             # vitest (frontend unit/component tests)
 npm run rust:fmt     # cargo fmt --check
 npm run rust:lint    # cargo clippy -D warnings (pedantic)
 npm run rust:test    # cargo test --workspace
+npm run docs:check   # links, npm scripts, SCT_* vars, prose rules
 ```
 
 #### Simulated pedals (dev)

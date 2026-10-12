@@ -3,8 +3,6 @@ name: Docs
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -15,7 +13,7 @@ concurrency:
 
 jobs:
   docs:
-    name: Docs check
+    name: Docs impact
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -27,10 +25,8 @@ jobs:
         with:
           node-version-file: .nvmrc
 
-      - run: node scripts/check-docs.mjs
-
       - name: Docs impact
-        if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
           BASE_REF: ${{ github.base_ref }}

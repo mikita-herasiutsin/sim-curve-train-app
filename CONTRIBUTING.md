@@ -46,7 +46,7 @@ Formatting and linting are automated. Don't hand-tune style; run the tools.
 
 ## Docs and writing
 
-- **Docs change with the code.** A pull request that changes behaviour, a command, a flag, an environment variable, a preset field or a file path also updates the doc that describes it. CI enforces this: the `RULES` list in `scripts/check-docs.mjs` maps code paths to the docs they need. A pull request that changes app code without changing any doc needs a line `Docs: none, <reason>` in its body.
+- **Docs change with the code.** A pull request that changes behaviour, a command, a flag, an environment variable, a preset field or a file path also updates the doc that describes it. CI enforces this. The `RULES` list in `scripts/check-docs.mjs` maps code paths to the docs they need. A pull request that changes app code without changing any doc needs a line `Docs: none, <your reason>` in its body.
 - **Write in the project style.** Docs, comments, UI text, commit messages and pull request text follow [docs/writing-style.md](docs/writing-style.md). `npm run docs:check` (part of `npm run verify`) checks links, commands, environment variables and the mechanical prose rules.
 - AI agents also read [AGENTS.md](AGENTS.md).
 

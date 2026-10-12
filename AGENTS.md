@@ -4,7 +4,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) for the code conventions and the pull re
 
 ## Write in the project style
 
-Before you write or edit prose of any kind (a doc, a README, a code comment, UI text, a commit message, a pull request body or a review report), read [docs/writing-style.md](docs/writing-style.md) and follow it. Use the terms from its glossary.
+Before you write or edit prose, read [docs/writing-style.md](docs/writing-style.md) and follow it. It covers docs, code comments, UI text, commit messages, pull request bodies and review reports, and its glossary sets the terms to use.
 
 ## Update the docs in the same change
 
@@ -20,4 +20,4 @@ To find the doc, `git grep` the name you changed in `*.md`. The `RULES` list in 
 
 ## Check before you finish
 
-Run `npm run docs:check` after any doc or comment change, and `npm run verify` after any code change. Both must pass. CI also fails a pull request that changes app code without changing a doc, unless its body has a line `Docs: none, <reason>`.
+Run `npm run docs:check` after any doc or comment change, and `npm run verify` after any code change. Both must pass. CI also fails a pull request that changes app code without changing a doc, unless its body has a line `Docs: none, <your reason>`.

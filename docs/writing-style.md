@@ -21,7 +21,7 @@ The general rules are adapted from the [unslop skill](https://github.com/cursor/
 5. **No filler or hedging.** Cut `it is important to note that`, `could potentially`, `very`, and closing summaries such as "this makes the app better".
 6. **State the point directly.** Drop "not just X, but Y" framing, forced groups of three, and metaphors where a literal word exists.
 7. **Write whole sentences.** Keep the articles and verbs. Spell out arrows and abbreviations the reader may not know.
-8. **Punctuation.** No em dashes or en dashes: use a period or a comma, and write ranges as "3 to 5 minutes" or "3-5 minutes". Straight quotes only. Colons go before a list or an example, not in the middle of a sentence.
+8. **Punctuation.** Don't use em dashes or en dashes. Use a period or a comma, and write ranges as "3 to 5 minutes" or "3-5 minutes". Straight quotes only. Colons go before a list or an example, not in the middle of a sentence.
 9. **Formatting.** Sentence-case headings. Bold only a term the reader must find again, not every product name. No decorative emoji.
 
 ## Steps and UI text
@@ -50,7 +50,7 @@ Use one word per concept, in docs, UI text and code names. Don't swap in synonym
 | warm-up               | A preset's fixed chain of drills, run with one click                                             | warmup, routine         |
 | lead-in               | The countdown before each rep (3, 2, 1, GO)                                                      | countdown, prep         |
 | throttle lead-in      | The throttle hold a brake drill can require before the brake point                               |                         |
-| band                  | The tolerance band: target ± tolerance                                                           | window, zone            |
+| band                  | The tolerance band, target ± tolerance                                                           | window, zone            |
 | profile               | Saved pedal setup for one device: axis mapping and calibration                                   | config                  |
 | attempt               | A saved, scored set                                                                              | result, run             |
 | score, grade          | 0 to 100, and its letter                                                                         | points, rank            |
@@ -63,11 +63,11 @@ Comments follow the general rules. A comment says why the code does something, o
 
 ## What the checker enforces
 
-`npm run docs:check` (part of `npm run verify` and CI) reports:
+`npm run docs:check` (part of `npm run verify`, which CI runs) reports:
 
 - broken relative links and heading anchors,
 - `npm run` scripts that don't exist in `package.json`,
 - `SCT_*` environment variables that the code reads but no doc mentions, or the reverse,
 - em dashes, en dashes, curly quotes, and the most common filler words and phrases, in docs and code comments.
 
-It skips fenced code and inline code for links and prose, and it skips `docs/investigations/`, which holds dated research records. To keep a line that quotes a banned word on purpose, add `<!-- prose-ok -->` to the line (or `prose-ok` in a code comment).
+The link and prose checks skip fenced code and inline code. The prose rules skip `docs/investigations/`, which holds dated research records, and `CODE_OF_CONDUCT.md`, a verbatim copy. The Docs workflow runs only the impact check, so `npm run docs:check` runs in `npm run verify` alone. To keep a line that quotes a banned word on purpose, add `<!-- prose-ok -->` to the line (or `prose-ok` in a code comment).

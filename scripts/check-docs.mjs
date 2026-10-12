@@ -1,8 +1,27 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { posix, resolve } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+
+const REPO_URL =
+  /^https:\/\/github\.com\/mikita-herasiutsin\/sim-curve-train-app\/(?:blob|tree)\/main\/(.+)$/;
+const URI_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+const HEADING = /^[ ]{0,3}#{1,6}\s+(.*?)(?:\s+#+)?\s*$/;
+const ENV_VAR = /\bSCT_[A-Z][A-Z0-9_]*\b/g;
+const NPM_RUN = /\bnpm\s+run\s+([A-Za-z0-9_:-]+)/g;
+
+function git(args, cwd) {
+  return execFileSync("git", args, { encoding: "utf8", cwd });
+}
+
+function normalize(text) {
+  return text.replace(/\r\n/g, "\n");
+}
+
+function blank(line) {
+  return " ".repeat(line.length);
+}
 
 // GitHub heading anchor; counts (a Map) numbers repeated headings in one file.
 export function githubSlug(text, counts = new Map()) {
@@ -16,35 +35,45 @@ export function githubSlug(text, counts = new Map()) {
   return seen === 0 ? base : `${base}-${seen}`;
 }
 
-// Masks fenced code blocks and inline code spans with spaces.
-function maskCode(text) {
-  const lines = text.split("\n");
+// Blanks fenced code blocks with spaces, keeping every line number.
+function maskFences(text) {
   const out = [];
-  let inFence = false;
-  let fenceChar = "";
-  let fenceLen = 0;
+  let fence = null;
 
-  for (const line of lines) {
-    if (!inFence) {
+  for (const line of text.split("\n")) {
+    if (!fence) {
       const match = line.match(/^[ ]{0,3}(`{3,}|~{3,})/);
       if (match) {
-        inFence = true;
-        fenceChar = match[1][0];
-        fenceLen = match[1].length;
-        out.push(" ".repeat(line.length));
+        fence = { char: match[1][0], length: match[1].length };
+        out.push(blank(line));
         continue;
       }
       out.push(line);
     } else {
       const match = line.match(/^[ ]{0,3}(`{3,}|~{3,})\s*$/);
-      if (match && match[1][0] === fenceChar && match[1].length >= fenceLen) {
-        inFence = false;
+      if (match && match[1][0] === fence.char && match[1].length >= fence.length) {
+        fence = null;
       }
-      out.push(" ".repeat(line.length));
+      out.push(blank(line));
     }
   }
 
-  return out.join("\n").replace(/(`+)([\s\S]*?)\1/g, (m) => m.replace(/[^\n]/g, " "));
+  return out.join("\n");
+}
+
+// Blanks inline code spans. A span cannot cross a blank line, so each paragraph is masked alone.
+function maskInlineCode(text) {
+  // The capture group keeps the blank-line separators at odd indexes.
+  return text
+    .split(/(\n[ \t]*\n)/)
+    .map((part, i) =>
+      i % 2 === 0 ? part.replace(/(`+)([\s\S]*?)\1/g, (m) => m.replace(/[^\n]/g, " ")) : part,
+    )
+    .join("");
+}
+
+function maskCode(text) {
+  return maskInlineCode(maskFences(text));
 }
 
 // Counts lines from start of string to index.
@@ -56,57 +85,51 @@ function lineAt(text, index) {
   return line;
 }
 
-// Extracts inline and reference links outside code blocks and spans.
-export function extractLinks(text) {
-  const clean = maskCode(text.replace(/\r\n/g, "\n"));
-  const links = [];
-  const lines = clean.split("\n");
-
-  for (let i = 0; i < lines.length; i++) {
-    const refMatch = lines[i].match(/^[ ]{0,3}\[([^\]]+)\]:\s*<?([^\s>]+)>?/);
-    if (refMatch) {
-      links.push({
-        text: refMatch[1],
-        target: refMatch[2],
-        line: i + 1,
-      });
-    }
+// Returns the link target from the text after "(" or a reference colon.
+function destination(raw) {
+  if (raw.startsWith("<")) {
+    const end = raw.indexOf(">");
+    return end > 0 ? raw.slice(1, end) : null;
   }
+  return raw.split(/\s+/)[0] || null;
+}
 
-  let i = 0;
-  while (i < clean.length) {
-    if (clean[i] === "[") {
-      let depth = 1;
-      let j = i + 1;
-      while (j < clean.length && depth > 0) {
-        if (clean[j] === "[") depth++;
-        else if (clean[j] === "]") depth--;
-        j++;
-      }
-      if (depth === 0 && j < clean.length && clean[j] === "(") {
-        let parenDepth = 1;
-        let k = j + 1;
-        while (k < clean.length && parenDepth > 0) {
-          if (clean[k] === "(") parenDepth++;
-          else if (clean[k] === ")") parenDepth--;
-          k++;
-        }
-        if (parenDepth === 0) {
-          const rawDest = clean.slice(j + 1, k - 1).trim();
-          const target = rawDest.replace(/^<|>$/g, "").split(/\s+/)[0];
-          if (target) {
-            links.push({
-              text: clean.slice(i + 1, j - 1),
-              target,
-              line: lineAt(clean, i),
-            });
-          }
-          i = k;
-          continue;
-        }
-      }
+// Extracts inline, nested and reference links outside code blocks and spans.
+export function extractLinks(text) {
+  const clean = maskCode(normalize(text));
+  const links = [];
+
+  clean.split("\n").forEach((line, i) => {
+    const ref = line.match(/^[ ]{0,3}\[([^\]]+)\]:\s*(<[^>]*>|\S+)/);
+    const target = ref && destination(ref[2]);
+    if (target) links.push({ text: ref[1], target, line: i + 1 });
+  });
+
+  for (let i = 0; i < clean.length; i++) {
+    if (clean[i] !== "[") continue;
+    let depth = 1;
+    let j = i + 1;
+    while (j < clean.length && depth > 0) {
+      if (clean[j] === "[") depth++;
+      else if (clean[j] === "]") depth--;
+      j++;
     }
-    i++;
+    if (depth !== 0 || clean[j] !== "(") continue;
+
+    let parenDepth = 1;
+    let k = j + 1;
+    while (k < clean.length && parenDepth > 0) {
+      if (clean[k] === "(") parenDepth++;
+      else if (clean[k] === ")") parenDepth--;
+      k++;
+    }
+    if (parenDepth !== 0) continue;
+
+    const target = destination(clean.slice(j + 1, k - 1).trim());
+    if (target) {
+      links.push({ text: clean.slice(i + 1, j - 1), target, line: lineAt(clean, i) });
+    }
+    // Keep scanning inside the link text, so an image in [![alt](img.png)](doc.md) is found too.
   }
 
   return links;
@@ -139,14 +162,21 @@ const AI_WORDS = [
   "utilize",
   "utilizes",
   "utilise",
+  "utilized",
+  "utilizing",
   "leverage",
   "leverages",
   "leveraging",
+  "leveraged",
   "facilitate",
   "facilitates",
+  "facilitated",
+  "facilitating",
   "seamless",
   "seamlessly",
+  "boast",
   "boasts",
+  "boasted",
 ];
 
 const FILLER_PHRASES = [
@@ -158,22 +188,17 @@ const FILLER_PHRASES = [
 ];
 
 const PROSE_RULES = [
-  { rule: "em-dash", regex: /\u2014/g },
-  { rule: "en-dash", regex: /\u2013/g },
-  { rule: "curly-quote", regex: /[\u2018\u2019\u201C\u201D]/g },
+  { rule: "em-dash", regex: /—/g },
+  { rule: "en-dash", regex: /–/g },
+  { rule: "curly-quote", regex: /[‘’“”]/g },
   {
     rule: "ai-vocabulary",
-    regex: new RegExp(
-      `\\b(?:${[...AI_WORDS].sort((a, b) => b.length - a.length).join("|")})\\b`,
-      "gi",
-    ),
+    regex: new RegExp(`\\b(?:${AI_WORDS.join("|")})\\b`, "gi"),
   },
   {
     rule: "filler",
     regex: new RegExp(
-      `\\b(?:${FILLER_PHRASES.map((p) => p.replace(/\s+/g, "\\s+"))
-        .sort((a, b) => b.length - a.length)
-        .join("|")})\\b`,
+      `\\b(?:${FILLER_PHRASES.map((p) => p.replace(/\s+/g, "\\s+")).join("|")})\\b`,
       "gi",
     ),
   },
@@ -181,7 +206,7 @@ const PROSE_RULES = [
 
 // Finds prose rule violations in text, skipping fences, inline code and prose-ok.
 export function proseIssues(text) {
-  const raw = text.replace(/\r\n/g, "\n");
+  const raw = normalize(text);
   const masked = maskCode(raw);
   const originalLines = raw.split("\n");
   const maskedLines = masked.split("\n");
@@ -202,44 +227,73 @@ export function proseIssues(text) {
         const matchEnd = match.index + match[0].length;
         const start = Math.max(0, matchStart - 30);
         const end = Math.min(originalLine.length, matchEnd + 30);
-        const excerpt = originalLine.slice(start, end);
         lineIssues.push({
           line: idx + 1,
           rule,
-          excerpt,
+          excerpt: originalLine.slice(start, end),
           index: matchStart,
         });
       }
     }
     lineIssues.sort((a, b) => a.index - b.index);
     for (const issue of lineIssues) {
-      issues.push({
-        line: issue.line,
-        rule: issue.rule,
-        excerpt: issue.excerpt,
-      });
+      issues.push({ line: issue.line, rule: issue.rule, excerpt: issue.excerpt });
     }
   }
 
   return issues;
 }
 
-// Returns the reason from a "Docs: none, <reason>" line in the PR body, or null.
-export function parseOptOut(body = process.env.PR_BODY) {
-  const match = body?.match(/^\s*Docs:\s*none\b[\s,:;.-]*(.+)$/im);
-  const reason = match?.[1].trim() ?? "";
-  return reason.length >= 10 && !reason.includes("<reason>") ? reason : null;
+// Keeps the comment lines of a source file and blanks the code lines.
+// A "/* */" block is tracked across lines, so a continuation line counts as a comment.
+function commentLines(text) {
+  let inBlock = false;
+  return normalize(text)
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trimStart();
+      if (inBlock) {
+        if (line.includes("*/")) inBlock = false;
+        return line;
+      }
+      if (trimmed.startsWith("//") || trimmed.startsWith("<!--")) return line;
+      if (trimmed.startsWith("/*")) {
+        inBlock = !trimmed.includes("*/", 2);
+        return line;
+      }
+      return "";
+    });
 }
 
-// True when the "scripts" block of package.json differs between baseRef and HEAD.
+// Returns the reason from a "Docs: none, <your reason>" line in the PR body, or null.
+export function parseOptOut(body = process.env.PR_BODY) {
+  const match = body?.match(/^[ \t]*Docs:[ \t]*none\b[ \t,:;.-]*([^\r\n]+)$/im);
+  const reason = match?.[1].trim() ?? "";
+  if (reason.length < 10 || reason.includes("<reason>") || reason === "REASON") return null;
+  return reason;
+}
+
+// Reads the "scripts" block of package.json at a git revision, with keys sorted.
+function scriptsAt(rev, repoRoot) {
+  const scripts = JSON.parse(git(["show", `${rev}:package.json`], repoRoot)).scripts ?? {};
+  return JSON.stringify(
+    Object.keys(scripts)
+      .sort()
+      .map((key) => [key, scripts[key]]),
+  );
+}
+
+// True when the "scripts" block of package.json differs between the merge base and HEAD.
 function packageScriptsDiffer(ctx) {
   if (!ctx?.baseRef) return false;
-  const run = (cmd) => execSync(cmd, { encoding: "utf8", cwd: ctx.repoRoot });
-  const scripts = (json) => JSON.stringify(JSON.parse(json).scripts ?? {});
-  return (
-    scripts(run(`git show ${ctx.baseRef}:package.json`)) !==
-    scripts(run("git show HEAD:package.json"))
-  );
+  try {
+    const base = git(["merge-base", ctx.baseRef, "HEAD"], ctx.repoRoot).trim();
+    return scriptsAt(base, ctx.repoRoot) !== scriptsAt("HEAD", ctx.repoRoot);
+  } catch (error) {
+    throw new Error(`cannot compare package.json scripts with ${ctx.baseRef}: ${error.message}`, {
+      cause: error,
+    });
+  }
 }
 
 // Code paths and the docs a pull request must change with them. "any" means any *.md file.
@@ -292,40 +346,145 @@ export function impactFailures(changedFiles, ctx) {
   return failures;
 }
 
-// Extracts headings outside fenced code blocks and computes their slugs.
-function getDocHeadings(filePath, cache) {
-  if (cache.has(filePath)) return cache.get(filePath);
-  const content = readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
-  const lines = content.split("\n");
+// Heading slugs of a Markdown text, outside fenced code blocks.
+function headingSlugs(text) {
   const slugs = new Set();
   const counts = new Map();
-  let inFence = false;
-  let fenceChar = "";
-  let fenceLen = 0;
+  for (const line of maskFences(text).split("\n")) {
+    const match = line.match(HEADING);
+    if (!match) continue;
+    const plain = match[1]
+      .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/\*/g, "")
+      .replace(/(^|[^\p{L}\p{N}])_+/gu, "$1")
+      .replace(/_+(?=[^\p{L}\p{N}]|$)/gu, "");
+    slugs.add(githubSlug(plain, counts));
+  }
+  return slugs;
+}
 
-  for (const line of lines) {
-    if (!inFence) {
-      const match = line.match(/^[ ]{0,3}(`{3,}|~{3,})/);
-      if (match) {
-        inFence = true;
-        fenceChar = match[1][0];
-        fenceLen = match[1].length;
-        continue;
-      }
-      const headingMatch = line.match(/^#{1,6}\s+(.*?)(?:\s+#+)?$/);
-      if (headingMatch) {
-        slugs.add(githubSlug(headingMatch[1].trim(), counts));
-      }
-    } else {
-      const match = line.match(/^[ ]{0,3}(`{3,}|~{3,})\s*$/);
-      if (match && match[1][0] === fenceChar && match[1].length >= fenceLen) {
-        inFence = false;
-      }
+function safeDecode(text, decode) {
+  try {
+    return decode(text);
+  } catch {
+    return text;
+  }
+}
+
+// Returns the problem with a link from docFile, or null when it resolves.
+function linkProblem(docFile, target, { exists, headingsOf }) {
+  let path = target;
+  let repoRelative = false;
+  const repo = path.match(REPO_URL);
+  if (repo) {
+    path = repo[1];
+    repoRelative = true;
+  } else if (URI_SCHEME.test(path)) {
+    return null;
+  }
+
+  const hash = path.indexOf("#");
+  const anchor = hash >= 0 ? path.slice(hash + 1) : null;
+  const beforeHash = hash >= 0 ? path.slice(0, hash) : path;
+  const query = beforeHash.indexOf("?");
+  const pathPart = safeDecode(query >= 0 ? beforeHash.slice(0, query) : beforeHash, decodeURI);
+
+  let resolved;
+  if (pathPart === "") resolved = docFile;
+  else if (repoRelative) resolved = posix.normalize(pathPart);
+  else resolved = posix.normalize(posix.join(posix.dirname(docFile), pathPart));
+
+  if (!exists(resolved)) return `target does not exist: ${target}`;
+
+  if (anchor !== null && (pathPart === "" || resolved.endsWith(".md"))) {
+    const slugs = headingsOf(resolved);
+    if (!slugs.has(anchor) && !slugs.has(safeDecode(anchor, decodeURIComponent))) {
+      return `anchor #${anchor} not found in ${resolved}`;
+    }
+  }
+  return null;
+}
+
+// Collects the first location of each SCT_* variable in the given files.
+function envVars(files, text) {
+  const found = new Map();
+  for (const file of files) {
+    text(file)
+      .split("\n")
+      .forEach((line, i) => {
+        for (const match of line.matchAll(ENV_VAR)) {
+          if (!found.has(match[0])) found.set(match[0], { file, line: i + 1 });
+        }
+      });
+  }
+  return found;
+}
+
+// Runs the static checks on the given files and returns the problems, sorted by file and line.
+// Each file is read once. read(path) returns text, exists(path) returns a boolean, and scripts
+// is the Set of npm script names in package.json.
+export function checkFiles({ docs, prose, code, read, exists, scripts }) {
+  const problems = [];
+  const cache = new Map();
+  const text = (path) => {
+    if (!cache.has(path)) cache.set(path, normalize(read(path)));
+    return cache.get(path);
+  };
+  const headings = new Map();
+  const headingsOf = (path) => {
+    if (!headings.has(path)) headings.set(path, headingSlugs(text(path)));
+    return headings.get(path);
+  };
+  const add = (file, line, rule, message) => problems.push({ file, line, rule, message });
+
+  // Links, then npm scripts.
+  for (const docFile of docs) {
+    for (const link of extractLinks(text(docFile))) {
+      const message = linkProblem(docFile, link.target, { exists, headingsOf });
+      if (message) add(docFile, link.line, "link", message);
+    }
+
+    text(docFile)
+      .split("\n")
+      .forEach((line, i) => {
+        for (const match of line.matchAll(NPM_RUN)) {
+          if (!scripts.has(match[1])) {
+            add(docFile, i + 1, "npm-script", `unknown script "${match[1]}"`);
+          }
+        }
+      });
+  }
+
+  // SCT_* variables that appear on only one side.
+  const docVars = envVars(docs, text);
+  const codeVars = envVars(code, text);
+  for (const [token, loc] of docVars) {
+    if (!codeVars.has(token)) {
+      add(loc.file, loc.line, "env-var", `${token} appears in docs but not in code set`);
+    }
+  }
+  for (const [token, loc] of codeVars) {
+    if (!docVars.has(token)) {
+      add(loc.file, loc.line, "env-var", `${token} appears in code set but not in docs`);
     }
   }
 
-  cache.set(filePath, slugs);
-  return slugs;
+  // Prose rules: whole Markdown files, then the comment lines of code files.
+  for (const file of prose) {
+    for (const issue of proseIssues(text(file))) {
+      add(file, issue.line, issue.rule, `"${issue.excerpt}"`);
+    }
+  }
+  for (const file of code) {
+    for (const issue of proseIssues(commentLines(text(file)).join("\n"))) {
+      add(file, issue.line, issue.rule, `"${issue.excerpt}"`);
+    }
+  }
+
+  return problems.sort((a, b) => {
+    if (a.file !== b.file) return a.file.localeCompare(b.file);
+    return a.line - b.line;
+  });
 }
 
 // Runs impact check against base ref.
@@ -336,22 +495,24 @@ function runImpact(baseRef, repoRoot) {
     process.exit(0);
   }
 
-  let diffText = "";
+  let changedFiles;
   try {
-    diffText = execSync(`git diff --name-only ${baseRef}...HEAD`, {
-      encoding: "utf8",
-      cwd: repoRoot,
-    });
+    changedFiles = git(["diff", "--name-only", `${baseRef}...HEAD`], repoRoot)
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
   } catch (error) {
     console.error(`docs impact: git diff failed: ${error.message}`);
     process.exit(1);
   }
 
-  const changedFiles = diffText
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const failures = impactFailures(changedFiles, { baseRef, repoRoot });
+  let failures;
+  try {
+    failures = impactFailures(changedFiles, { baseRef, repoRoot });
+  } catch (error) {
+    console.error(`docs impact: ${error.message}`);
+    process.exit(1);
+  }
 
   if (failures.length === 0) {
     console.log("docs impact: OK");
@@ -362,223 +523,31 @@ function runImpact(baseRef, repoRoot) {
     const docsLabel = Array.isArray(f.docs) ? f.docs.join(" or ") : f.docs;
     console.log(`docs impact: ${f.name}: changed ${f.file} but none of ${docsLabel}`);
   }
-  console.log('Update the docs in this PR, or add "Docs: none, <reason>" to the PR body.');
+  console.log('Update the docs in this PR, or add "Docs: none, <your reason>" to the PR body.');
   process.exit(1);
 }
 
-// Runs static checks over the docs and code comments, including files not yet committed.
+// Gathers the tracked and new files, runs the static checks and prints the result.
 function runStatic(repoRoot) {
-  const tracked = execSync("git ls-files --cached --others --exclude-standard", {
-    encoding: "utf8",
-    cwd: repoRoot,
-  })
+  const read = (path) => readFileSync(resolve(repoRoot, path), "utf8");
+  const exists = (path) => existsSync(resolve(repoRoot, path));
+
+  const tracked = git(["ls-files", "--cached", "--others", "--exclude-standard"], repoRoot)
     .split(/\r?\n/)
     .map((s) => s.trim())
-    .filter((f) => f && existsSync(resolve(repoRoot, f)));
+    .filter((f) => f && exists(f));
 
-  const docSet = tracked.filter((f) => f.endsWith(".md"));
-  const proseSet = docSet.filter(
+  const docs = tracked.filter((f) => f.endsWith(".md"));
+  const prose = docs.filter(
     (f) => !f.startsWith("docs/investigations/") && f !== "CODE_OF_CONDUCT.md",
   );
-  const codeSet = tracked.filter((f) => {
-    const ext = /\.(rs|ts|svelte|js|mjs)$/.test(f);
-    const dir = /^(src\/|src-tauri\/src\/|crates\/|scripts\/)/.test(f);
-    return ext && dir;
-  });
+  const code = tracked.filter(
+    (f) =>
+      /\.(rs|ts|svelte|js|mjs)$/.test(f) && /^(src\/|src-tauri\/src\/|crates\/|scripts\/)/.test(f),
+  );
+  const scripts = new Set(Object.keys(JSON.parse(read("package.json")).scripts ?? {}));
 
-  const problems = [];
-  const headingCache = new Map();
-
-  // Check 1: Links
-  for (const docFile of docSet) {
-    const docPath = resolve(repoRoot, docFile);
-    const content = readFileSync(docPath, "utf8");
-    const links = extractLinks(content);
-
-    for (const link of links) {
-      let target = link.target;
-      if (target.startsWith("mailto:")) continue;
-
-      let isRepoUrl = false;
-      if (/^https?:\/\//i.test(target)) {
-        const match = target.match(
-          /^https:\/\/github\.com\/mikita-herasiutsin\/sim-curve-train-app\/(?:blob|tree)\/main\/(.+)$/,
-        );
-        if (!match) continue;
-        target = match[1];
-        isRepoUrl = true;
-      }
-
-      const hashIdx = target.indexOf("#");
-      const rawPath = hashIdx >= 0 ? target.slice(0, hashIdx) : target;
-      const anchor = hashIdx >= 0 ? target.slice(hashIdx + 1) : null;
-      const qIdx = rawPath.indexOf("?");
-      const pathPart = qIdx >= 0 ? rawPath.slice(0, qIdx) : rawPath;
-
-      let resolvedPath;
-      if (isRepoUrl) {
-        resolvedPath = resolve(repoRoot, pathPart);
-      } else if (pathPart === "") {
-        resolvedPath = docPath;
-      } else {
-        resolvedPath = resolve(dirname(docPath), pathPart);
-      }
-
-      if (!existsSync(resolvedPath)) {
-        problems.push({
-          file: docFile,
-          line: link.line,
-          rule: "link",
-          message: `target does not exist: ${link.target}`,
-        });
-        continue;
-      }
-
-      if (anchor !== null && (pathPart === "" || resolvedPath.endsWith(".md"))) {
-        const slugs = getDocHeadings(resolvedPath, headingCache);
-        if (!slugs.has(anchor) && !slugs.has(decodeURIComponent(anchor))) {
-          const displayPath = relative(repoRoot, resolvedPath).replace(/\\/g, "/");
-          problems.push({
-            file: docFile,
-            line: link.line,
-            rule: "link",
-            message: `anchor #${anchor} not found in ${displayPath}`,
-          });
-        }
-      }
-    }
-  }
-
-  // Check 2: npm scripts
-  const pkgJsonPath = resolve(repoRoot, "package.json");
-  const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
-  const validScripts = new Set(Object.keys(pkgJson.scripts ?? {}));
-
-  for (const docFile of docSet) {
-    const docPath = resolve(repoRoot, docFile);
-    const content = readFileSync(docPath, "utf8").replace(/\r\n/g, "\n");
-    const lines = content.split("\n");
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const regex = /\bnpm\s+run\s+([A-Za-z0-9_:-]+)/g;
-      let match;
-      while ((match = regex.exec(line)) !== null) {
-        const scriptName = match[1];
-        if (!validScripts.has(scriptName)) {
-          problems.push({
-            file: docFile,
-            line: i + 1,
-            rule: "npm-script",
-            message: `unknown script "${scriptName}"`,
-          });
-        }
-      }
-    }
-  }
-
-  // Check 3: Env vars
-  const docVars = new Map();
-  const codeVars = new Map();
-  const envRegex = /\bSCT_[A-Z][A-Z0-9_]*\b/g;
-
-  for (const docFile of docSet) {
-    const docPath = resolve(repoRoot, docFile);
-    const content = readFileSync(docPath, "utf8").replace(/\r\n/g, "\n");
-    const lines = content.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      let match;
-      envRegex.lastIndex = 0;
-      while ((match = envRegex.exec(lines[i])) !== null) {
-        const token = match[0];
-        if (!docVars.has(token)) {
-          docVars.set(token, { file: docFile, line: i + 1 });
-        }
-      }
-    }
-  }
-
-  for (const codeFile of codeSet) {
-    const codePath = resolve(repoRoot, codeFile);
-    const content = readFileSync(codePath, "utf8").replace(/\r\n/g, "\n");
-    const lines = content.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      let match;
-      envRegex.lastIndex = 0;
-      while ((match = envRegex.exec(lines[i])) !== null) {
-        const token = match[0];
-        if (!codeVars.has(token)) {
-          codeVars.set(token, { file: codeFile, line: i + 1 });
-        }
-      }
-    }
-  }
-
-  for (const [token, loc] of docVars) {
-    if (!codeVars.has(token)) {
-      problems.push({
-        file: loc.file,
-        line: loc.line,
-        rule: "env-var",
-        message: `${token} appears in docs but not in code set`,
-      });
-    }
-  }
-
-  for (const [token, loc] of codeVars) {
-    if (!docVars.has(token)) {
-      problems.push({
-        file: loc.file,
-        line: loc.line,
-        rule: "env-var",
-        message: `${token} appears in code set but not in docs`,
-      });
-    }
-  }
-
-  // Check 4: Prose lint
-  for (const docFile of proseSet) {
-    const docPath = resolve(repoRoot, docFile);
-    const content = readFileSync(docPath, "utf8");
-    const issues = proseIssues(content);
-    for (const issue of issues) {
-      problems.push({
-        file: docFile,
-        line: issue.line,
-        rule: issue.rule,
-        message: `"${issue.excerpt}"`,
-      });
-    }
-  }
-
-  for (const codeFile of codeSet) {
-    const codePath = resolve(repoRoot, codeFile);
-    const content = readFileSync(codePath, "utf8").replace(/\r\n/g, "\n");
-    const lines = content.split("\n");
-    const commentOnly = lines.map((line) => {
-      const trimmed = line.trimStart();
-      const isComment =
-        trimmed.startsWith("//") ||
-        trimmed.startsWith("/*") ||
-        trimmed.startsWith("*") ||
-        trimmed.startsWith("<!--");
-      return isComment ? line : "";
-    });
-    const issues = proseIssues(commentOnly.join("\n"));
-    for (const issue of issues) {
-      problems.push({
-        file: codeFile,
-        line: issue.line,
-        rule: issue.rule,
-        message: `"${issue.excerpt}"`,
-      });
-    }
-  }
-
-  problems.sort((a, b) => {
-    if (a.file !== b.file) return a.file.localeCompare(b.file);
-    return a.line - b.line;
-  });
+  const problems = checkFiles({ docs, prose, code, read, exists, scripts });
 
   if (problems.length === 0) {
     console.log("docs:check: OK");
@@ -594,7 +563,7 @@ function runStatic(repoRoot) {
 
 // Runs checker in static or impact mode.
 function main() {
-  const repoRoot = resolve(execSync("git rev-parse --show-toplevel", { encoding: "utf8" }).trim());
+  const repoRoot = resolve(git(["rev-parse", "--show-toplevel"]).trim());
 
   const impactIdx = process.argv.indexOf("--impact");
   if (impactIdx >= 0) {

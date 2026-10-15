@@ -211,7 +211,8 @@ pub enum DrillEvent {
     SetFinished {
         /// Performance summary across all scored repetitions, or `None` if zero repetitions were scored.
         summary: Option<SetSummary>,
-        /// The attempt saved for this set; `None` when nothing was saved (no rep ended, or the save failed).
+        /// The attempt the drill thread saved for this set; `None` when nothing was saved (no rep
+        /// ended, or the save failed). `DrillRun` always sends `None`; the drill thread fills it in.
         attempt_id: Option<i64>,
         /// Why the set was not saved; `None` when it was saved or there was nothing to save.
         save_error: Option<String>,

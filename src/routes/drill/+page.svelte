@@ -300,7 +300,7 @@
     };
     activeSet = set;
     runStepIndex = warmUp?.index ?? 0;
-    // Rust saves the set; the page only reads the attempt id.
+    // Rust saves the set; the page reads the attempt id and any save error.
     const onEvent = (e: DrillEvent) => {
       if (e.event === "repScored" || e.event === "repFailed") {
         set.ended++;

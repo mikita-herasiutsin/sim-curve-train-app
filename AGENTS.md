@@ -20,7 +20,7 @@ To find the doc, `git grep` the name you changed in `*.md`. The `RULES` list in 
 
 ## Read before you build or run the app
 
-[docs/dev-notes.md](docs/dev-notes.md) lists the build problems on Windows, how to run a second dev app, how to drive the app over CDP for screenshots, and two code rules that tests don't catch.
+[docs/dev-notes.md](docs/dev-notes.md) lists build problems on Windows and how to drive the app over CDP for screenshots. It also has two code rules that tests don't catch.
 
 ## Check before you finish
 

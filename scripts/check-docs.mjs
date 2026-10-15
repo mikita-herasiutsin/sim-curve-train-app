@@ -319,6 +319,16 @@ export const RULES = [
     docs: ["README.md"],
   },
   {
+    name: "quality gates",
+    match: (f) =>
+      f === "quality.config.json" ||
+      f === "scripts/quality.mjs" ||
+      f === "stryker.config.mjs" ||
+      f === ".cargo/mutants.toml" ||
+      f.startsWith("tools/complexity/"),
+    docs: ["CONTRIBUTING.md"],
+  },
+  {
     name: "npm scripts",
     match: (f, ctx) => f === "package.json" && packageScriptsDiffer(ctx),
     docs: ["README.md", "CONTRIBUTING.md"],

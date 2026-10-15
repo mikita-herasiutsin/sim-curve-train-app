@@ -8,6 +8,12 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   plugins: [sveltekit(), svelteTesting()],
 
+  // Stryker runs several Vitest workers at once; a shared deps cache makes their renames clash
+  // (EPERM on Windows), so each worker gets its own.
+  cacheDir: process.env.STRYKER_MUTATOR_WORKER
+    ? `node_modules/.vite-stryker-${process.env.STRYKER_MUTATOR_WORKER}`
+    : undefined,
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

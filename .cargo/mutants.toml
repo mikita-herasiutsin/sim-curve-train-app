@@ -1,0 +1,5 @@
+# cargo-mutants settings for the quality gate (`npm run quality:mutation`, see CONTRIBUTING.md).
+# src-tauri needs the WebView build and real devices, and tools/ is build tooling, so only the
+# crates under crates/ are mutated. To skip a mutant, add an `exclude_re` entry with a comment
+# that says why no test can catch it.
+exclude_globs = ["src-tauri/**", "tools/**"]

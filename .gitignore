@@ -38,3 +38,9 @@ CLAUDE.local.md
 
 # Smoke test output
 smoke-out/
+
+# Quality gate output (npm run quality)
+coverage/
+reports/
+mutants.out*/
+.stryker-tmp/

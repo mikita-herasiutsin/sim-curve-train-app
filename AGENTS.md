@@ -18,6 +18,10 @@ When a change alters something a doc describes, update that doc in the same pull
 
 To find the doc, `git grep` the name you changed in `*.md`. The `RULES` list in `scripts/check-docs.mjs` maps code paths to the docs CI requires.
 
+## Read before you build or run the app
+
+[docs/dev-notes.md](docs/dev-notes.md) lists the build problems on Windows, how to run a second dev app, how to drive the app over CDP for screenshots, and two code rules that tests don't catch.
+
 ## Check before you finish
 
 Run `npm run docs:check` after any doc or comment change, and `npm run verify` after any code change. Both must pass. CI also fails a pull request that changes app code without changing a doc, unless its body has a line `Docs: none, <your reason>`.

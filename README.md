@@ -88,6 +88,8 @@ Run it from a checkout other than the one with an open `tauri dev`: if Rust code
 
 Options: `--keep-open`, `--out <dir>`, and `--no-launch --cdp <port>` (the port is required) to attach to an app that is already running; start that app with `SCT_SIM_PEDALS=1` and a fresh `SCT_DATA_DIR`, as the run aborts if the simulated device already has a profile or attempts. Windows only for now; it is not part of CI.
 
+For build problems, running a second dev app and driving the app over CDP, see [docs/dev-notes.md](docs/dev-notes.md).
+
 ### Layout
 
 ```

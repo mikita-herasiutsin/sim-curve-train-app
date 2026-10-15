@@ -4,7 +4,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::drill_engine::{DrillEvent, RepScore};
+use crate::preset::Drill;
 use crate::profile::Pedal;
+use crate::set_summary::SetSummary;
 
 /// Detailed scores and sub-scores for a single drill repetition in an attempt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,6 +131,107 @@ impl NewAttempt {
             reps,
         }
     }
+}
+
+/// Collects the reps of one drill set from its events and builds the attempt to save when it ends.
+#[derive(Debug, Clone)]
+pub struct SetRecorder {
+    drill_id: String,
+    preset_id: String,
+    pedal: Pedal,
+    planned_reps: u32,
+    started_at: String,
+    reps: Vec<AttemptRep>,
+    ended: u32,
+}
+
+impl SetRecorder {
+    /// Creates a recorder for a set of `drill` from `preset_id` that started at `started_at`.
+    #[must_use]
+    pub fn new(drill: &Drill, preset_id: impl Into<String>, started_at: impl Into<String>) -> Self {
+        Self {
+            drill_id: drill.id.clone(),
+            preset_id: preset_id.into(),
+            pedal: drill.pedal,
+            planned_reps: drill.reps,
+            started_at: started_at.into(),
+            reps: Vec::new(),
+            ended: 0,
+        }
+    }
+
+    /// Counts each rep that ended. A scored rep is also stored, numbered by the event's `rep`;
+    /// a failed rep has no scores, so it is only counted.
+    pub fn observe(&mut self, event: &DrillEvent) {
+        match event {
+            DrillEvent::RepScored { rep, score, .. } => {
+                self.ended = self.ended.saturating_add(1);
+                let rep_record = match score {
+                    RepScore::Hold(hold) => AttemptRep::from_hold(*rep, hold),
+                    RepScore::Trace(trace) => AttemptRep::from_trace(*rep, trace),
+                };
+                self.reps.push(rep_record);
+            }
+            DrillEvent::RepFailed { .. } => {
+                self.ended = self.ended.saturating_add(1);
+            }
+            _ => {}
+        }
+    }
+
+    /// The attempt to save for a set that ended with `summary`, or `None` when no rep ended. A
+    /// set that ended before all its planned reps is `aborted`.
+    #[must_use]
+    pub fn attempt(&self, summary: Option<&SetSummary>) -> Option<NewAttempt> {
+        if self.ended == 0 {
+            return None;
+        }
+        let aborted = self.ended < self.planned_reps;
+        Some(NewAttempt::new(
+            self.drill_id.clone(),
+            self.preset_id.clone(),
+            self.pedal,
+            self.started_at.clone(),
+            aborted,
+            summary,
+            self.reps.clone(),
+        ))
+    }
+}
+
+/// Formats a time since the Unix epoch as UTC ISO 8601 with milliseconds, like JS
+/// `toISOString()`: `2026-10-15T09:30:00.123Z`.
+#[must_use]
+pub fn iso8601_utc(since_epoch: std::time::Duration) -> String {
+    let total_millis = since_epoch.as_millis();
+    let millis = u32::try_from(total_millis % 1000).unwrap_or(0);
+    let total_secs = since_epoch.as_secs();
+    let seconds = u32::try_from(total_secs % 60).unwrap_or(0);
+    let minutes = u32::try_from((total_secs / 60) % 60).unwrap_or(0);
+    let hours = u32::try_from((total_secs / 3600) % 24).unwrap_or(0);
+    let days = i64::try_from(total_secs / 86400).unwrap_or(i64::MAX);
+
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}.{millis:03}Z")
+}
+
+/// Converts days since 1970-01-01 to a `(year, month, day)` date (Howard Hinnant's
+/// `civil_from_days`).
+fn civil_from_days(mut z: i64) -> (i64, u32, u32) {
+    z += 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    #[expect(clippy::cast_sign_loss, reason = "doe is non-negative in 0..=146096")]
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    #[expect(clippy::cast_possible_wrap, reason = "yoe fits in i64")]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = y + i64::from(m <= 2);
+    #[expect(clippy::cast_possible_truncation, reason = "month and day fit in u32")]
+    (year, m as u32, d as u32)
 }
 
 /// A persisted drill set attempt with its assigned unique ID and child reps.
@@ -1392,5 +1496,147 @@ mod tests {
 
         let runs = store.list_warm_up_runs("gt3", 10).unwrap();
         assert_eq!(runs, []);
+    }
+
+    fn dummy_drill(reps: u32) -> crate::preset::Drill {
+        crate::preset::Drill {
+            id: "d".into(),
+            name: "D".into(),
+            pedal: Pedal::Brake,
+            reps,
+            lead_in_ms: 1000,
+            tolerance: Some(5.0),
+            decimals: None,
+            throttle_lead_in: None,
+            kind: crate::preset::DrillKind::Hold {
+                target: 70.0,
+                hold_ms: 1000,
+            },
+        }
+    }
+
+    fn dummy_hold_score(total: f32) -> crate::scoring::HoldScore {
+        crate::scoring::HoldScore {
+            total,
+            accuracy: total,
+            timing: total,
+            smoothness: total,
+            grade: crate::scoring::Grade::S,
+            time_in_band: 0.95,
+            rmse: 0.01,
+            overshoot: 0.02,
+            time_to_band_ms: Some(150.0),
+            jitter: 0.005,
+        }
+    }
+
+    #[test]
+    fn set_recorder_full_set_not_aborted_and_reps_in_order() {
+        let drill = dummy_drill(2);
+        let mut recorder = SetRecorder::new(&drill, "p", "2026-10-15T12:00:00.000Z");
+        let score0 = dummy_hold_score(90.0);
+        let score1 = dummy_hold_score(95.0);
+        recorder.observe(&crate::drill_engine::DrillEvent::RepScored {
+            rep: 0,
+            score: crate::drill_engine::RepScore::Hold(score0.clone()),
+            overlap: None,
+        });
+        recorder.observe(&crate::drill_engine::DrillEvent::RepScored {
+            rep: 1,
+            score: crate::drill_engine::RepScore::Hold(score1.clone()),
+            overlap: None,
+        });
+        let summary = crate::set_summary::summarize_set(&[90.0, 95.0]);
+        let attempt = recorder
+            .attempt(summary.as_ref())
+            .expect("attempt should be created");
+        assert!(!attempt.aborted);
+        assert_eq!(attempt.drill_id, "d");
+        assert_eq!(attempt.preset_id, "p");
+        assert_eq!(attempt.pedal, Pedal::Brake);
+        assert_eq!(attempt.started_at, "2026-10-15T12:00:00.000Z");
+        assert_eq!(attempt.reps.len(), 2);
+        assert_eq!(attempt.reps[0], AttemptRep::from_hold(0, &score0));
+        assert_eq!(attempt.reps[1], AttemptRep::from_hold(1, &score1));
+    }
+
+    #[test]
+    fn set_recorder_ended_after_one_of_two_reps_is_aborted() {
+        let drill = dummy_drill(2);
+        let mut recorder = SetRecorder::new(&drill, "p", "2026-10-15T12:00:00.000Z");
+        let score = dummy_hold_score(90.0);
+        recorder.observe(&crate::drill_engine::DrillEvent::RepScored {
+            rep: 0,
+            score: crate::drill_engine::RepScore::Hold(score.clone()),
+            overlap: None,
+        });
+        let summary = crate::set_summary::summarize_set(&[90.0]);
+        let attempt = recorder
+            .attempt(summary.as_ref())
+            .expect("attempt should be created");
+        assert!(attempt.aborted);
+        assert_eq!(attempt.reps.len(), 1);
+        assert_eq!(attempt.reps[0], AttemptRep::from_hold(0, &score));
+    }
+
+    #[test]
+    fn set_recorder_failed_rep_counts_toward_ended_but_not_stored() {
+        let drill = dummy_drill(2);
+        let mut recorder = SetRecorder::new(&drill, "p", "2026-10-15T12:00:00.000Z");
+        let score = dummy_hold_score(90.0);
+        recorder.observe(&crate::drill_engine::DrillEvent::RepScored {
+            rep: 0,
+            score: crate::drill_engine::RepScore::Hold(score.clone()),
+            overlap: None,
+        });
+        recorder.observe(&crate::drill_engine::DrillEvent::RepFailed {
+            rep: 1,
+            overlap: None,
+        });
+        let summary = crate::set_summary::summarize_set(&[90.0]);
+        let attempt = recorder
+            .attempt(summary.as_ref())
+            .expect("attempt should be created");
+        assert!(!attempt.aborted);
+        assert_eq!(attempt.reps.len(), 1);
+        assert_eq!(attempt.reps[0], AttemptRep::from_hold(0, &score));
+
+        let mut recorder2 = SetRecorder::new(&drill, "p", "2026-10-15T12:00:00.000Z");
+        recorder2.observe(&crate::drill_engine::DrillEvent::RepFailed {
+            rep: 0,
+            overlap: None,
+        });
+        let attempt2 = recorder2
+            .attempt(None)
+            .expect("attempt should be created even if rep failed");
+        assert!(attempt2.aborted);
+        assert_eq!(attempt2.reps, []);
+    }
+
+    #[test]
+    fn set_recorder_no_rep_ended_returns_none() {
+        let drill = dummy_drill(2);
+        let mut recorder = SetRecorder::new(&drill, "p", "2026-10-15T12:00:00.000Z");
+        recorder.observe(&crate::drill_engine::DrillEvent::CountdownStarted {
+            rep: 0,
+            start_us: 0,
+            ends_us: 1_000_000,
+        });
+        assert!(recorder.attempt(None).is_none());
+    }
+
+    #[test]
+    fn iso8601_utc_formats_expected_timestamps() {
+        use std::time::Duration;
+
+        assert_eq!(iso8601_utc(Duration::ZERO), "1970-01-01T00:00:00.000Z");
+        assert_eq!(
+            iso8601_utc(Duration::from_secs(951_782_400)),
+            "2000-02-29T00:00:00.000Z"
+        );
+        assert_eq!(
+            iso8601_utc(Duration::from_millis(1_704_067_199_999)),
+            "2023-12-31T23:59:59.999Z"
+        );
     }
 }

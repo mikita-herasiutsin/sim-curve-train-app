@@ -10,19 +10,32 @@ use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::thread;
 
 use crate::audio::AudioFeedback;
+use sct_core::attempts::{AttemptStore, SetRecorder};
 use sct_core::audio_map::{BAND_HYSTERESIS, ToneTracker};
 use sct_core::drill_engine::{DrillEvent, DrillRun, Phase, THROTTLE_ARM_MARGIN};
 use sct_core::scoring::ValueSample;
+use sct_core::set_summary::SetSummary;
 use tauri::ipc::Channel;
 
 /// Samples the queue holds: about 4 s at 1 kHz. Scoring the longest trace (15 s) pauses the
 /// drill thread for about 10 ms in a release build and 115 ms in a debug build.
 const QUEUE_CAPACITY: usize = 4_096;
 
+/// The attempts store shared by the commands and the drill threads; `None` when it failed to open.
+pub type SharedAttempts = std::sync::Arc<std::sync::Mutex<Option<AttemptStore>>>;
+
+/// Where a drill set is saved when it ends.
+pub struct SetSave {
+    pub preset_id: String,
+    /// UTC ISO 8601 start time of the set.
+    pub started_at: String,
+    pub store: SharedAttempts,
+}
+
 /// The input thread's handle to a drill running on its own thread.
 ///
-/// Dropping it ends the drill: the drill thread handles the samples already queued, then sends
-/// the UI the terminal `SetFinished` (unless the run already finished). A handle dropped before
+/// Dropping it ends the drill: the drill thread handles the samples already queued, then saves
+/// the set and sends the UI the terminal `SetFinished` (unless the run already finished). A handle dropped before
 /// [`DrillThread::start`] ends the thread without sending anything.
 pub struct DrillThread {
     /// Each sample of the drill pedal with the throttle fraction at the same time.
@@ -39,6 +52,7 @@ impl DrillThread {
         t_us: u64,
         channel: Channel<DrillEvent>,
         audio: Option<AudioFeedback>,
+        save: SetSave,
     ) -> io::Result<Self> {
         let (samples, queue) = mpsc::sync_channel(QUEUE_CAPACITY);
         let (go, gate) = mpsc::sync_channel(1);
@@ -49,7 +63,7 @@ impl DrillThread {
                 if gate.recv().is_err() {
                     return;
                 }
-                let mut drill = RunningDrill::new(run, channel, audio);
+                let mut drill = RunningDrill::new(run, channel, audio, save);
                 drill.start(t_us);
                 for (sample, throttle) in queue {
                     if drill.step(sample, throttle) {
@@ -91,7 +105,7 @@ impl DrillThread {
 /// A drill run, owned by its drill thread.
 ///
 /// Dropping it ends the UI's run: unless the engine already sent its own `SetFinished`, the
-/// drop sends one with the summary of the reps scored so far. That covers every way a drill
+/// drop saves the set and sends one with the summary of the reps scored so far. That covers every way a drill
 /// can end, a panic on the drill thread included.
 struct RunningDrill {
     run: DrillRun,
@@ -101,16 +115,26 @@ struct RunningDrill {
     /// Audio feedback output; `None` when the app runs without it (and in tests).
     audio: Option<AudioFeedback>,
     tone: ToneTracker,
+    recorder: SetRecorder,
+    store: SharedAttempts,
 }
 
 impl RunningDrill {
-    fn new(run: DrillRun, channel: Channel<DrillEvent>, audio: Option<AudioFeedback>) -> Self {
+    fn new(
+        run: DrillRun,
+        channel: Channel<DrillEvent>,
+        audio: Option<AudioFeedback>,
+        save: SetSave,
+    ) -> Self {
+        let recorder = SetRecorder::new(run.drill(), save.preset_id, save.started_at);
         Self {
             run,
             channel,
             finished: false,
             audio,
             tone: ToneTracker::default(),
+            recorder,
+            store: save.store,
         }
     }
 
@@ -160,13 +184,47 @@ impl RunningDrill {
         self.finished
     }
 
-    /// Sends `events` to the UI. Marks the run finished once the terminal `SetFinished` is
-    /// out, so the drop never sends a second one.
+    /// Saves the set attempt if any rep ended, and builds the terminal `SetFinished` event.
+    fn finish(&mut self, summary: Option<SetSummary>) -> DrillEvent {
+        // The set is over: no beep while the save runs.
+        if let Some(audio) = &self.audio {
+            audio.set_pulse_rate(0.0);
+        }
+        let (attempt_id, save_error) = match self.recorder.attempt(summary.as_ref()) {
+            None => (None, None),
+            Some(attempt) => {
+                let guard = crate::lock_attempts(&self.store);
+                match guard.as_ref() {
+                    None => (None, Some("attempts store is unavailable".to_owned())),
+                    Some(store) => match store.save_attempt(&attempt) {
+                        Ok(id) => (Some(id), None),
+                        Err(e) => {
+                            eprintln!("failed to save attempt: {e}");
+                            (None, Some(e.to_string()))
+                        }
+                    },
+                }
+            }
+        };
+        DrillEvent::SetFinished {
+            summary,
+            attempt_id,
+            save_error,
+        }
+    }
+
+    /// Sends `events` to the UI. The engine's `SetFinished` saves the set first and goes out with
+    /// the attempt id. The run is marked finished before that send, so the drop never saves or
+    /// sends a second one, even if the send panics.
     fn forward(&mut self, events: Vec<DrillEvent>) {
         for event in events {
-            let terminal = matches!(event, DrillEvent::SetFinished { .. });
+            self.recorder.observe(&event);
+            let event = match event {
+                DrillEvent::SetFinished { summary, .. } => self.finish(summary),
+                other => other,
+            };
+            self.finished |= matches!(event, DrillEvent::SetFinished { .. });
             let _ = self.channel.send(event);
-            self.finished |= terminal;
         }
     }
 }
@@ -178,7 +236,9 @@ impl Drop for RunningDrill {
         }
         if !self.finished {
             let summary = self.run.abort();
-            let _ = self.channel.send(DrillEvent::SetFinished { summary });
+            let event = self.finish(summary);
+            let _ = self.channel.send(event);
+            self.finished = true;
         }
     }
 }
@@ -190,6 +250,7 @@ pub(crate) mod tests {
     use sct_core::preset::{Drill, DrillKind, ThrottleLeadIn};
     use sct_core::profile::Pedal;
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tauri::ipc::InvokeResponseBody;
 
@@ -268,14 +329,70 @@ pub(crate) mod tests {
         }
     }
 
+    /// A `SetSave` for preset "p" on an in-memory store, and the store to read it back.
+    pub(crate) fn memory_save() -> (SetSave, SharedAttempts) {
+        let store = Arc::new(Mutex::new(Some(AttemptStore::open_in_memory().unwrap())));
+        let save = SetSave {
+            preset_id: "p".to_owned(),
+            started_at: "2026-10-15T12:00:00.000Z".to_owned(),
+            store: store.clone(),
+        };
+        (save, store)
+    }
+
+    /// The attempts saved for `drill_id`, newest first.
+    fn saved(store: &SharedAttempts, drill_id: &str) -> Vec<sct_core::attempts::Attempt> {
+        store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .list_attempts(drill_id, 10)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_set_is_saved_when_the_page_is_gone() {
+        // The UI channel fails every send, as after the page closed. It still logs each event,
+        // so `drain` waits for the drill thread to exit.
+        let (sink, log) = mpsc::channel();
+        let channel = Channel::new(move |body| {
+            if let InvokeResponseBody::Json(json) = body {
+                let _ = sink.send(json);
+            }
+            Err(tauri::Error::FailedToReceiveMessage)
+        });
+        let (save, store) = memory_save();
+        let mut thread = DrillThread::spawn(
+            DrillRun::new(hold_drill(), DEFAULT_REST_MS),
+            0,
+            channel,
+            None,
+            save,
+        )
+        .unwrap();
+        thread.start();
+        for ms in 1..=2_500 {
+            assert!(thread.send(ValueSample::new(ms * 1000, 0.70), 0.0));
+        }
+        drop(thread);
+        drain(&log);
+        let attempts = saved(&store, "d");
+        assert_eq!(attempts.len(), 1);
+        assert!(attempts[0].aborted);
+        assert_eq!(attempts[0].reps.len(), 1);
+    }
+
     /// Starts `drill` at 0 on a `RunningDrill` with a detached audio output.
     fn start_with_audio(drill: Drill) -> (RunningDrill, AudioFeedback) {
         let audio = AudioFeedback::detached();
         let (channel, _) = event_channel();
+        let (save, _) = memory_save();
         let mut running = RunningDrill::new(
             DrillRun::new(drill, DEFAULT_REST_MS),
             channel,
             Some(audio.clone()),
+            save,
         );
         running.start(0);
         (running, audio)
@@ -443,11 +560,13 @@ pub(crate) mod tests {
     #[test]
     fn runs_a_trace_set_in_order_on_its_own_thread() {
         let (channel, log) = event_channel();
+        let (save, _) = memory_save();
         let mut thread = DrillThread::spawn(
             DrillRun::new(trace_drill(), DEFAULT_REST_MS),
             0,
             channel,
             None,
+            save,
         )
         .unwrap();
         thread.start();
@@ -468,12 +587,14 @@ pub(crate) mod tests {
     #[test]
     fn a_full_queue_refuses_samples_without_blocking() {
         let (channel, log) = event_channel();
+        let (save, _) = memory_save();
         // Not started yet: the parked thread reads nothing, so the queue fills up.
         let mut thread = DrillThread::spawn(
             DrillRun::new(hold_drill(), DEFAULT_REST_MS),
             0,
             channel,
             None,
+            save,
         )
         .unwrap();
         for ms in 1..=QUEUE_CAPACITY as u64 {
@@ -498,11 +619,13 @@ pub(crate) mod tests {
     #[test]
     fn a_thread_dropped_before_start_sends_nothing() {
         let (channel, log) = event_channel();
+        let (save, store) = memory_save();
         let thread = DrillThread::spawn(
             DrillRun::new(hold_drill(), DEFAULT_REST_MS),
             0,
             channel,
             None,
+            save,
         )
         .unwrap();
         for ms in 1..=10 {
@@ -513,6 +636,7 @@ pub(crate) mod tests {
         }
         drop(thread);
         assert_eq!(drain(&log), Vec::<String>::new());
+        assert_eq!(saved(&store, "d"), []);
     }
 
     #[test]
@@ -533,11 +657,13 @@ pub(crate) mod tests {
             }
             Ok(())
         });
+        let (save, _) = memory_save();
         let mut thread = DrillThread::spawn(
             DrillRun::new(hold_drill(), DEFAULT_REST_MS),
             0,
             channel,
             None,
+            save,
         )
         .unwrap();
         thread.start();
@@ -553,5 +679,153 @@ pub(crate) mod tests {
             ["countdownStarted", "repStarted", "setFinished"]
         );
         assert!(!thread.send(ValueSample::new(1_101_000, 0.70), 0.0));
+    }
+
+    #[test]
+    fn full_set_saved() {
+        let (channel, log) = event_channel();
+        let (save, store) = memory_save();
+        let drill = Drill {
+            id: "d".into(),
+            reps: 2,
+            lead_in_ms: 100,
+            kind: DrillKind::Hold {
+                target: 70.0,
+                hold_ms: 200,
+            },
+            ..hold_drill()
+        };
+        let mut thread =
+            DrillThread::spawn(DrillRun::new(drill, 100), 0, channel, None, save).unwrap();
+        thread.start();
+        for ms in 1..=800 {
+            if !thread.send(ValueSample::new(ms * 1000, 0.70), 0.0) {
+                break;
+            }
+        }
+        let events = drain(&log);
+        let attempts = store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .list_attempts("d", 10)
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        let attempt = &attempts[0];
+        assert!(!attempt.aborted);
+        assert_eq!(attempt.reps.len(), 2);
+        // The summary columns come from the engine's summary.
+        let totals: Vec<f32> = attempt.reps.iter().map(|r| r.total).collect();
+        let summary = sct_core::set_summary::summarize_set(&totals).unwrap();
+        assert_eq!(attempt.average, Some(summary.average));
+        assert_eq!(attempt.consistency, summary.consistency);
+        assert!(attempt.consistency.is_some());
+        let last = events.last().unwrap();
+        assert!(
+            last.contains(&format!("\"attemptId\":{}", attempt.id)),
+            "last event: {last}"
+        );
+        assert!(last.contains("\"saveError\":null"), "last event: {last}");
+    }
+
+    #[test]
+    fn aborted_set_saved() {
+        let (channel, log) = event_channel();
+        let (save, store) = memory_save();
+        let mut thread = DrillThread::spawn(
+            DrillRun::new(hold_drill(), DEFAULT_REST_MS),
+            0,
+            channel,
+            None,
+            save,
+        )
+        .unwrap();
+        thread.start();
+        for ms in 1..=2_500 {
+            assert!(thread.send(ValueSample::new(ms * 1000, 0.70), 0.0));
+        }
+        drop(thread);
+        let events = drain(&log);
+        let attempts = store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .list_attempts("d", 10)
+            .unwrap();
+        assert_eq!(attempts.len(), 1);
+        let attempt = &attempts[0];
+        assert!(attempt.aborted);
+        assert_eq!(attempt.reps.len(), 1);
+        let last = events.last().unwrap();
+        assert!(
+            last.contains(&format!("\"attemptId\":{}", attempt.id)),
+            "last event: {last}"
+        );
+        assert!(last.contains("\"saveError\":null"), "last event: {last}");
+    }
+
+    #[test]
+    fn zero_rep_set_not_saved() {
+        let (channel, log) = event_channel();
+        let (save, store) = memory_save();
+        let mut thread = DrillThread::spawn(
+            DrillRun::new(hold_drill(), DEFAULT_REST_MS),
+            0,
+            channel,
+            None,
+            save,
+        )
+        .unwrap();
+        thread.start();
+        for ms in 1..=500 {
+            assert!(thread.send(ValueSample::new(ms * 1000, 0.70), 0.0));
+        }
+        drop(thread);
+        let events = drain(&log);
+        let attempts = store
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .list_attempts("d", 10)
+            .unwrap();
+        assert_eq!(attempts, []);
+        let last = events.last().unwrap();
+        assert!(last.contains("\"attemptId\":null"), "last event: {last}");
+        assert!(last.contains("\"saveError\":null"), "last event: {last}");
+    }
+
+    #[test]
+    fn store_unavailable() {
+        let (channel, log) = event_channel();
+        let store: SharedAttempts = Arc::new(Mutex::new(None));
+        let save = SetSave {
+            preset_id: "p".into(),
+            started_at: "2026-10-15T12:00:00.000Z".into(),
+            store,
+        };
+        let mut thread = DrillThread::spawn(
+            DrillRun::new(trace_drill(), DEFAULT_REST_MS),
+            0,
+            channel,
+            None,
+            save,
+        )
+        .unwrap();
+        thread.start();
+        for ms in 1..=2_000 {
+            if !thread.send(ValueSample::new(ms * 1000, 0.5), 0.0) {
+                break;
+            }
+        }
+        let events = drain(&log);
+        let last = events.last().unwrap();
+        assert!(last.contains("\"attemptId\":null"), "last event: {last}");
+        assert!(
+            last.contains("\"saveError\":\"attempts store is unavailable\""),
+            "last event: {last}"
+        );
     }
 }

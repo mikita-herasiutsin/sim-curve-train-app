@@ -211,6 +211,11 @@ pub enum DrillEvent {
     SetFinished {
         /// Performance summary across all scored repetitions, or `None` if zero repetitions were scored.
         summary: Option<SetSummary>,
+        /// The attempt the drill thread saved for this set; `None` when nothing was saved (no rep
+        /// ended, or the save failed). `DrillRun` always sends `None`; the drill thread fills it in.
+        attempt_id: Option<i64>,
+        /// Why the set was not saved; `None` when it was saved or there was nothing to save.
+        save_error: Option<String>,
     },
 }
 
@@ -708,7 +713,11 @@ impl DrillRun {
                 .filter_map(|r| r.as_ref().map(RepScore::total))
                 .collect();
             let summary = summarize_set(&scored_totals);
-            events.push(DrillEvent::SetFinished { summary });
+            events.push(DrillEvent::SetFinished {
+                summary,
+                attempt_id: None,
+                save_error: None,
+            });
         }
     }
 
@@ -1013,7 +1022,7 @@ mod tests {
         }
 
         match &events[6] {
-            DrillEvent::SetFinished { summary } => {
+            DrillEvent::SetFinished { summary, .. } => {
                 let summary = summary.as_ref().expect("summary should be present");
                 assert_eq!(summary.rep_totals.len(), 2);
                 assert!(summary.average >= 98.0);
@@ -1090,7 +1099,11 @@ mod tests {
                     rep: 1,
                     overlap: None,
                 },
-                DrillEvent::SetFinished { summary: None },
+                DrillEvent::SetFinished {
+                    summary: None,
+                    attempt_id: None,
+                    save_error: None,
+                },
             ]
         );
 
@@ -1158,7 +1171,10 @@ mod tests {
         }
         assert!(matches!(
             final_events[1],
-            DrillEvent::SetFinished { summary: Some(_) }
+            DrillEvent::SetFinished {
+                summary: Some(_),
+                ..
+            }
         ));
     }
 
@@ -1402,10 +1418,16 @@ mod tests {
         assert_eq!(json_event4["rep"], 2);
 
         let summary = summarize_set(&[90.0, 95.0]);
-        let event5 = DrillEvent::SetFinished { summary };
+        let event5 = DrillEvent::SetFinished {
+            summary,
+            attempt_id: None,
+            save_error: None,
+        };
         let json_event5 = serde_json::to_value(&event5).unwrap();
         assert_eq!(json_event5["event"], "setFinished");
         assert!(json_event5["summary"]["repTotals"].is_array());
+        assert_eq!(json_event5["attemptId"], serde_json::Value::Null);
+        assert_eq!(json_event5["saveError"], serde_json::Value::Null);
 
         let phase = Phase::Active {
             rep: 0,
@@ -1461,7 +1483,11 @@ mod tests {
         assert_eq!(run.phase(), Phase::Finished);
         assert_eq!(
             events.last(),
-            Some(&DrillEvent::SetFinished { summary: None })
+            Some(&DrillEvent::SetFinished {
+                summary: None,
+                attempt_id: None,
+                save_error: None,
+            })
         );
     }
 
@@ -1557,7 +1583,10 @@ mod tests {
         };
         assert!(matches!(
             events[6],
-            DrillEvent::SetFinished { summary: Some(_) }
+            DrillEvent::SetFinished {
+                summary: Some(_),
+                ..
+            }
         ));
 
         // both scores high (>= 90) and nearly equal
@@ -1739,7 +1768,10 @@ mod tests {
         );
         assert!(matches!(
             events[4],
-            DrillEvent::SetFinished { summary: Some(_) }
+            DrillEvent::SetFinished {
+                summary: Some(_),
+                ..
+            }
         ));
     }
 

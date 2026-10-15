@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -1054,6 +1054,8 @@ function runTsMutation({ pilotFiles, diffMap, mode, repoRoot, mutationMin }) {
   });
 
   if (targetFiles.length === 0) return false;
+  // A report left by an earlier run would be scored if Stryker fails to start.
+  rmSync(resolve(repoRoot, "reports/mutation/mutation.json"), { force: true });
   execStryker(mutateList, targetFiles, repoRoot);
   return evaluateStrykerScore(targetFiles, repoRoot, mutationMin);
 }
@@ -1077,11 +1079,11 @@ export function selectRustMutationTargets({ pilotFiles, diffMap, mode, fileExist
   }
   const rustChanged = [...diffMap.keys()].filter((f) => isRustMutationCandidate(f, fileExists));
   const targetFiles = Array.from(new Set([...rustPilot, ...rustChanged]));
-  return { targetFiles, rustPilot };
+  return { targetFiles, rustPilot, rustChanged };
 }
 
 // Builds the cargo mutants command call descriptors for given mode and pilot files.
-export function buildCargoMutantsCalls({ mode, rustPilot }) {
+export function buildCargoMutantsCalls({ mode, rustPilot, rustChanged = [] }) {
   if (mode === "pilot") {
     const args = ["mutants", "-o", "mutants.out"];
     for (const f of rustPilot) {
@@ -1090,13 +1092,16 @@ export function buildCargoMutantsCalls({ mode, rustPilot }) {
     return [{ outDir: "mutants.out", args, needsDiff: false }];
   }
 
-  const calls = [
-    {
-      outDir: "mutants.out",
-      args: ["mutants", "-o", "mutants.out", "--in-diff", "mutants.out/in.diff"],
-      needsDiff: true,
-    },
-  ];
+  // The pilot run tests changed pilot files in full, so the diff run is only for other files.
+  const calls = rustChanged.some((f) => !rustPilot.includes(f))
+    ? [
+        {
+          outDir: "mutants.out",
+          args: ["mutants", "-o", "mutants.out", "--in-diff", "mutants.out/in.diff"],
+          needsDiff: true,
+        },
+      ]
+    : [];
 
   if (rustPilot.length > 0) {
     const pilotArgs = ["mutants", "-o", "mutants.out/pilot"];
@@ -1154,7 +1159,7 @@ function executeMutantCalls(calls, repoRoot, mergeBase) {
 // Runs Rust mutation gate using cargo-mutants.
 function runRustMutation({ pilotFiles, diffMap, mode, repoRoot, mergeBase, mutationMin }) {
   const fileExists = (f) => existsSync(resolve(repoRoot, f));
-  const { targetFiles, rustPilot } = selectRustMutationTargets({
+  const { targetFiles, rustPilot, rustChanged } = selectRustMutationTargets({
     pilotFiles,
     diffMap,
     mode,
@@ -1163,7 +1168,9 @@ function runRustMutation({ pilotFiles, diffMap, mode, repoRoot, mergeBase, mutat
 
   if (targetFiles.length === 0) return false;
 
-  const calls = buildCargoMutantsCalls({ mode, rustPilot });
+  const calls = buildCargoMutantsCalls({ mode, rustPilot, rustChanged });
+  // Outcomes left by an earlier run would be scored for files this run doesn't test.
+  rmSync(resolve(repoRoot, "mutants.out"), { recursive: true, force: true });
   executeMutantCalls(calls, repoRoot, mergeBase);
 
   const totals = aggregateMutantOutcomes(calls, repoRoot);

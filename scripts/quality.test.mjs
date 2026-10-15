@@ -951,9 +951,21 @@ describe("buildCargoMutantsCalls and selectRustMutationTargets", () => {
     const changedCalls = buildCargoMutantsCalls({
       mode: "changed",
       rustPilot: ["crates/core/src/lib.rs"],
+      rustChanged: ["crates/core/src/foo.rs"],
     });
     expect(changedCalls.length).toBe(2);
     expect(changedCalls[0].needsDiff).toBe(true);
+  });
+
+  it("skips the diff run when only pilot files changed", () => {
+    for (const rustChanged of [[], ["crates/core/src/lib.rs"]]) {
+      const calls = buildCargoMutantsCalls({
+        mode: "changed",
+        rustPilot: ["crates/core/src/lib.rs"],
+        rustChanged,
+      });
+      expect(calls.map((c) => c.needsDiff)).toEqual([false]);
+    }
   });
 
   it("selects rust mutation targets", () => {
@@ -965,6 +977,7 @@ describe("buildCargoMutantsCalls and selectRustMutationTargets", () => {
       fileExists: () => true,
     });
     expect(targets.targetFiles).toEqual(["crates/core/src/lib.rs", "crates/core/src/foo.rs"]);
+    expect(targets.rustChanged).toEqual(["crates/core/src/foo.rs"]);
   });
 });
 

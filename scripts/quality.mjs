@@ -281,13 +281,13 @@ function formatMutantText(m) {
   return `${m.mutatorName}: ${m.replacement || ""}`;
 }
 
-// Tallies a single mutant into detected or undetected counts.
-function tallyMutant(m, file, acc) {
+// Tallies a single mutant into detected or undetected counts for a file.
+function tallyStrykerMutant(m, file, counts, mutants) {
   if (DETECTED_STATUSES.has(m.status)) {
-    acc.detected++;
+    counts.detected++;
   } else if (UNDETECTED_STATUSES.has(m.status)) {
-    acc.undetected++;
-    acc.mutants.push({
+    counts.undetected++;
+    mutants.push({
       file,
       line: m.location ? m.location.start?.line : undefined,
       text: formatMutantText(m),
@@ -296,51 +296,83 @@ function tallyMutant(m, file, acc) {
 }
 
 // Tallies all mutants for a single file entry in the Stryker report.
-function tallyFileMutants(fileData, file, acc) {
+function tallyStrykerFile(fileData, file, byFile, mutants) {
+  let counts = byFile.get(file);
+  if (!counts) {
+    counts = { detected: 0, undetected: 0 };
+    byFile.set(file, counts);
+  }
   for (const m of fileData.mutants || []) {
-    tallyMutant(m, file, acc);
+    tallyStrykerMutant(m, file, counts, mutants);
   }
 }
 
-// Counts detected and undetected mutants from Stryker JSON report.
+// Counts detected and undetected mutants per file from Stryker JSON report.
 export function strykerCounts(report, files) {
-  const acc = { detected: 0, undetected: 0, mutants: [] };
+  const byFile = new Map();
+  const mutants = [];
   const fileSet = toFileSet(files);
   const reportFiles = report?.files || {};
 
   for (const [key, data] of Object.entries(reportFiles)) {
     const matched = matchFileKey(key.replace(/\\/g, "/"), fileSet);
     if (matched) {
-      tallyFileMutants(data, matched, acc);
+      tallyStrykerFile(data, matched, byFile, mutants);
     }
   }
 
-  Object.defineProperty(acc, "undetectedMutants", {
-    value: acc.mutants,
+  const result = { byFile, mutants };
+  Object.defineProperty(result, "undetectedMutants", {
+    value: mutants,
     enumerable: false,
   });
-  return acc;
+  return result;
 }
 
-// Counts detected and undetected mutants from cargo-mutants outcomes array.
-export function cargoMutantsCounts(outcomes) {
-  let detected = 0;
-  let undetected = 0;
-  const mutants = [];
+const CARGO_DETECTED_STATUSES = new Set(["CaughtMutant", "Timeout"]);
 
-  for (const item of outcomes ?? []) {
-    const summary = item.summary;
-    if (summary === "CaughtMutant" || summary === "Timeout") {
-      detected++;
-    } else if (summary === "MissedMutant") {
-      undetected++;
-      mutants.push({
-        text: item.scenario?.Mutant?.name ?? "",
-      });
-    }
+// Tallies a single cargo-mutants outcome into per-file detected or undetected counts.
+function tallyCargoOutcome(item, byFile, mutants) {
+  const mutant = item.scenario?.Mutant;
+  const fileRaw = mutant?.file;
+  if (!fileRaw) return;
+  const file = fileRaw.replace(/\\/g, "/");
+
+  let counts = byFile.get(file);
+  if (!counts) {
+    counts = { detected: 0, undetected: 0 };
+    byFile.set(file, counts);
   }
 
-  const result = { detected, undetected, mutants };
+  if (CARGO_DETECTED_STATUSES.has(item.summary)) {
+    counts.detected++;
+  } else if (item.summary === "MissedMutant") {
+    counts.undetected++;
+    mutants.push({
+      file,
+      text: mutant?.name ?? "",
+    });
+  }
+}
+
+// Counts detected and undetected mutants per file from cargo-mutants outcomes array.
+export function cargoMutantsCounts(outcomes, ...more) {
+  const byFile = new Map();
+  const mutants = [];
+  const seen = new Set();
+  const list = [outcomes, ...more].flat(2);
+
+  for (const item of list) {
+    if (!item) continue;
+    const name = item.scenario?.Mutant?.name;
+    if (name) {
+      if (seen.has(name)) continue;
+      seen.add(name);
+    }
+    tallyCargoOutcome(item, byFile, mutants);
+  }
+
+  const result = { byFile, mutants };
   Object.defineProperty(result, "undetectedMutants", {
     value: mutants,
     enumerable: false,
@@ -949,34 +981,66 @@ function execStryker(mutateList, targetFiles, repoRoot, runner) {
   }
 }
 
-// Logs surviving or uncovered mutants from Stryker run.
-function logMutantText(mutants) {
-  for (const m of mutants) {
-    console.log(`${m.file}:${m.line} ${m.text}`);
+// Formats one score line for a file in a mutation run.
+export function formatFileScoreLine(lang, file, counts, mutationMin) {
+  const total = counts.detected + counts.undetected;
+  if (total === 0) return null;
+  const score = mutationScore(counts);
+  const scoreStr = `${score.toFixed(1)}%`;
+  const failed = score < mutationMin;
+  const suffix = failed ? " FAIL" : "";
+  return {
+    line: `mutation ${lang} ${file}: ${counts.detected}/${total} detected = ${scoreStr} (min ${mutationMin})${suffix}`,
+    failed,
+  };
+}
+
+// Logs undetected mutants for a language.
+export function logUndetectedMutants(lang, mutants, logger = console.log) {
+  if (lang === "rust") {
+    for (const m of mutants) {
+      logger(m.text);
+    }
+  } else {
+    for (const m of mutants) {
+      logger(`${m.file}:${m.line} ${m.text}`);
+    }
   }
 }
 
-// Computes and logs Stryker mutation score summary.
-function logStrykerScore(counts, mutationMin) {
-  const score = mutationScore(counts);
-  const scoreStr = score !== null ? `${score.toFixed(1)}%` : "-";
-  console.log(
-    `mutation ts: ${counts.detected}/${counts.detected + counts.undetected} detected = ${scoreStr} (min ${mutationMin})`,
-  );
-  return score !== null && score < mutationMin;
+// Formats and logs per-file mutation scores and undetected mutants for a language.
+export function evaluateMutationCounts(lang, counts, mutationMin, logger = console.log) {
+  let hasFailed = false;
+  for (const [file, fileCounts] of counts.byFile || []) {
+    const formatted = formatFileScoreLine(lang, file, fileCounts, mutationMin);
+    if (!formatted) continue;
+    logger(formatted.line);
+    if (formatted.failed) {
+      hasFailed = true;
+    }
+  }
+  logUndetectedMutants(lang, counts.mutants || [], logger);
+  return hasFailed;
 }
 
 // Reads and scores Stryker results against minimum threshold.
-function evaluateStrykerScore(targetFiles, repoRoot, mutationMin, fileReader) {
+export function evaluateStrykerScore(
+  targetFiles,
+  repoRoot,
+  mutationMin,
+  fileReader,
+  fileExists,
+  logger = console.log,
+) {
+  const exists = fileExists || existsSync;
   const read = fileReader || readFileSync;
   const reportPath = resolve(repoRoot, "reports/mutation/mutation.json");
-  if (!existsSync(reportPath)) {
+  if (!exists(reportPath)) {
     throw new Error("missing Stryker report: reports/mutation/mutation.json");
   }
   const report = JSON.parse(read(reportPath, "utf8"));
   const counts = strykerCounts(report, targetFiles);
-  logMutantText(counts.mutants);
-  return logStrykerScore(counts, mutationMin);
+  return evaluateMutationCounts("ts", counts, mutationMin, logger);
 }
 
 // Runs TypeScript mutation gate using Stryker.
@@ -1064,38 +1128,17 @@ function execCargoMutants(args, repoRoot, runner) {
 }
 
 // Aggregates mutant results across multiple outcome directories.
-function aggregateMutantOutcomes(calls, repoRoot) {
-  let detected = 0;
-  let undetected = 0;
-  const mutants = [];
-
+export function aggregateMutantOutcomes(calls, repoRoot, fileReader, fileExists) {
+  const allOutcomes = [];
   for (const { outDir } of calls) {
-    const outcomes = readOutcomes(outDir, repoRoot);
-    const counts = cargoMutantsCounts(outcomes);
-    detected += counts.detected;
-    undetected += counts.undetected;
-    mutants.push(...counts.mutants);
+    allOutcomes.push(...readOutcomes(outDir, repoRoot, fileReader, fileExists));
   }
-
-  return { detected, undetected, mutants };
-}
-
-// Logs undetected mutant scenario names from cargo mutants.
-function logCargoMutants(mutants) {
-  for (const m of mutants) {
-    console.log(m.text);
-  }
+  return cargoMutantsCounts(allOutcomes);
 }
 
 // Evaluates aggregate Rust mutation score against minimum required threshold.
-function evaluateRustMutationScore({ detected, undetected, mutants }, mutationMin) {
-  logCargoMutants(mutants);
-  const score = mutationScore({ detected, undetected });
-  const scoreStr = score !== null ? `${score.toFixed(1)}%` : "-";
-  console.log(
-    `mutation rust: ${detected}/${detected + undetected} detected = ${scoreStr} (min ${mutationMin})`,
-  );
-  return score !== null && score < mutationMin;
+export function evaluateRustMutationScore(totals, mutationMin, logger = console.log) {
+  return evaluateMutationCounts("rust", totals, mutationMin, logger);
 }
 
 // Executes each planned mutants command invocation.

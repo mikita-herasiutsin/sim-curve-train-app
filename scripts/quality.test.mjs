@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addUntrackedToDiff,
+  aggregateMutantOutcomes,
   buildCommandLine,
   buildCargoMutantsCalls,
   buildStrykerMutateRanges,
@@ -9,10 +10,14 @@ import {
   collectTsFunctions,
   crap,
   evaluateFunctionMetrics,
+  evaluateMutationCounts,
   evaluateRunFailure,
+  evaluateRustMutationScore,
+  evaluateStrykerScore,
   fileGates,
   findOutcomesPath,
   findTsCrapFiles,
+  formatFileScoreLine,
   formatReport,
   isFunctionFailing,
   isTargetFunction,
@@ -268,7 +273,7 @@ describe("mutationScore", () => {
 });
 
 describe("strykerCounts", () => {
-  it("extracts detected and undetected counts from report", () => {
+  it("extracts per-file counts and undetected mutants from report", () => {
     const report = {
       files: {
         "src/lib/foo.ts": {
@@ -319,8 +324,8 @@ describe("strykerCounts", () => {
     };
 
     const counts = strykerCounts(report, ["src/lib/foo.ts"]);
-    expect(counts.detected).toBe(2);
-    expect(counts.undetected).toBe(2);
+    expect(counts.byFile.get("src/lib/foo.ts")).toEqual({ detected: 2, undetected: 2 });
+    expect(counts.byFile.has("src/lib/bar.ts")).toBe(false);
     expect(counts.mutants).toEqual([
       { file: "src/lib/foo.ts", line: 15, text: "BooleanLiteral: false" },
       { file: "src/lib/foo.ts", line: 18, text: "BlockStatement: {}" },
@@ -329,31 +334,256 @@ describe("strykerCounts", () => {
 });
 
 describe("cargoMutantsCounts", () => {
-  it("extracts counts and undetected mutant names", () => {
+  it("extracts per-file counts and undetected mutant names", () => {
     const outcomes = [
       {
         summary: "CaughtMutant",
-        scenario: { Mutant: { name: "fn a -> bool" } },
+        scenario: { Mutant: { file: "crates\\core\\src\\lib.rs", name: "fn a -> bool" } },
       },
       {
         summary: "Timeout",
-        scenario: { Mutant: { name: "fn b -> bool" } },
+        scenario: { Mutant: { file: "crates/core/src/lib.rs", name: "fn b -> bool" } },
       },
       {
         summary: "MissedMutant",
-        scenario: { Mutant: { name: "fn c -> bool" } },
+        scenario: { Mutant: { file: "crates/core/src/lib.rs", name: "fn c -> bool" } },
       },
       {
         summary: "Unviable",
-        scenario: { Mutant: { name: "fn d -> bool" } },
+        scenario: { Mutant: { file: "crates/core/src/lib.rs", name: "fn d -> bool" } },
       },
       { summary: "Success", scenario: "Baseline" },
     ];
 
     const counts = cargoMutantsCounts(outcomes);
-    expect(counts.detected).toBe(2);
-    expect(counts.undetected).toBe(1);
-    expect(counts.mutants).toEqual([{ text: "fn c -> bool" }]);
+    expect(counts.byFile.get("crates/core/src/lib.rs")).toEqual({ detected: 2, undetected: 1 });
+    expect(counts.mutants).toEqual([{ file: "crates/core/src/lib.rs", text: "fn c -> bool" }]);
+  });
+});
+
+describe("formatFileScoreLine", () => {
+  it("formats passing score line", () => {
+    const res = formatFileScoreLine("ts", "src/foo.ts", { detected: 10, undetected: 2 }, 80);
+    expect(res).toEqual({
+      line: "mutation ts src/foo.ts: 10/12 detected = 83.3% (min 80)",
+      failed: false,
+    });
+  });
+
+  it("returns null when total mutant count is zero", () => {
+    expect(formatFileScoreLine("ts", "src/foo.ts", { detected: 0, undetected: 0 }, 80)).toBeNull();
+  });
+});
+
+describe("evaluateMutationCounts", () => {
+  it("fails and names the failing file when one of two files is under 80%", () => {
+    const counts = {
+      byFile: new Map([
+        ["src/lib/pedals/history.ts", { detected: 125, undetected: 12 }],
+        ["src/lib/pedals/geometry.ts", { detected: 0, undetected: 18 }],
+      ]),
+      mutants: [
+        {
+          file: "src/lib/pedals/geometry.ts",
+          line: 42,
+          text: "BinaryExpression: -",
+        },
+      ],
+    };
+
+    const lines = [];
+    const failed = evaluateMutationCounts("ts", counts, 80, (msg) => lines.push(msg));
+
+    expect(failed).toBe(true);
+    expect(lines).toContain(
+      "mutation ts src/lib/pedals/history.ts: 125/137 detected = 91.2% (min 80)",
+    );
+    expect(lines).toContain(
+      "mutation ts src/lib/pedals/geometry.ts: 0/18 detected = 0.0% (min 80) FAIL",
+    );
+    expect(lines).toContain("src/lib/pedals/geometry.ts:42 BinaryExpression: -");
+  });
+
+  it("prints nothing for a file with only ignored statuses", () => {
+    const strykerReport = {
+      files: {
+        "src/lib/ignored.ts": {
+          mutants: [
+            {
+              status: "Ignored",
+              mutatorName: "BlockStatement",
+              replacement: "{}",
+              location: { start: { line: 1 } },
+            },
+          ],
+        },
+      },
+    };
+    const counts = strykerCounts(strykerReport, ["src/lib/ignored.ts"]);
+    const lines = [];
+    const failed = evaluateMutationCounts("ts", counts, 80, (msg) => lines.push(msg));
+
+    expect(lines).toEqual([]);
+    expect(failed).toBe(false);
+
+    const cargoOutcomes = [
+      {
+        summary: "Unviable",
+        scenario: {
+          Mutant: {
+            file: "crates/core/src/ignored.rs",
+            name: "fn unviable",
+          },
+        },
+      },
+    ];
+    const cargoCounts = cargoMutantsCounts(cargoOutcomes);
+    const cargoLines = [];
+    const cargoFailed = evaluateMutationCounts("rust", cargoCounts, 80, (msg) =>
+      cargoLines.push(msg),
+    );
+
+    expect(cargoLines).toEqual([]);
+    expect(cargoFailed).toBe(false);
+  });
+
+  it("counts a duplicated Rust mutant name across two outcome lists once", () => {
+    const inDiffOutcomes = [
+      {
+        summary: "CaughtMutant",
+        scenario: {
+          Mutant: {
+            file: "crates/core/src/audio_map.rs",
+            name: "crates/core/src/audio_map.rs:10: replace > with <",
+          },
+        },
+      },
+      {
+        summary: "MissedMutant",
+        scenario: {
+          Mutant: {
+            file: "crates/core/src/audio_map.rs",
+            name: "crates/core/src/audio_map.rs:25: replace + with -",
+          },
+        },
+      },
+    ];
+
+    const pilotOutcomes = [
+      {
+        summary: "CaughtMutant",
+        scenario: {
+          Mutant: {
+            file: "crates/core/src/audio_map.rs",
+            name: "crates/core/src/audio_map.rs:10: replace > with <",
+          },
+        },
+      },
+      {
+        summary: "MissedMutant",
+        scenario: {
+          Mutant: {
+            file: "crates/core/src/audio_map.rs",
+            name: "crates/core/src/audio_map.rs:25: replace + with -",
+          },
+        },
+      },
+    ];
+
+    const counts = cargoMutantsCounts(inDiffOutcomes, pilotOutcomes);
+    expect(counts.byFile.get("crates/core/src/audio_map.rs")).toEqual({
+      detected: 1,
+      undetected: 1,
+    });
+    expect(counts.mutants).toEqual([
+      {
+        file: "crates/core/src/audio_map.rs",
+        text: "crates/core/src/audio_map.rs:25: replace + with -",
+      },
+    ]);
+  });
+});
+
+describe("aggregateMutantOutcomes and evaluateRustMutationScore", () => {
+  it("aggregates outcome calls and evaluates rust score", () => {
+    const calls = [{ outDir: "mutants.out" }, { outDir: "mutants.out/pilot" }];
+    const fakeReader = (path) => {
+      if (path.includes("pilot")) {
+        return JSON.stringify({
+          outcomes: [
+            {
+              summary: "CaughtMutant",
+              scenario: {
+                Mutant: {
+                  file: "crates/core/src/audio_map.rs",
+                  name: "crates/core/src/audio_map.rs:10: replace > with <",
+                },
+              },
+            },
+          ],
+        });
+      }
+      return JSON.stringify({
+        outcomes: [
+          {
+            summary: "CaughtMutant",
+            scenario: {
+              Mutant: {
+                file: "crates/core/src/audio_map.rs",
+                name: "crates/core/src/audio_map.rs:10: replace > with <",
+              },
+            },
+          },
+        ],
+      });
+    };
+    const totals = aggregateMutantOutcomes(calls, "C:/repo", fakeReader, () => true);
+    expect(totals.byFile.get("crates/core/src/audio_map.rs")).toEqual({
+      detected: 1,
+      undetected: 0,
+    });
+
+    const lines = [];
+    const failed = evaluateRustMutationScore(totals, 80, (msg) => lines.push(msg));
+    expect(failed).toBe(false);
+    expect(lines).toEqual([
+      "mutation rust crates/core/src/audio_map.rs: 1/1 detected = 100.0% (min 80)",
+    ]);
+  });
+});
+
+describe("evaluateStrykerScore", () => {
+  it("throws when Stryker report file is missing", () => {
+    expect(() =>
+      evaluateStrykerScore(
+        ["src/foo.ts"],
+        "C:/repo",
+        80,
+        () => "{}",
+        () => false,
+      ),
+    ).toThrow("missing Stryker report: reports/mutation/mutation.json");
+  });
+
+  it("reads report and evaluates passing score", () => {
+    const reportJson = JSON.stringify({
+      files: {
+        "src/foo.ts": {
+          mutants: [{ status: "Killed", mutatorName: "Equality" }],
+        },
+      },
+    });
+    const lines = [];
+    const failed = evaluateStrykerScore(
+      ["src/foo.ts"],
+      "C:/repo",
+      80,
+      () => reportJson,
+      () => true,
+      (msg) => lines.push(msg),
+    );
+    expect(failed).toBe(false);
+    expect(lines).toEqual(["mutation ts src/foo.ts: 1/1 detected = 100.0% (min 80)"]);
   });
 });
 

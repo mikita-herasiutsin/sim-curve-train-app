@@ -46,9 +46,9 @@ Formatting and linting are automated. Don't hand-tune style; run the tools.
 
 ## Quality gates
 
-CI enforces three gates on pull requests: cyclomatic complexity ≤ 12 per function, CRAP ≤ 12 per function, and mutation score ≥ 80% per language, configured in `quality.config.json`.
+CI enforces three gates on pull requests: cyclomatic complexity ≤ 12 per function, CRAP ≤ 12 per function, and mutation score ≥ 80% per file, configured in `quality.config.json`.
 
-`CRAP = complexity² × (1 - coverage)³ + complexity`, where coverage is the share of lines (Rust, from cargo-llvm-cov) or statements (TypeScript, from Vitest's v8 coverage) tests run. A function at complexity 12 needs full coverage; an untested function passes only up to complexity 3. Mutation score is `(killed + timed out) / (killed + timed out + survived + not covered)`. Rust mutants that do not compile are omitted.
+`CRAP = complexity² × (1 - coverage)³ + complexity`, where coverage is the share of lines (Rust, from cargo-llvm-cov) or statements (TypeScript, from Vitest's v8 coverage) tests run. A function at complexity 12 needs full coverage; an untested function passes only up to complexity 3. Mutation score is `(killed + timed out) / (killed + timed out + survived + not covered)`, computed per file. Each file the gate mutates must reach 80%. Rust mutants that do not compile are omitted.
 
 CI checks only functions a pull request adds or changes (overlapping a changed line against the merge base), plus the pilot files `crates/core/src/audio_map.rs` and `src/lib/pedals/history.ts`. Untouched code is not checked. To check another file, add it to `pilot` in `quality.config.json`.
 

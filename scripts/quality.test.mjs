@@ -782,14 +782,15 @@ describe("findOutcomesPath and readOutcomes", () => {
     expect(p).not.toBeNull();
   });
 
-  it("reads and parses outcomes data or returns empty list", () => {
+  it("reads outcomes data and throws when cargo-mutants wrote none", () => {
     const fakeExists = () => true;
     const fakeReader = () => JSON.stringify({ outcomes: [{ summary: "CaughtMutant" }], caught: 1 });
     const outcomes = readOutcomes("out", "C:/repo", fakeReader, fakeExists);
     expect(outcomes).toEqual([{ summary: "CaughtMutant" }]);
 
-    const missing = readOutcomes("out", "C:/repo", fakeReader, () => false);
-    expect(missing).toEqual([]);
+    expect(() => readOutcomes("out", "C:/repo", fakeReader, () => false)).toThrow(
+      "cargo-mutants wrote no outcomes.json under out",
+    );
   });
 });
 

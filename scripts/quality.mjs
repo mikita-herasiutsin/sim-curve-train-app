@@ -627,7 +627,8 @@ export function readOutcomes(outDir, repoRoot, fileReader, fileExists) {
   const exists = fileExists || existsSync;
   const read = fileReader || readFileSync;
   const p = findOutcomesPath(outDir, repoRoot, exists);
-  if (!p) return [];
+  // No file means cargo-mutants failed to run; scoring that as "no mutants" would pass the gate.
+  if (!p) throw new Error(`cargo-mutants wrote no outcomes.json under ${outDir}`);
   return JSON.parse(read(p, "utf8")).outcomes ?? [];
 }
 
@@ -1171,6 +1172,7 @@ function runRustMutation({ pilotFiles, diffMap, mode, repoRoot, mergeBase, mutat
   const calls = buildCargoMutantsCalls({ mode, rustPilot, rustChanged });
   // Outcomes left by an earlier run would be scored for files this run doesn't test.
   rmSync(resolve(repoRoot, "mutants.out"), { recursive: true, force: true });
+  mkdirSync(resolve(repoRoot, "mutants.out"), { recursive: true });
   executeMutantCalls(calls, repoRoot, mergeBase);
 
   const totals = aggregateMutantOutcomes(calls, repoRoot);

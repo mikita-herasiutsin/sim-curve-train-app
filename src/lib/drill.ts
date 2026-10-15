@@ -144,7 +144,12 @@ export type DrillEvent =
   | { event: "repStarted"; rep: number; startUs: number }
   | { event: "repScored"; rep: number; score: RepScore; overlap?: Overlap }
   | { event: "repFailed"; rep: number; overlap?: Overlap }
-  | { event: "setFinished"; summary: SetSummary | null };
+  | {
+      event: "setFinished";
+      summary: SetSummary | null;
+      attemptId: number | null;
+      saveError: string | null;
+    };
 
 export async function listPresets(): Promise<Preset[]> {
   return invoke<Preset[]>("list_presets");

@@ -19,7 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::audio::AudioFeedback;
-use crate::drill_thread::DrillThread;
+use crate::drill_thread::{DrillThread, SetSave};
 use sct_core::axis_detect::{AxisDetector, Detection};
 use sct_core::calibration::RangeCapture;
 use sct_core::device::{DeviceInfo, DevicesSnapshot, usb_ids_from_guid};
@@ -74,6 +74,7 @@ enum Command {
         token: u64,
         drill: Drill,
         channel: Channel<DrillEvent>,
+        save: SetSave,
         reply: Sender<Result<(), String>>,
     },
     AbortDrill {
@@ -307,12 +308,14 @@ impl InputService {
         token: u64,
         drill: Drill,
         channel: Channel<DrillEvent>,
+        save: SetSave,
     ) -> Result<(), String> {
         let (reply, answer) = mpsc::channel();
         self.send(Command::StartDrill {
             token,
             drill,
             channel,
+            save,
             reply,
         })?;
         answer
@@ -480,6 +483,10 @@ fn check_start<'a>(
 /// The answer goes out before any event. If nobody is waiting for it any more (the caller
 /// timed out), the drill is not installed and no event is sent. A drill thread that can't be
 /// spawned is an error answer, and the running drill keeps going.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "internal helper forwarding drill configuration"
+)]
 fn start_drill(
     stream: Option<&mut Stream>,
     profile: Option<DeviceProfile>,
@@ -487,6 +494,7 @@ fn start_drill(
     drill: Drill,
     channel: Channel<DrillEvent>,
     audio: Option<AudioFeedback>,
+    save: SetSave,
     reply: &Sender<Result<(), String>>,
 ) {
     let (stream, profile) = match check_start(stream, profile, &drill) {
@@ -498,7 +506,7 @@ fn start_drill(
     };
     let pedal = drill.pedal;
     let run = DrillRun::new(drill, DEFAULT_REST_MS);
-    let mut thread = match DrillThread::spawn(run, t_us, channel, audio) {
+    let mut thread = match DrillThread::spawn(run, t_us, channel, audio, save) {
         Ok(thread) => thread,
         Err(error) => {
             let _ = reply.send(Err(format!("failed to start the drill: {error}")));
@@ -560,6 +568,7 @@ fn drain_commands(
                 token,
                 drill,
                 channel,
+                save,
                 reply,
             }) => {
                 let t_us = u64::try_from(epoch.elapsed().as_micros()).unwrap_or(u64::MAX);
@@ -570,6 +579,7 @@ fn drain_commands(
                     drill,
                     channel,
                     service.audio.clone(),
+                    save,
                     &reply,
                 );
             }
@@ -815,7 +825,7 @@ fn key_of(device: &DeviceInfo) -> DeviceKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drill_thread::tests::{drain, event_channel, so_far};
+    use crate::drill_thread::tests::{drain, event_channel, memory_save, so_far};
     use sct_core::calibration::AxisCalibration;
     use sct_core::preset::{DrillKind, ThrottleLeadIn};
     use sct_core::profile::PedalAxis;
@@ -861,6 +871,7 @@ mod tests {
     fn start_this(stream: &mut Stream, drill: Drill) -> (Receiver<String>, Result<(), String>) {
         let (channel, log) = event_channel();
         let (reply, answer) = mpsc::channel();
+        let (save, _) = memory_save();
         start_drill(
             Some(stream),
             Some(brake_profile()),
@@ -868,6 +879,7 @@ mod tests {
             drill,
             channel,
             None,
+            save,
             &reply,
         );
         (log, answer.recv().unwrap())
@@ -933,7 +945,16 @@ mod tests {
     fn missing_stream_or_profile_is_an_error() {
         let (channel, log) = event_channel();
         let (reply, answer) = mpsc::channel();
-        start_drill(None, None, 0, drill(Pedal::Brake), channel, None, &reply);
+        start_drill(
+            None,
+            None,
+            0,
+            drill(Pedal::Brake),
+            channel,
+            None,
+            memory_save().0,
+            &reply,
+        );
         assert!(answer.recv().unwrap().is_err());
 
         let mut stream = stream();
@@ -945,6 +966,7 @@ mod tests {
             drill(Pedal::Brake),
             channel,
             None,
+            memory_save().0,
             &reply,
         );
         assert!(answer.recv().unwrap().is_err());
@@ -965,6 +987,7 @@ mod tests {
             drill(Pedal::Brake),
             channel,
             None,
+            memory_save().0,
             &reply,
         );
         assert!(stream.active_drill.is_none());
@@ -1042,6 +1065,7 @@ mod tests {
             hold,
             channel,
             Some(audio.clone()),
+            memory_save().0,
             &reply,
         );
         assert_eq!(answer.recv().unwrap(), Ok(()));
@@ -1085,6 +1109,7 @@ mod tests {
             lead_in_drill(),
             channel,
             None,
+            memory_save().0,
             &reply,
         );
         assert_eq!(
@@ -1125,6 +1150,7 @@ mod tests {
             lead_in_drill(),
             channel,
             None,
+            memory_save().0,
             &reply,
         );
         assert_eq!(answer.recv().unwrap(), Ok(()));

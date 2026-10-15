@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
 import DrillPage from "./+page.svelte";
 import type { Preset } from "$lib/drill";
-import type { NewAttempt, NewWarmUpRun } from "$lib/attempts";
+import type { NewWarmUpRun } from "$lib/attempts";
 import { pedalStream } from "$lib/pedals/stream";
 import * as barsDrawModule from "$lib/pedals/barsDraw";
 
@@ -143,8 +143,6 @@ describe("Drill page", () => {
   let aborts = 0;
   let abortError: string | null = null;
   let presetsList: Preset[] = [preset];
-  let saved: NewAttempt[] = [];
-  let saveError: string | null = null;
   let savedWarmUpRuns: NewWarmUpRun[] = [];
   let saveWarmUpRunError: string | null = null;
   let lastStartDrillRunArgs: {
@@ -163,8 +161,6 @@ describe("Drill page", () => {
     aborts = 0;
     abortError = null;
     presetsList = [preset];
-    saved = [];
-    saveError = null;
     savedWarmUpRuns = [];
     saveWarmUpRunError = null;
     lastStartDrillRunArgs = null;
@@ -193,10 +189,6 @@ describe("Drill page", () => {
             if (abortError) throw abortError;
             aborts++;
             return null;
-          case "save_attempt":
-            if (saveError) throw saveError;
-            saved.push((args as { attempt: NewAttempt }).attempt);
-            return saved.length;
           case "save_warm_up_run":
             if (saveWarmUpRunError) throw saveWarmUpRunError;
             savedWarmUpRuns.push((args as { run: NewWarmUpRun }).run);
@@ -252,7 +244,12 @@ describe("Drill page", () => {
     render(DrillPage);
     await startDrill();
     await waitFor(() => expect(drillChannel).not.toBeNull());
-    drillChannel!.onmessage({ event: "setFinished", summary: null });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary: null,
+      attemptId: null,
+      saveError: null,
+    });
     expect(await screen.findByText("No scored reps.")).toBeInTheDocument();
   });
 
@@ -271,6 +268,8 @@ describe("Drill page", () => {
         consistency: 87.5,
         stdDev: 10,
       },
+      attemptId: null,
+      saveError: null,
     });
     const card = (await screen.findByText("Set Summary")).closest("div")!;
     expect(card).toHaveTextContent("Best: 90");
@@ -295,6 +294,8 @@ describe("Drill page", () => {
         consistency: 87.5,
         stdDev: 10,
       },
+      attemptId: null,
+      saveError: null,
     });
     const card = (await screen.findByText("Set Summary")).closest("div")!;
     const [best, average, consistency] = Array.from(
@@ -397,6 +398,8 @@ describe("Drill page", () => {
         consistency: null,
         stdDev: 0,
       },
+      attemptId: null,
+      saveError: null,
     });
     expect(await screen.findByText("Set Finished!")).toBeInTheDocument();
     const card = screen.getByText("Set Summary").closest("div")!;
@@ -411,20 +414,17 @@ describe("Drill page", () => {
     await waitFor(() => expect(drillChannel).not.toBeNull());
     const oldChannel = drillChannel!;
     oldChannel.onmessage({ event: "repScored", rep: 0, score: holdScore });
-    oldChannel.onmessage({ event: "setFinished", summary: null });
+    oldChannel.onmessage({ event: "setFinished", summary: null, attemptId: null, saveError: null });
     drillChannel = null;
     await fireEvent.click(await screen.findByRole("button", { name: "Play Again" }));
     await waitFor(() => expect(drillChannel).not.toBeNull());
     expect(drillChannel).not.toBe(oldChannel);
 
     oldChannel.onmessage({ event: "repScored", rep: 1, score: holdScore });
-    oldChannel.onmessage({ event: "setFinished", summary: null });
+    oldChannel.onmessage({ event: "setFinished", summary: null, attemptId: null, saveError: null });
     expect(screen.queryByText("Rep Result")).not.toBeInTheDocument();
     expect(screen.queryByText("Set Finished!")).not.toBeInTheDocument();
     expect(screen.getByText("COUNTDOWN")).toBeInTheDocument();
-    // The first run was saved once, by its own first setFinished.
-    expect(saved).toHaveLength(1);
-    expect(saved[0].reps).toHaveLength(1);
   });
 
   const summary = {
@@ -436,126 +436,58 @@ describe("Drill page", () => {
     stdDev: 0,
   };
 
-  it("saves a finished set with its scored reps and summary", async () => {
-    render(DrillPage);
-    await startDrill();
-    await waitFor(() => expect(drillChannel).not.toBeNull());
-    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
-    drillChannel!.onmessage({ event: "repFailed", rep: 1 });
-    drillChannel!.onmessage({ event: "repScored", rep: 2, score: holdScore });
-    drillChannel!.onmessage({ event: "setFinished", summary });
-    await waitFor(() => expect(saved).toHaveLength(1));
-    const attempt = saved[0];
-    expect(attempt).toMatchObject({
-      drillId: "brake-hold-70",
-      presetId: "starter",
-      pedal: "brake",
-      aborted: false,
-      best: 82.4,
-      average: 82.4,
-      consistency: 100,
+  it("never invokes save_attempt during a run", async () => {
+    const commands: string[] = [];
+    mockIPC((cmd, args) => {
+      commands.push(cmd);
+      switch (cmd) {
+        case "list_presets":
+          return presetsList;
+        case "profiled_devices":
+          return [device.id];
+        case "list_devices":
+          return { devices: [device], error: null };
+        case "start_stream":
+          return 7;
+        case "stop_stream":
+          return null;
+        case "start_drill_run":
+          drillChannel = (args as { onEvent: Channelish }).onEvent;
+          return null;
+        default:
+          throw new Error(`unexpected command ${cmd}`);
+      }
     });
-    expect(new Date(attempt.startedAt).toISOString()).toBe(attempt.startedAt);
-    // The failed rep has no scores, so only the two scored reps are stored.
-    expect(attempt.reps.map((r) => r.repIndex)).toEqual([0, 2]);
-    expect(attempt.reps[0]).toMatchObject({
-      total: 82.4,
-      accuracy: 91.2,
-      timing: 70.1,
-      smoothness: 88.8,
-      timeInBand: 0.83,
-      rmse: 0.041,
-      overshoot: 0.02,
-      timeToBandMs: null,
-      jitter: 0.013,
+
+    render(DrillPage);
+    await startDrill();
+    await waitFor(() => expect(drillChannel).not.toBeNull());
+    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary,
+      attemptId: 12,
+      saveError: null,
     });
-  });
-
-  it("saves an aborted set as aborted", async () => {
-    render(DrillPage);
-    await startDrill();
-    await waitFor(() => expect(drillChannel).not.toBeNull());
-    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
-    await fireEvent.click(await screen.findByRole("button", { name: "Abort Set" }));
-    await waitFor(() => expect(aborts).toBe(1));
-    drillChannel!.onmessage({ event: "setFinished", summary: { ...summary, repTotals: [82.4] } });
-    await waitFor(() => expect(saved).toHaveLength(1));
-    expect(saved[0].aborted).toBe(true);
-    expect(saved[0].reps).toHaveLength(1);
-  });
-
-  it("saves a set the engine ended early as aborted, without an Abort click", async () => {
-    // The pedals were unplugged after the first rep: the engine ends the set on its own.
-    render(DrillPage);
-    await startDrill();
-    await waitFor(() => expect(drillChannel).not.toBeNull());
-    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
-    drillChannel!.onmessage({ event: "setFinished", summary: { ...summary, repTotals: [82.4] } });
-    await waitFor(() => expect(saved).toHaveLength(1));
-    expect(saved[0].aborted).toBe(true);
-    expect(aborts).toBe(0);
-  });
-
-  it("saves a set as complete when Abort lands after the last rep ended", async () => {
-    render(DrillPage);
-    await startDrill();
-    await waitFor(() => expect(drillChannel).not.toBeNull());
-    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
-    drillChannel!.onmessage({ event: "repScored", rep: 1, score: holdScore });
-    drillChannel!.onmessage({ event: "repFailed", rep: 2 });
-    await fireEvent.click(await screen.findByRole("button", { name: "Abort Set" }));
-    drillChannel!.onmessage({ event: "setFinished", summary });
-    await waitFor(() => expect(saved).toHaveLength(1));
-    expect(saved[0].aborted).toBe(false);
-  });
-
-  it("saves the set as aborted when the page is left mid-set", async () => {
-    const { unmount } = render(DrillPage);
-    await startDrill();
-    await waitFor(() => expect(drillChannel).not.toBeNull());
-    drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
-    unmount();
-    await waitFor(() => expect(aborts).toBe(1));
-    // The engine answers the abort after the page is gone.
-    drillChannel!.onmessage({ event: "setFinished", summary: { ...summary, repTotals: [82.4] } });
-    await waitFor(() => expect(saved).toHaveLength(1));
-    expect(saved[0]).toMatchObject({ drillId: "brake-hold-70", aborted: true });
-  });
-
-  it("does not save a set the engine ended before any rep", async () => {
-    render(DrillPage);
-    await startDrill();
-    await waitFor(() => expect(drillChannel).not.toBeNull());
-    drillChannel!.onmessage({ event: "setFinished", summary: null });
-    expect(await screen.findByText("No scored reps.")).toBeInTheDocument();
-    await new Promise((r) => setTimeout(r, 20));
-    expect(saved).toHaveLength(0);
-  });
-
-  it("does not save a set aborted before any rep ended", async () => {
-    render(DrillPage);
-    await startDrill();
-    await waitFor(() => expect(drillChannel).not.toBeNull());
-    await fireEvent.click(await screen.findByRole("button", { name: "Abort Set" }));
-    await waitFor(() => expect(aborts).toBe(1));
-    drillChannel!.onmessage({ event: "setFinished", summary: null });
     expect(await screen.findByText("Set Finished!")).toBeInTheDocument();
-    await new Promise((r) => setTimeout(r, 20));
-    expect(saved).toHaveLength(0);
+    expect(commands).not.toContain("save_attempt");
   });
 
-  it("keeps the summary on screen and shows an alert when the save fails", async () => {
-    saveError = "attempts store is unavailable";
+  it("shows an error when setFinished carries a saveError and keeps the screen working", async () => {
     const logged = vi.spyOn(console, "error").mockImplementation(() => {});
     render(DrillPage);
     await startDrill();
     await waitFor(() => expect(drillChannel).not.toBeNull());
     drillChannel!.onmessage({ event: "repScored", rep: 0, score: holdScore });
-    drillChannel!.onmessage({ event: "setFinished", summary });
+    drillChannel!.onmessage({
+      event: "setFinished",
+      summary,
+      attemptId: null,
+      saveError: "disk full",
+    });
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("This set was not saved");
-    expect(alert).toHaveTextContent("attempts store is unavailable");
-    expect(logged).toHaveBeenCalled();
+    expect(alert).toHaveTextContent("This set was not saved: disk full");
+    expect(logged).toHaveBeenCalledWith("Failed to save attempt", "disk full");
     expect(screen.getByText("Set Summary")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Play Again" })).toBeInTheDocument();
   });
@@ -1203,6 +1135,8 @@ describe("Drill page", () => {
         consistency: 95.0,
         stdDev: 2.0,
       },
+      attemptId: 41,
+      saveError: null,
     });
 
     const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
@@ -1245,7 +1179,7 @@ describe("Drill page", () => {
 
     expect(savedWarmUpRuns).toHaveLength(1);
     expect(savedWarmUpRuns[0].steps).toEqual([
-      { drillId: "warmup-hold-1", reps: 2, skipped: false, attemptId: 1, score: 82.0 },
+      { drillId: "warmup-hold-1", reps: 2, skipped: false, attemptId: 41, score: 82.0 },
       { drillId: "warmup-hold-2", reps: 3, skipped: true, attemptId: null, score: null },
     ]);
   });
@@ -1271,6 +1205,8 @@ describe("Drill page", () => {
         consistency: 95.0,
         stdDev: 2.0,
       },
+      attemptId: 1,
+      saveError: null,
     });
 
     // Next Drill appears once the finished step is recorded, which moves warmUp.index on.
@@ -1298,6 +1234,8 @@ describe("Drill page", () => {
     drillChannel!.onmessage({
       event: "setFinished",
       summary: { ...summary, repTotals: [80.0] },
+      attemptId: 42,
+      saveError: null,
     });
 
     expect(screen.queryByText("Set Finished!")).not.toBeInTheDocument();
@@ -1311,7 +1249,7 @@ describe("Drill page", () => {
       drillId: "warmup-hold-1",
       reps: 2,
       skipped: true,
-      attemptId: 1,
+      attemptId: 42,
       score: null,
     });
   });
@@ -1363,6 +1301,8 @@ describe("Drill page", () => {
         consistency: 95.0,
         stdDev: 2.0,
       },
+      attemptId: 101,
+      saveError: null,
     });
 
     const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
@@ -1389,13 +1329,15 @@ describe("Drill page", () => {
         consistency: 98.0,
         stdDev: 1.0,
       },
+      attemptId: 102,
+      saveError: null,
     });
 
     // save_warm_up_run is invoked once before "See Summary" is clicked
     await waitFor(() => expect(savedWarmUpRuns).toHaveLength(1));
     expect(savedWarmUpRuns[0].steps).toEqual([
-      { drillId: "warmup-hold-1", reps: 2, skipped: false, attemptId: 1, score: 82.0 },
-      { drillId: "warmup-hold-2", reps: 3, skipped: false, attemptId: 2, score: 92.0 },
+      { drillId: "warmup-hold-1", reps: 2, skipped: false, attemptId: 101, score: 82.0 },
+      { drillId: "warmup-hold-2", reps: 3, skipped: false, attemptId: 102, score: 92.0 },
     ]);
 
     // Overlay shows "See Summary"
@@ -1438,6 +1380,8 @@ describe("Drill page", () => {
         consistency: 95.0,
         stdDev: 2.0,
       },
+      attemptId: 1,
+      saveError: null,
     });
 
     const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
@@ -1467,6 +1411,8 @@ describe("Drill page", () => {
         consistency: 95.0,
         stdDev: 2.0,
       },
+      attemptId: 1,
+      saveError: null,
     });
 
     // Guard prevents advance: remains at Drill 1 of 2
@@ -1493,6 +1439,8 @@ describe("Drill page", () => {
         consistency: 100.0,
         stdDev: 0.0,
       },
+      attemptId: 55,
+      saveError: null,
     });
 
     const nextBtn = await screen.findByRole("button", { name: "Next Drill" });
@@ -1509,7 +1457,7 @@ describe("Drill page", () => {
       drillId: "warmup-hold-1",
       reps: 2,
       skipped: true,
-      attemptId: 1,
+      attemptId: 55,
       score: null,
     });
   });

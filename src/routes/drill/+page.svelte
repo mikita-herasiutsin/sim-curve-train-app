@@ -27,7 +27,7 @@
     type SetSummary,
     type Overlap,
   } from "$lib/drill";
-  import { buildAttempt, saveAttempt, saveWarmUpRun, type ScoredRep } from "$lib/attempts";
+  import { saveWarmUpRun } from "$lib/attempts";
   import {
     hasWarmUp,
     warmUpPlan,
@@ -54,7 +54,6 @@
   let selectedPreset = $state<Preset | null>(null);
   let selectedDrill = $state<Drill | null>(null);
   let warmUp = $state<WarmUpProgress | null>(null);
-  let stepFinishing = $state(false);
   let warmUpSaveStatus = $state<"saving" | "saved" | "error" | null>(null);
   let warmUpSaveError = $state<string | null>(null);
   let savedWarmUp: WarmUpProgress | null = null;
@@ -127,22 +126,18 @@
   // dead run are ignored. An aborted run keeps its id: its final `setFinished` ends the set.
   let runId = 0;
 
-  // What a run saves when its `setFinished` arrives. Not reactive: only the save reads it.
-  interface RunRecord {
-    presetId: string;
-    drill: Drill;
-    startedAt: string;
-    scored: ScoredRep[];
+  // The set on screen: what the warm-up flow reads when its `setFinished` arrives. Not reactive.
+  interface ActiveSet {
+    /** Planned reps of the drill. */
+    reps: number;
     /** Reps that ended, failed ones included. */
     ended: number;
-    saved: boolean;
     /** Set by Skip Drill during a warm-up set. */
     skipped: boolean;
     /** The warm-up progress when the set started; null outside a warm-up. */
     warmUp: WarmUpProgress | null;
   }
-
-  let activeRecord: RunRecord | null = null;
+  let activeSet: ActiveSet | null = null;
 
   let rafId: number | null = null;
 
@@ -297,33 +292,28 @@
     errorMessage = null;
     aborting = false;
     const id = ++runId;
-    const record: RunRecord = {
-      presetId: selectedPreset.id,
-      drill: selectedDrill,
-      startedAt: new Date().toISOString(),
-      scored: [],
+    const set: ActiveSet = {
+      reps: selectedDrill.reps,
       ended: 0,
-      saved: false,
       skipped: false,
       warmUp,
     };
-    activeRecord = record;
+    activeSet = set;
     runStepIndex = warmUp?.index ?? 0;
-    // The engine ends every run with `setFinished`: after the last rep, on abort, and when the
-    // stream stops. The record is saved then, even for a run the screen has given up on.
+    // Rust saves the set; the page only reads the attempt id.
     const onEvent = (e: DrillEvent) => {
-      if (e.event === "repScored") {
-        record.scored.push({ rep: e.rep, score: e.score });
-        record.ended++;
-      } else if (e.event === "repFailed") {
-        record.ended++;
+      if (e.event === "repScored" || e.event === "repFailed") {
+        set.ended++;
       }
       // A set skipped during a warm-up goes straight to the next drill, without the overlay.
-      if (id === runId && !record.skipped) view = applyDrillEvent(view, e);
+      if (id === runId && !set.skipped) view = applyDrillEvent(view, e);
       if (e.event === "setFinished") {
-        const persistPromise = persist(record, e.summary);
-        if (record.warmUp) {
-          handleWarmUpFinished(record, e.summary, persistPromise);
+        if (e.saveError) {
+          console.error("Failed to save attempt", e.saveError);
+          errorMessage = `This set was not saved: ${e.saveError}`;
+        }
+        if (set.warmUp) {
+          handleWarmUpFinished(set, e.summary, e.attemptId);
         }
       }
     };
@@ -346,72 +336,42 @@
   }
 
   function abort() {
-    if (warmUp && activeRecord) {
-      activeRecord.skipped = true;
+    if (warmUp && activeSet) {
+      activeSet.skipped = true;
     }
     if (sourceStatus.kind !== "live") {
-      // No stream to ask for a final event, so give the run up here. The engine's own
-      // `setFinished` still saves it.
+      // No stream to ask for a final event, so give the run up here. Rust still saves the set.
       runId++;
       view = { ...IDLE_VIEW };
       return;
     }
-    // The run stays current: its final `setFinished` shows the summary and saves the set.
+    // The run stays current: its final `setFinished` shows the summary and Rust saves the set.
     aborting = true;
     abortDrillRun(sourceStatus.token).catch((e) => {
       console.error(e);
       aborting = false;
-      if (activeRecord) {
-        activeRecord.skipped = false;
+      if (activeSet) {
+        activeSet.skipped = false;
       }
       errorMessage = `Failed to abort drill: ${e}`;
     });
   }
 
-  /**
-   * Saves a set once. A set that ended before all its reps (Abort, leaving the page, pedals
-   * unplugged) is saved as aborted; one that ended before any rep is not saved. A failed save
-   * is logged and shown, and the drill screen keeps working.
-   */
-  async function persist(record: RunRecord, summary: SetSummary | null): Promise<number | null> {
-    if (record.saved || record.ended === 0) return null;
-    record.saved = true;
-    const attempt = buildAttempt({
-      drillId: record.drill.id,
-      presetId: record.presetId,
-      pedal: record.drill.pedal,
-      startedAt: record.startedAt,
-      aborted: record.ended < record.drill.reps,
-      summary,
-      scored: record.scored,
-    });
-    try {
-      return await saveAttempt(attempt);
-    } catch (e) {
-      console.error("Failed to save attempt", e);
-      errorMessage = `This set was not saved: ${e}`;
-      return null;
-    }
-  }
-
-  async function handleWarmUpFinished(
-    record: RunRecord,
+  function handleWarmUpFinished(
+    set: ActiveSet,
     summary: SetSummary | null,
-    persistPromise: Promise<number | null>,
+    attemptId: number | null,
   ) {
-    stepFinishing = true;
-    const attemptId = await persistPromise;
-    stepFinishing = false;
     // A late set from an earlier warm-up (Run Again, a new page) must not advance this one.
-    if (!warmUp || warmUp !== record.warmUp) return;
-    const partial = record.ended < record.drill.reps || record.skipped;
+    if (!warmUp || warmUp !== set.warmUp) return;
+    const partial = set.ended < set.reps || set.skipped;
     if (partial) {
       warmUp = skipStep(warmUp, attemptId);
     } else {
       warmUp = completeStep(warmUp, { attemptId, score: summary?.average ?? null });
     }
     // After a full set the overlay stays up and Next Drill moves on.
-    if (record.skipped) {
+    if (set.skipped) {
       selectedDrill = currentDrill(warmUp);
       view = { ...IDLE_VIEW };
     }
@@ -645,17 +605,12 @@
                 {#if warmUp}
                   <button
                     class="btn-primary mt"
-                    disabled={stepFinishing}
                     onclick={() => {
                       view = { ...IDLE_VIEW };
                       if (warmUp) selectedDrill = currentDrill(warmUp);
                     }}
                   >
-                    {(
-                      stepFinishing ? warmUp.index >= warmUp.plan.drills.length - 1 : isDone(warmUp)
-                    )
-                      ? "See Summary"
-                      : "Next Drill"}
+                    {isDone(warmUp) ? "See Summary" : "Next Drill"}
                   </button>
                 {:else}
                   <button class="btn-primary mt" onclick={restart}>Play Again</button>

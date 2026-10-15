@@ -242,7 +242,12 @@ describe("applyDrillEvent", () => {
     view = applyDrillEvent(view, { event: "repFailed", rep: 1 });
     expect(view.lastOverlap).toBeNull();
 
-    view = applyDrillEvent(view, { event: "setFinished", summary });
+    view = applyDrillEvent(view, {
+      event: "setFinished",
+      summary,
+      attemptId: null,
+      saveError: null,
+    });
     expect(view.lastOverlap).toBeNull();
   });
 
@@ -263,7 +268,12 @@ describe("applyDrillEvent", () => {
 
   it("moves from an aborted set to finished with its summary", () => {
     let view = applyDrillEvent(IDLE_VIEW, { event: "repStarted", rep: 1, startUs: 0 });
-    view = applyDrillEvent(view, { event: "setFinished", summary });
+    view = applyDrillEvent(view, {
+      event: "setFinished",
+      summary,
+      attemptId: null,
+      saveError: null,
+    });
     expect(view).toMatchObject({ runState: "finished", summary });
   });
 
@@ -292,12 +302,22 @@ describe("applyDrillEvent", () => {
   });
 
   it("finishes with a summary", () => {
-    const view = applyDrillEvent(IDLE_VIEW, { event: "setFinished", summary });
+    const view = applyDrillEvent(IDLE_VIEW, {
+      event: "setFinished",
+      summary,
+      attemptId: null,
+      saveError: null,
+    });
     expect(view).toMatchObject({ runState: "finished", summary });
   });
 
   it("finishes with a null summary when no rep was scored", () => {
-    const view = applyDrillEvent(IDLE_VIEW, { event: "setFinished", summary: null });
+    const view = applyDrillEvent(IDLE_VIEW, {
+      event: "setFinished",
+      summary: null,
+      attemptId: null,
+      saveError: null,
+    });
     expect(view.runState).toBe("finished");
     expect(view.summary).toBeNull();
   });

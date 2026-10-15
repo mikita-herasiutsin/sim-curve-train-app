@@ -6,10 +6,12 @@ mod sim_pedals;
 mod window;
 
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use audio::AudioFeedback;
+use drill_thread::{SetSave, SharedAttempts};
 use input::InputService;
-use sct_core::attempts::{Attempt, AttemptStore, NewAttempt, NewWarmUpRun, WarmUpRun};
+use sct_core::attempts::{Attempt, AttemptStore, NewWarmUpRun, WarmUpRun, iso8601_utc};
 use sct_core::axis_detect::Detection;
 use sct_core::calibration::{AxisCalibration, RangeCapture};
 use sct_core::device::DevicesSnapshot;
@@ -191,7 +193,7 @@ fn set_sim_pedals(
 /// Shared handle to the attempts database, managed by Tauri.
 #[derive(Clone)]
 pub struct AttemptsService {
-    store: std::sync::Arc<std::sync::Mutex<Option<AttemptStore>>>,
+    store: SharedAttempts,
 }
 
 impl AttemptsService {
@@ -203,27 +205,10 @@ impl AttemptsService {
     }
 }
 
-fn lock_attempts<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn lock_attempts<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Saves a completed or aborted drill set attempt and each of its reps.
-#[tauri::command]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Tauri injects command arguments by value"
-)]
-fn save_attempt(
-    attempt: NewAttempt,
-    attempts: tauri::State<'_, AttemptsService>,
-) -> Result<i64, String> {
-    let guard = lock_attempts(&attempts.store);
-    let store = guard
-        .as_ref()
-        .ok_or_else(|| "attempts store is unavailable".to_string())?;
-    store.save_attempt(&attempt).map_err(|e| e.to_string())
 }
 
 /// Lists recorded attempts for a drill, ordered from newest to oldest.
@@ -349,7 +334,8 @@ fn list_presets(app: tauri::AppHandle) -> Result<Vec<Preset>, String> {
 #[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
-    reason = "Tauri injects command arguments by value"
+    clippy::too_many_arguments,
+    reason = "Tauri injects command arguments and states individually"
 )]
 fn start_drill_run(
     token: u64,
@@ -359,14 +345,25 @@ fn start_drill_run(
     on_event: Channel<DrillEvent>,
     app: tauri::AppHandle,
     input: tauri::State<'_, InputService>,
+    attempts: tauri::State<'_, AttemptsService>,
 ) -> Result<(), String> {
+    let started_at = iso8601_utc(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default(),
+    );
+    let save = SetSave {
+        preset_id: preset_id.clone(),
+        started_at,
+        store: attempts.store.clone(),
+    };
     let presets = load_presets(&app)?;
     let drill = if warm_up {
         find_warm_up_drill(&presets, &preset_id, &drill_id)?
     } else {
         find_drill(&presets, &preset_id, &drill_id)?
     };
-    input.start_drill(token, drill, on_event)
+    input.start_drill(token, drill, on_event, save)
 }
 
 /// Aborts the active drill run.
@@ -583,7 +580,6 @@ pub fn run() {
             list_presets,
             start_drill_run,
             abort_drill_run,
-            save_attempt,
             list_attempts,
             best_total,
             best_totals,

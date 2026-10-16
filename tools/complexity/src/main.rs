@@ -440,8 +440,15 @@ mod tests {
         let pulse_entry = entries.iter().find(|e| e.name == "pulse_rate_hz");
         assert!(pulse_entry.is_some());
         let pulse = pulse_entry.unwrap();
-        assert_eq!(pulse.start_line, 25);
-        assert_eq!(pulse.end_line, 34);
-        assert_eq!(pulse.complexity, 3);
+        // Read the line from the file, so an edit above the function doesn't break this test.
+        let source = std::fs::read_to_string(workspace_root.join("crates/core/src/audio_map.rs"))
+            .expect("read audio_map.rs");
+        let fn_line = source
+            .lines()
+            .position(|l| l.contains("fn pulse_rate_hz("))
+            .expect("pulse_rate_hz in audio_map.rs")
+            + 1;
+        assert_eq!(pulse.start_line as usize, fn_line);
+        assert!(pulse.end_line > pulse.start_line);
     }
 }

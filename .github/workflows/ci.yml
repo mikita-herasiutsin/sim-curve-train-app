@@ -93,7 +93,7 @@ jobs:
         run: npm run quality -- "origin/$BASE_REF"
 
       - name: Mutation tests on changed lines
-        if: github.event_name == 'pull_request'
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
         env:
           BASE_REF: ${{ github.base_ref }}
         run: npm run quality:mutation -- "origin/$BASE_REF"

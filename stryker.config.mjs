@@ -8,7 +8,7 @@ const related = process.env.QUALITY_RELATED ?? "";
 /** @type {import('@stryker-mutator/api/core').PartialStrykerOptions} */
 export default {
   testRunner: "command",
-  commandRunner: { command: `npx vitest related --run ${related}` },
+  commandRunner: { command: `node scripts/stryker-vitest.mjs ${related}` },
   coverageAnalysis: "off",
   // A sandbox copy can't load node_modules through Vite on Windows, so mutate in place.
   // Stryker restores the files when it ends; don't run it while a dev server watches this tree.

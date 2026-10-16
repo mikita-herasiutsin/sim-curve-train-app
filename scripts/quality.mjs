@@ -5,21 +5,18 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { ESLint } from "eslint";
 
-// Runs a git command in cwd and returns its stdout as string.
 function git(args, cwd) {
   return execFileSync("git", args, { encoding: "utf8", cwd });
 }
 
-// Quotes a command-line argument if it contains spaces or special characters.
 export function quoteArg(arg) {
   const str = String(arg);
   if (str === "" || /[\s"&|<>^%()]/.test(str)) {
-    return `"${str.replace(/"/g, '\\"')}"`;
+    return `"${str.replace(/"/g, '""')}"`;
   }
   return str;
 }
 
-// Builds a command line string from an executable and its argument list.
 export function buildCommandLine(file, args = []) {
   return [file, ...args].map(quoteArg).join(" ");
 }
@@ -33,7 +30,6 @@ export function runCommand(file, args, options) {
   return execFileSync(file, args, { ...options, shell: false });
 }
 
-// Converts a path to repo-relative with forward slashes.
 export function toRepoRelative(filePath, repoRoot) {
   const fileNorm = filePath.replace(/\\/g, "/");
   let rootNorm = repoRoot.replace(/\\/g, "/");
@@ -48,7 +44,6 @@ export function toRepoRelative(filePath, repoRoot) {
   return fileNorm.replace(/^\/+/, "");
 }
 
-// Parses git diff -U0 output into line ranges per file.
 export function parseDiff(text) {
   const result = new Map();
   let currentFile = null;
@@ -88,7 +83,6 @@ export function parseDiff(text) {
   return result;
 }
 
-// Parses newline-separated output of untracked files from git ls-files.
 export function parseUntrackedFiles(output) {
   const files = [];
   for (const rawLine of output.split(/\r?\n/)) {
@@ -100,7 +94,6 @@ export function parseUntrackedFiles(output) {
   return files;
 }
 
-// Appends untracked files to diff map with full file range.
 export function addUntrackedToDiff(diffMap, untrackedFiles) {
   for (const file of untrackedFiles) {
     if (!diffMap.has(file)) {
@@ -110,7 +103,6 @@ export function addUntrackedToDiff(diffMap, untrackedFiles) {
   return diffMap;
 }
 
-// Returns true when [start, end] intersects any range in ranges.
 export function overlaps(ranges, start, end) {
   if (!ranges || ranges.length === 0) return false;
   for (const [rStart, rEnd] of ranges) {
@@ -121,13 +113,11 @@ export function overlaps(ranges, start, end) {
   return false;
 }
 
-// Computes the CRAP score from cyclomatic complexity and coverage in 0..1.
 export function crap(complexity, coverage) {
   const cov = Math.max(0, Math.min(1, coverage));
   return complexity * complexity * Math.pow(1 - cov, 3) + complexity;
 }
 
-// Parses LCOV text into a map of line numbers to hit counts per relative file path.
 export function parseLcov(text, repoRoot) {
   const result = new Map();
   let lineMap = null;
@@ -156,7 +146,6 @@ export function parseLcov(text, repoRoot) {
   return result;
 }
 
-// Line coverage share in [start, end] from LCOV line hits map.
 export function lineCoverage(lines, start, end) {
   if (!lines) return 0;
   let total = 0;
@@ -171,11 +160,10 @@ export function lineCoverage(lines, start, end) {
     }
   }
 
-  if (total === 0) return 1;
+  if (total === 0) return 0;
   return covered / total;
 }
 
-// Statement coverage share in [start, end] from Istanbul report.
 export function istanbulCoverage(fileCov, start, end) {
   if (!fileCov || !fileCov.statementMap) return 0;
   const statementMap = fileCov.statementMap;
@@ -194,11 +182,10 @@ export function istanbulCoverage(fileCov, start, end) {
     }
   }
 
-  if (total === 0) return 1;
+  if (total === 0) return 0;
   return covered / total;
 }
 
-// Finds the innermost span containing (line, column).
 export function matchSpan(spans, line, column) {
   const matching = spans.filter((span) => {
     const afterStart =
@@ -227,30 +214,58 @@ export function matchSpan(spans, line, column) {
 
 const SKIPPED_PREFIXES = /^(?:#\[|\/\/\/|\/\/!|\/\*\*|\*|@)/;
 
-// Checks suppression comments above startLine, skipping attributes and doc comments.
+function countBracketDelta(text) {
+  const stripped = text.replace(/"(?:\\.|[^"\\])*"/g, "");
+  let delta = 0;
+  for (let i = stripped.length - 1; i >= 0; i--) {
+    if (stripped[i] === "]") delta++;
+    else if (stripped[i] === "[") delta--;
+  }
+  return delta;
+}
+
+function parseIgnoreComment(trimmed) {
+  if (!trimmed.startsWith("// quality-ignore")) return null;
+  const rest = trimmed.slice(17);
+  if (rest.startsWith(":")) {
+    const reason = rest.slice(1).trim();
+    return reason ? "ok" : "no-reason";
+  }
+  return rest.trim() === "" ? "no-reason" : "none";
+}
+
 export function suppression(sourceLines, startLine) {
+  let bracketDepth = 0;
   for (let lineNum = startLine - 1; lineNum >= 1; lineNum--) {
     const rawLine = sourceLines[lineNum - 1];
     if (rawLine === undefined) continue;
     const trimmed = rawLine.trim();
-    if (trimmed === "" || SKIPPED_PREFIXES.test(trimmed)) {
+    if (trimmed === "") continue;
+
+    if (bracketDepth > 0) {
+      bracketDepth += countBracketDelta(trimmed);
       continue;
     }
 
-    if (trimmed.startsWith("// quality-ignore")) {
-      const rest = trimmed.slice(17);
-      if (rest.startsWith(":")) {
-        const reason = rest.slice(1).trim();
-        return reason ? "ok" : "no-reason";
-      }
-      return rest.trim() === "" ? "no-reason" : "none";
+    const clean = trimmed.replace(/\/\/.*$/, "").trim();
+    if (clean.endsWith("]") && !clean.startsWith("#[")) {
+      bracketDepth += countBracketDelta(clean);
+      if (bracketDepth > 0) continue;
+    }
+
+    if (SKIPPED_PREFIXES.test(trimmed)) {
+      continue;
+    }
+
+    const ignoreResult = parseIgnoreComment(trimmed);
+    if (ignoreResult !== null) {
+      return ignoreResult;
     }
     return "none";
   }
   return "none";
 }
 
-// Mutation score percent, or null when the total is 0.
 export function mutationScore({ detected, undetected }) {
   const total = detected + undetected;
   if (total === 0) return null;
@@ -260,7 +275,6 @@ export function mutationScore({ detected, undetected }) {
 const DETECTED_STATUSES = new Set(["Killed", "Timeout"]);
 const UNDETECTED_STATUSES = new Set(["Survived", "NoCoverage"]);
 
-// Matches a report file path against the target files set.
 function matchFileKey(normKey, fileSet) {
   if (!fileSet) return normKey;
   if (fileSet.has(normKey)) return normKey;
@@ -270,18 +284,15 @@ function matchFileKey(normKey, fileSet) {
   return null;
 }
 
-// Converts a list of file paths to a set with normalised slashes.
 function toFileSet(files) {
   if (!files) return null;
   return new Set(files.map((f) => f.replace(/\\/g, "/")));
 }
 
-// Formats the mutator name and replacement string.
 function formatMutantText(m) {
   return `${m.mutatorName}: ${m.replacement || ""}`;
 }
 
-// Tallies a single mutant into detected or undetected counts for a file.
 function tallyStrykerMutant(m, file, counts, mutants) {
   if (DETECTED_STATUSES.has(m.status)) {
     counts.detected++;
@@ -295,7 +306,6 @@ function tallyStrykerMutant(m, file, counts, mutants) {
   }
 }
 
-// Tallies all mutants for a single file entry in the Stryker report.
 function tallyStrykerFile(fileData, file, byFile, mutants) {
   let counts = byFile.get(file);
   if (!counts) {
@@ -307,7 +317,6 @@ function tallyStrykerFile(fileData, file, byFile, mutants) {
   }
 }
 
-// Counts detected and undetected mutants per file from Stryker JSON report.
 export function strykerCounts(report, files) {
   const byFile = new Map();
   const mutants = [];
@@ -321,17 +330,11 @@ export function strykerCounts(report, files) {
     }
   }
 
-  const result = { byFile, mutants };
-  Object.defineProperty(result, "undetectedMutants", {
-    value: mutants,
-    enumerable: false,
-  });
-  return result;
+  return { byFile, mutants };
 }
 
 const CARGO_DETECTED_STATUSES = new Set(["CaughtMutant", "Timeout"]);
 
-// Tallies a single cargo-mutants outcome into per-file detected or undetected counts.
 function tallyCargoOutcome(item, byFile, mutants) {
   const mutant = item.scenario?.Mutant;
   const fileRaw = mutant?.file;
@@ -355,14 +358,12 @@ function tallyCargoOutcome(item, byFile, mutants) {
   }
 }
 
-// Counts detected and undetected mutants per file from cargo-mutants outcomes array.
-export function cargoMutantsCounts(outcomes, ...more) {
+export function cargoMutantsCounts(outcomes = []) {
   const byFile = new Map();
   const mutants = [];
   const seen = new Set();
-  const list = [outcomes, ...more].flat(2);
 
-  for (const item of list) {
+  for (const item of outcomes) {
     if (!item) continue;
     const name = item.scenario?.Mutant?.name;
     if (name) {
@@ -372,17 +373,11 @@ export function cargoMutantsCounts(outcomes, ...more) {
     tallyCargoOutcome(item, byFile, mutants);
   }
 
-  const result = { byFile, mutants };
-  Object.defineProperty(result, "undetectedMutants", {
-    value: mutants,
-    enumerable: false,
-  });
-  return result;
+  return { byFile, mutants };
 }
 
 const TS_EXCLUSIONS = /\.(test|spec)\.[^/]+$/;
 
-// Returns gate permissions for Rust files.
 function rustFileGates(norm) {
   const underCrates = norm.startsWith("crates/");
   return {
@@ -393,47 +388,52 @@ function rustFileGates(norm) {
   };
 }
 
-// Returns true if a TypeScript path is ignored by quality gates.
 function isExcludedTs(norm) {
   if (norm === "src/vitest-setup.ts") return true;
   if (norm.endsWith(".d.ts")) return true;
   return TS_EXCLUSIONS.test(norm);
 }
 
-// Checks if path belongs to TypeScript application source.
 function isTsSource(norm) {
   return norm.startsWith("src/") && norm.endsWith(".ts");
 }
 
-// Checks if path belongs to a project script.
 function isScriptSource(norm) {
   return norm.startsWith("scripts/") && norm.endsWith(".mjs");
 }
 
-// Checks if path belongs to a Svelte UI component.
 function isSvelteSource(norm) {
   return norm.startsWith("src/") && norm.endsWith(".svelte");
 }
 
-// Returns gate permissions for TypeScript and related web files.
-function tsFileGates(norm) {
+function scriptCrap(norm, fileExists) {
+  const sibling = norm.replace(/\.mjs$/, ".test.mjs");
+  return Boolean(fileExists && fileExists(sibling));
+}
+
+function tsFileGates(norm, fileExists) {
   if (isExcludedTs(norm)) return null;
   if (isTsSource(norm)) return { type: "ts", complexity: true, crap: true, mutation: true };
-  if (isScriptSource(norm)) return { type: "ts", complexity: true, crap: true, mutation: false };
+  if (isScriptSource(norm)) {
+    return { type: "ts", complexity: true, crap: scriptCrap(norm, fileExists), mutation: false };
+  }
   if (isSvelteSource(norm)) return { type: "ts", complexity: true, crap: false, mutation: false };
   return null;
 }
 
-// Maps a repo-relative path to its gate permissions.
-export function fileGates(relPath) {
+export function fileGates(relPath, fileExists = existsSync) {
   const norm = relPath.replace(/\\/g, "/");
   if (norm.endsWith(".rs")) {
     return rustFileGates(norm);
   }
-  return tsFileGates(norm);
+  return tsFileGates(norm, fileExists);
 }
 
-// Reads optional custom git base argument following --changed.
+export function hasGate(file, gate, fileExists = existsSync) {
+  const gates = fileGates(file, fileExists);
+  return Boolean(gates && gates[gate]);
+}
+
 function readBaseArg(argv, i) {
   const next = argv[i + 1];
   if (next && !next.startsWith("--")) {
@@ -442,33 +442,6 @@ function readBaseArg(argv, i) {
   return null;
 }
 
-// Resolves default base branch when not specified in changed mode.
-function resolveBase(mode, base) {
-  if (mode === "changed" && !base) {
-    return "origin/main";
-  }
-  return base;
-}
-
-// Resolves metrics gate enablement when no explicit gate flags are given.
-function resolveMetrics(metrics, mutation) {
-  if (!metrics && !mutation) {
-    return true;
-  }
-  return metrics;
-}
-
-// Applies default values to parsed arguments.
-function applyArgDefaults({ mode, base, metrics, mutation }) {
-  return {
-    mode,
-    base: resolveBase(mode, base),
-    metrics: resolveMetrics(metrics, mutation),
-    mutation,
-  };
-}
-
-// Parses command-line arguments into mode and active gates.
 export function parseArgs(argv) {
   let mode = "changed";
   let base = null;
@@ -493,23 +466,51 @@ export function parseArgs(argv) {
     }
   }
 
-  return applyArgDefaults({ mode, base, metrics, mutation });
+  const resolvedBase = mode === "changed" && !base ? "origin/main" : base;
+  const resolvedMetrics = !metrics && !mutation ? true : metrics;
+  return { mode, base: resolvedBase, metrics: resolvedMetrics, mutation };
 }
 
 const SPAN_PARENT_TYPES = new Set(["MethodDefinition", "Property", "PropertyDefinition"]);
 
-// Resolves start location of a function AST node or its enclosing definition.
 function getSpanStart(node) {
-  const parent = node.parent;
-  if (parent && SPAN_PARENT_TYPES.has(parent.type)) {
-    return parent.loc.start;
+  let curr = node;
+  while (curr.parent) {
+    const p = curr.parent;
+    if (SPAN_PARENT_TYPES.has(p.type)) {
+      return p.loc.start;
+    }
+    if (p.type === "VariableDeclarator" && p.init === curr) {
+      curr = p;
+      continue;
+    }
+    if (p.type === "VariableDeclaration" && curr.type === "VariableDeclarator") {
+      curr = p;
+      continue;
+    }
+    if (p.type === "ExportNamedDeclaration" && curr.type === "VariableDeclaration") {
+      return p.loc.start;
+    }
+    break;
   }
-  return node.loc.start;
+  return curr.loc.start;
 }
 
-// Configures ESLint with complexity and span rules.
+function getFunctionName(node) {
+  if (node.id?.name) return node.id.name;
+  if (
+    node.parent?.type === "VariableDeclarator" &&
+    node.parent.init === node &&
+    node.parent.id?.type === "Identifier"
+  ) {
+    return node.parent.id.name;
+  }
+  return undefined;
+}
+
 export function createQualityEslint() {
   return new ESLint({
+    allowInlineConfig: false,
     overrideConfig: [
       {
         plugins: {
@@ -523,7 +524,7 @@ export function createQualityEslint() {
                         start: getSpanStart(node),
                         end: node.loc.end,
                       },
-                      message: "span",
+                      message: getFunctionName(node) ?? "span",
                     });
                   }
                   return {
@@ -545,7 +546,6 @@ export function createQualityEslint() {
   });
 }
 
-// Groups lint messages into spans and complexity warnings.
 function groupLintMessages(messages) {
   const spans = [];
   const complexityMsgs = [];
@@ -556,6 +556,7 @@ function groupLintMessages(messages) {
         startColumn: msg.column,
         endLine: msg.endLine,
         endColumn: msg.endColumn,
+        name: msg.message !== "span" ? msg.message : undefined,
       });
     }
     if (msg.ruleId === "complexity") {
@@ -565,7 +566,6 @@ function groupLintMessages(messages) {
   return { spans, complexityMsgs };
 }
 
-// Extracts function name and complexity score from message text.
 function parseComplexityMessage(message) {
   const compMatch = message.match(/complexity of (\d+)/);
   if (!compMatch) return null;
@@ -576,7 +576,6 @@ function parseComplexityMessage(message) {
   };
 }
 
-// Extracts functions and complexity ratings from a single lint result.
 function extractFileFunctions(fileRes, repoRoot) {
   const relPath = toRepoRelative(fileRes.filePath, repoRoot);
   const { spans, complexityMsgs } = groupLintMessages(fileRes.messages);
@@ -592,9 +591,11 @@ function extractFileFunctions(fileRes, repoRoot) {
     const key = `${relPath}:${span.startLine}:${span.startColumn}:${span.endLine}:${span.endColumn}`;
     if (!assigned.has(key)) {
       assigned.add(key);
+      const fnName =
+        parsed.name && parsed.name !== "<anonymous>" ? parsed.name : (span.name ?? "<anonymous>");
       functions.push({
         file: relPath,
-        name: parsed.name,
+        name: fnName,
         startLine: span.startLine,
         endLine: span.endLine,
         complexity: parsed.complexity,
@@ -604,7 +605,6 @@ function extractFileFunctions(fileRes, repoRoot) {
   return functions;
 }
 
-// Collects TS function locations and complexities from ESLint results.
 export function collectTsFunctions(lintResults, repoRoot) {
   const functions = [];
   for (const fileRes of lintResults) {
@@ -613,26 +613,43 @@ export function collectTsFunctions(lintResults, repoRoot) {
   return functions;
 }
 
-// Locates outcomes.json inside mutants output directory.
 export function findOutcomesPath(outDir, repoRoot, fileExists) {
-  const p1 = resolve(repoRoot, outDir, "mutants.out/outcomes.json");
-  if (fileExists(p1)) return p1;
-  const p2 = resolve(repoRoot, outDir, "outcomes.json");
-  if (fileExists(p2)) return p2;
-  return null;
+  const p = resolve(repoRoot, outDir, "mutants.out/outcomes.json");
+  return fileExists(p) ? p : null;
 }
 
-// Reads the `outcomes` array of cargo-mutants' outcomes.json from its output directory.
-export function readOutcomes(outDir, repoRoot, fileReader, fileExists) {
+// cargo-mutants skips outcomes.json only when it finds no mutants and exits 0. Any other missing
+// file means it failed, and scoring that as "no mutants" would pass the gate.
+export function readOutcomes(outDir, repoRoot, fileReader, fileExists, status) {
   const exists = fileExists || existsSync;
   const read = fileReader || readFileSync;
   const p = findOutcomesPath(outDir, repoRoot, exists);
-  // No file means cargo-mutants failed to run; scoring that as "no mutants" would pass the gate.
-  if (!p) throw new Error(`cargo-mutants wrote no outcomes.json under ${outDir}`);
-  return JSON.parse(read(p, "utf8")).outcomes ?? [];
+  if (!p) {
+    if (status === 0) {
+      return [];
+    }
+    throw new Error(`cargo-mutants wrote no outcomes.json under ${outDir}`);
+  }
+  const data = JSON.parse(read(p, "utf8"));
+  const outcomes = data.outcomes ?? [];
+  for (const item of outcomes) {
+    if (item.scenario === "Baseline" && item.summary !== "Success") {
+      throw new Error("cargo-mutants baseline failed");
+    }
+  }
+  const totalMutants = data.total_mutants ?? 0;
+  if (totalMutants > 0) {
+    const hasViable = outcomes.some(
+      (o) =>
+        o.summary === "CaughtMutant" || o.summary === "MissedMutant" || o.summary === "Timeout",
+    );
+    if (!hasViable) {
+      throw new Error("cargo-mutants tested no viable mutants");
+    }
+  }
+  return outcomes;
 }
 
-// Parses Rust complexity entries into function descriptors.
 export function parseRustFunctionsJson(output, repoRoot) {
   const entries = JSON.parse(output);
   return entries.map((e) => ({
@@ -644,7 +661,6 @@ export function parseRustFunctionsJson(output, repoRoot) {
   }));
 }
 
-// Gathers Rust functions using the complexity binary.
 function collectRustFunctions(rsCandidates, repoRoot, runner) {
   if (rsCandidates.length === 0) return [];
   const run = runner || runCommand;
@@ -655,41 +671,29 @@ function collectRustFunctions(rsCandidates, repoRoot, runner) {
   return parseRustFunctionsJson(output, repoRoot);
 }
 
-// Checks if a gate applies to Rust crate code requiring CRAP gate.
-function isRustCrapGate(gate) {
-  return Boolean(gate?.crap && gate.type === "rust");
-}
-
-// Checks whether any target function is in a Rust crate requiring CRAP gate.
 export function needsRustCoverage(functions) {
   for (const fn of functions) {
-    if (isRustCrapGate(fileGates(fn.file))) {
+    if (fn.file.endsWith(".rs") && hasGate(fn.file, "crap")) {
       return true;
     }
   }
   return false;
 }
 
-// Checks if a gate applies to TypeScript code requiring CRAP gate.
-function isTsCrapGate(gate) {
-  return Boolean(gate?.crap && gate.type === "ts");
-}
-
-// Returns unique TypeScript files requiring statement coverage for CRAP.
 export function findTsCrapFiles(functions) {
   const files = new Set();
   for (const fn of functions) {
-    if (isTsCrapGate(fileGates(fn.file))) {
+    if (!fn.file.endsWith(".rs") && hasGate(fn.file, "crap")) {
       files.add(fn.file);
     }
   }
   return Array.from(files);
 }
 
-// Executes cargo llvm-cov and returns parsed LCOV results.
 function runRustCoverage(repoRoot, runner, fileReader) {
   const run = runner || runCommand;
   const read = fileReader || readFileSync;
+  mkdirSync(resolve(repoRoot, "coverage"), { recursive: true });
   run(
     "cargo",
     [
@@ -702,13 +706,12 @@ function runRustCoverage(repoRoot, runner, fileReader) {
       "--output-path",
       "coverage/rust.lcov",
     ],
-    { cwd: repoRoot, stdio: "ignore" },
+    { cwd: repoRoot, stdio: ["ignore", "ignore", "inherit"] },
   );
   const lcovText = read(resolve(repoRoot, "coverage/rust.lcov"), "utf8");
   return parseLcov(lcovText, repoRoot);
 }
 
-// Parses vitest coverage-final.json into a map of repo-relative paths.
 export function parseTsCoverageJson(json, repoRoot) {
   const map = new Map();
   for (const [k, v] of Object.entries(json)) {
@@ -717,7 +720,6 @@ export function parseTsCoverageJson(json, repoRoot) {
   return map;
 }
 
-// Executes vitest related coverage and returns Istanbul coverage map.
 function runTsCoverage(tsCrapFiles, repoRoot, runner, fileReader) {
   const run = runner || runCommand;
   const read = fileReader || readFileSync;
@@ -739,7 +741,6 @@ function runTsCoverage(tsCrapFiles, repoRoot, runner, fileReader) {
   return parseTsCoverageJson(json, repoRoot);
 }
 
-// Collects coverage maps for Rust and TS when required.
 function collectCoverage(targetFunctions, repoRoot) {
   const rustLcov = needsRustCoverage(targetFunctions) ? runRustCoverage(repoRoot) : null;
   const tsCrapFiles = findTsCrapFiles(targetFunctions);
@@ -747,7 +748,6 @@ function collectCoverage(targetFunctions, repoRoot) {
   return { rustLcov, tsCovMap };
 }
 
-// Calculates maximum column widths for failing functions table.
 function calculateColWidths(headers, rows) {
   return {
     loc: Math.max(headers.loc.length, ...rows.map((r) => r.loc.length)),
@@ -758,12 +758,10 @@ function calculateColWidths(headers, rows) {
   };
 }
 
-// Formats a single row for the failing functions report table.
 function formatReportRow(r, colWidths) {
   return `${r.loc.padEnd(colWidths.loc)}  ${r.name.padEnd(colWidths.name)}  ${r.complexity.padEnd(colWidths.complexity)}  ${r.coverage.padEnd(colWidths.coverage)}  ${r.crap.padEnd(colWidths.crap)}`;
 }
 
-// Formats the table lines for functions exceeding complexity or CRAP limits.
 export function formatReport(failingFunctions) {
   const rows = failingFunctions.map((f) => ({
     loc: `${f.file}:${f.startLine}`,
@@ -789,14 +787,12 @@ export function formatReport(failingFunctions) {
   return lines;
 }
 
-// Prints the formatted table of failing functions.
 function printFailingTable(failingFunctions) {
   for (const line of formatReport(failingFunctions)) {
     console.log(line);
   }
 }
 
-// Determines if a function falls within pilot files or changed ranges.
 export function isTargetFunction(fn, pilotSet, diffMap, mode) {
   if (pilotSet.has(fn.file)) return true;
   if (mode === "changed") {
@@ -806,7 +802,6 @@ export function isTargetFunction(fn, pilotSet, diffMap, mode) {
   return false;
 }
 
-// Resolves code coverage share for a function based on language type.
 function computeFunctionCoverage(fn, gate, { rustLcov, tsCovMap }) {
   if (gate.type === "rust") {
     const lcov = rustLcov ? rustLcov.get(fn.file) : null;
@@ -816,7 +811,6 @@ function computeFunctionCoverage(fn, gate, { rustLcov, tsCovMap }) {
   return istanbulCoverage(cov, fn.startLine, fn.endLine);
 }
 
-// Checks whether a function violates complexity or CRAP limits.
 export function isFunctionFailing(fn, { complexityMax, crapMax, supp }) {
   if (supp === "no-reason") return true;
   if (supp === "ok") return false;
@@ -825,9 +819,11 @@ export function isFunctionFailing(fn, { complexityMax, crapMax, supp }) {
   return false;
 }
 
-// Evaluates metrics and suppression status for a single function.
-export function evaluateFunctionMetrics(fn, { rustLcov, tsCovMap, complexityMax, crapMax, lines }) {
-  const gate = fileGates(fn.file);
+export function evaluateFunctionMetrics(
+  fn,
+  { rustLcov, tsCovMap, complexityMax, crapMax, lines, fileExists },
+) {
+  const gate = fileGates(fn.file, fileExists);
   const appliesCrap = Boolean(gate && gate.crap);
   const cov = appliesCrap ? computeFunctionCoverage(fn, gate, { rustLcov, tsCovMap }) : null;
   const crapScore = appliesCrap ? crap(fn.complexity, cov) : null;
@@ -839,7 +835,6 @@ export function evaluateFunctionMetrics(fn, { rustLcov, tsCovMap, complexityMax,
   return isFunctionFailing(fn, { complexityMax, crapMax, supp });
 }
 
-// Creates a caching source file reader.
 function createSourceCache(repoRoot, fileReader) {
   const read = fileReader || readFileSync;
   const cache = new Map();
@@ -852,7 +847,6 @@ function createSourceCache(repoRoot, fileReader) {
   };
 }
 
-// Lints TypeScript candidate files and extracts function definitions.
 async function lintTsCandidates(tsCandidates, repoRoot) {
   if (tsCandidates.length === 0) return [];
   const eslint = createQualityEslint();
@@ -860,7 +854,6 @@ async function lintTsCandidates(tsCandidates, repoRoot) {
   return collectTsFunctions(lintResults, repoRoot);
 }
 
-// Collects and filters target functions matching run mode.
 async function collectTargetFunctions({ candidateFiles, pilotSet, diffMap, mode, repoRoot }) {
   const rsCandidates = [...candidateFiles].filter((f) => f.endsWith(".rs"));
   const tsCandidates = [...candidateFiles].filter((f) => !f.endsWith(".rs"));
@@ -872,7 +865,6 @@ async function collectTargetFunctions({ candidateFiles, pilotSet, diffMap, mode,
   return allFunctions.filter((fn) => isTargetFunction(fn, pilotSet, diffMap, mode));
 }
 
-// Finds failing functions given target functions and evaluation context.
 function findFailingFunctions(targetFunctions, context) {
   const failing = [];
   for (const fn of targetFunctions) {
@@ -884,7 +876,6 @@ function findFailingFunctions(targetFunctions, context) {
   return failing;
 }
 
-// Runs the metrics gate (complexity and CRAP).
 async function runMetricsGate({
   candidateFiles,
   pilotSet,
@@ -925,18 +916,6 @@ async function runMetricsGate({
   return { targetCount: targetFunctions.length, failed: failing.length > 0 };
 }
 
-// Checks if a gate applies mutation testing to TypeScript code.
-function isTsMutationGate(gate) {
-  return Boolean(gate?.mutation && gate.type === "ts");
-}
-
-// Checks if a file path is a TypeScript file subject to mutation testing.
-function isTsMutationCandidate(file, fileExists) {
-  if (!isTsMutationGate(fileGates(file))) return false;
-  return fileExists(file);
-}
-
-// Builds Stryker range strings from changed diff ranges.
 export function buildStrykerMutateRanges(files, diffMap) {
   const parts = [];
   for (const f of files) {
@@ -952,20 +931,22 @@ export function buildStrykerMutateRanges(files, diffMap) {
   return parts;
 }
 
-// Selects target files and mutation patterns for TypeScript Stryker run.
 export function selectTsMutationTargets({ pilotFiles, diffMap, mode, fileExists }) {
-  const tsPilot = pilotFiles.filter((f) => f.startsWith("src/") && f.endsWith(".ts"));
+  const tsPilot = pilotFiles
+    .filter((f) => f.startsWith("src/") && f.endsWith(".ts"))
+    .filter(fileExists);
   if (mode === "pilot") {
     return { targetFiles: tsPilot, mutateList: tsPilot };
   }
 
-  const tsChanged = [...diffMap.keys()].filter((f) => isTsMutationCandidate(f, fileExists));
+  const tsChanged = [...diffMap.keys()].filter(
+    (f) => !f.endsWith(".rs") && hasGate(f, "mutation", fileExists) && fileExists(f),
+  );
   const targetFiles = Array.from(new Set([...tsPilot, ...tsChanged]));
   const mutateList = [...buildStrykerMutateRanges(tsChanged, diffMap), ...tsPilot];
   return { targetFiles, mutateList };
 }
 
-// Runs Stryker tool via child process.
 function execStryker(mutateList, targetFiles, repoRoot, runner) {
   const run = runner || runCommand;
   try {
@@ -978,11 +959,10 @@ function execStryker(mutateList, targetFiles, repoRoot, runner) {
       stdio: "inherit",
     });
   } catch {
-    // Stryker exit code ignored
+    // Stryker exits with a non-zero code when any mutant survives; evaluateStrykerScore inspects the report.
   }
 }
 
-// Formats one score line for a file in a mutation run.
 export function formatFileScoreLine(lang, file, counts, mutationMin) {
   const total = counts.detected + counts.undetected;
   if (total === 0) return null;
@@ -996,7 +976,6 @@ export function formatFileScoreLine(lang, file, counts, mutationMin) {
   };
 }
 
-// Logs undetected mutants for a language.
 export function logUndetectedMutants(lang, mutants, logger = console.log) {
   if (lang === "rust") {
     for (const m of mutants) {
@@ -1009,7 +988,6 @@ export function logUndetectedMutants(lang, mutants, logger = console.log) {
   }
 }
 
-// Formats and logs per-file mutation scores and undetected mutants for a language.
 export function evaluateMutationCounts(lang, counts, mutationMin, logger = console.log) {
   let hasFailed = false;
   for (const [file, fileCounts] of counts.byFile || []) {
@@ -1024,7 +1002,6 @@ export function evaluateMutationCounts(lang, counts, mutationMin, logger = conso
   return hasFailed;
 }
 
-// Reads and scores Stryker results against minimum threshold.
 export function evaluateStrykerScore(
   targetFiles,
   repoRoot,
@@ -1044,7 +1021,6 @@ export function evaluateStrykerScore(
   return evaluateMutationCounts("ts", counts, mutationMin, logger);
 }
 
-// Runs TypeScript mutation gate using Stryker.
 function runTsMutation({ pilotFiles, diffMap, mode, repoRoot, mutationMin }) {
   const fileExists = (f) => existsSync(resolve(repoRoot, f));
   const { targetFiles, mutateList } = selectTsMutationTargets({
@@ -1061,29 +1037,20 @@ function runTsMutation({ pilotFiles, diffMap, mode, repoRoot, mutationMin }) {
   return evaluateStrykerScore(targetFiles, repoRoot, mutationMin);
 }
 
-// Checks if a gate applies mutation testing to Rust code.
-function isRustMutationGate(gate) {
-  return Boolean(gate?.mutation && gate.type === "rust");
-}
-
-// Checks if a file path is a Rust file subject to mutation testing.
-function isRustMutationCandidate(file, fileExists) {
-  if (!isRustMutationGate(fileGates(file))) return false;
-  return fileExists(file);
-}
-
-// Selects Rust target files for pilot or changed modes.
 export function selectRustMutationTargets({ pilotFiles, diffMap, mode, fileExists }) {
-  const rustPilot = pilotFiles.filter((f) => f.startsWith("crates/") && f.endsWith(".rs"));
+  const rustPilot = pilotFiles
+    .filter((f) => f.startsWith("crates/") && f.endsWith(".rs"))
+    .filter(fileExists);
   if (mode === "pilot") {
     return { targetFiles: rustPilot, rustPilot };
   }
-  const rustChanged = [...diffMap.keys()].filter((f) => isRustMutationCandidate(f, fileExists));
+  const rustChanged = [...diffMap.keys()].filter(
+    (f) => f.endsWith(".rs") && hasGate(f, "mutation", fileExists) && fileExists(f),
+  );
   const targetFiles = Array.from(new Set([...rustPilot, ...rustChanged]));
   return { targetFiles, rustPilot, rustChanged };
 }
 
-// Builds the cargo mutants command call descriptors for given mode and pilot files.
 export function buildCargoMutantsCalls({ mode, rustPilot, rustChanged = [] }) {
   if (mode === "pilot") {
     const args = ["mutants", "-o", "mutants.out"];
@@ -1115,49 +1082,92 @@ export function buildCargoMutantsCalls({ mode, rustPilot, rustChanged = [] }) {
   return calls;
 }
 
-// Generates in.diff inside mutants.out directory from git diff.
-function prepareMutantsDiff(repoRoot, mergeBase, gitRunner) {
-  const runner = gitRunner || git;
-  mkdirSync(resolve(repoRoot, "mutants.out"), { recursive: true });
-  const cratesDiff = runner(["diff", "--no-color", mergeBase, "--", "crates"], repoRoot);
-  writeFileSync(resolve(repoRoot, "mutants.out/in.diff"), cratesDiff, "utf8");
-}
-
-// Executes cargo mutants command invocation.
-function execCargoMutants(args, repoRoot, runner) {
-  const run = runner || runCommand;
+function diffUntracked(file, repoRoot, runner) {
+  const norm = file.replace(/\\/g, "/");
   try {
-    run("cargo", args, { cwd: repoRoot, stdio: "inherit" });
-  } catch {
-    // Exit code ignored
+    return runner(
+      [
+        "diff",
+        "--no-index",
+        "--no-color",
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
+        "--no-ext-diff",
+        "/dev/null",
+        norm,
+      ],
+      repoRoot,
+    );
+  } catch (err) {
+    if (err && (err.status === 1 || err.status === 0)) {
+      return err.stdout ?? "";
+    }
+    throw err;
   }
 }
 
-// Aggregates mutant results across multiple outcome directories.
+export function prepareMutantsDiff(repoRoot, mergeBase, gitRunner, rustPilot = []) {
+  const runner = gitRunner || git;
+  mkdirSync(resolve(repoRoot, "mutants.out"), { recursive: true });
+  const excludeArgs = rustPilot.map((p) => `:(exclude)${p}`);
+  const cratesDiff = runner(
+    [
+      "diff",
+      "--no-color",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      "--no-ext-diff",
+      mergeBase,
+      "--",
+      "crates",
+      ...excludeArgs,
+    ],
+    repoRoot,
+  );
+  let inDiff = cratesDiff;
+  const untrackedText = runner(["ls-files", "--others", "--exclude-standard"], repoRoot);
+  const untrackedFiles = parseUntrackedFiles(untrackedText);
+  for (const file of untrackedFiles) {
+    const norm = file.replace(/\\/g, "/");
+    if (norm.startsWith("crates/") && norm.endsWith(".rs")) {
+      inDiff += diffUntracked(norm, repoRoot, runner);
+    }
+  }
+  writeFileSync(resolve(repoRoot, "mutants.out/in.diff"), inDiff, "utf8");
+}
+
+// cargo-mutants exits with 2 when mutants survive and 3 when tests time out; these are normal outcomes.
+export function execCargoMutants(args, repoRoot, runner) {
+  const run = runner || runCommand;
+  let status = 0;
+  try {
+    run("cargo", args, { cwd: repoRoot, stdio: "inherit" });
+  } catch (err) {
+    status = err?.status ?? 1;
+  }
+  if (status === 0 || status === 2 || status === 3) {
+    return status;
+  }
+  throw new Error(`cargo-mutants exited with ${status}`);
+}
+
 export function aggregateMutantOutcomes(calls, repoRoot, fileReader, fileExists) {
   const allOutcomes = [];
-  for (const { outDir } of calls) {
-    allOutcomes.push(...readOutcomes(outDir, repoRoot, fileReader, fileExists));
+  for (const call of calls) {
+    allOutcomes.push(...readOutcomes(call.outDir, repoRoot, fileReader, fileExists, call.status));
   }
   return cargoMutantsCounts(allOutcomes);
 }
 
-// Evaluates aggregate Rust mutation score against minimum required threshold.
-export function evaluateRustMutationScore(totals, mutationMin, logger = console.log) {
-  return evaluateMutationCounts("rust", totals, mutationMin, logger);
-}
-
-// Executes each planned mutants command invocation.
-function executeMutantCalls(calls, repoRoot, mergeBase) {
+function executeMutantCalls(calls, repoRoot, mergeBase, rustPilot) {
   for (const call of calls) {
     if (call.needsDiff) {
-      prepareMutantsDiff(repoRoot, mergeBase);
+      prepareMutantsDiff(repoRoot, mergeBase, undefined, rustPilot);
     }
-    execCargoMutants(call.args, repoRoot);
+    call.status = execCargoMutants(call.args, repoRoot);
   }
 }
 
-// Runs Rust mutation gate using cargo-mutants.
 function runRustMutation({ pilotFiles, diffMap, mode, repoRoot, mergeBase, mutationMin }) {
   const fileExists = (f) => existsSync(resolve(repoRoot, f));
   const { targetFiles, rustPilot, rustChanged } = selectRustMutationTargets({
@@ -1173,13 +1183,12 @@ function runRustMutation({ pilotFiles, diffMap, mode, repoRoot, mergeBase, mutat
   // Outcomes left by an earlier run would be scored for files this run doesn't test.
   rmSync(resolve(repoRoot, "mutants.out"), { recursive: true, force: true });
   mkdirSync(resolve(repoRoot, "mutants.out"), { recursive: true });
-  executeMutantCalls(calls, repoRoot, mergeBase);
+  executeMutantCalls(calls, repoRoot, mergeBase, rustPilot);
 
   const totals = aggregateMutantOutcomes(calls, repoRoot);
-  return evaluateRustMutationScore(totals, mutationMin);
+  return evaluateMutationCounts("rust", totals, mutationMin);
 }
 
-// Reads quality gate configuration from JSON file.
 export function readQualityConfig(repoRoot, fileReader) {
   const read = fileReader || readFileSync;
   const configPath = resolve(repoRoot, "quality.config.json");
@@ -1193,13 +1202,11 @@ export function readQualityConfig(repoRoot, fileReader) {
   };
 }
 
-// Checks if a changed file is tracked by quality gates and exists.
 function isCandidateFile(f, fileExists) {
-  if (fileGates(f) === null) return false;
+  if (fileGates(f, fileExists) === null) return false;
   return fileExists(f);
 }
 
-// Filters candidate files by fileGates and filesystem existence.
 function addGatedChangedFiles(candidateSet, diffMap, fileExists) {
   for (const f of diffMap.keys()) {
     if (isCandidateFile(f, fileExists)) {
@@ -1208,7 +1215,6 @@ function addGatedChangedFiles(candidateSet, diffMap, fileExists) {
   }
 }
 
-// Collects candidate files to inspect for active run mode.
 export function collectCandidateFiles({ pilotFiles, diffMap, mode, fileExists }) {
   const candidateSet = new Set(pilotFiles.filter(fileExists));
   if (mode === "changed") {
@@ -1217,11 +1223,13 @@ export function collectCandidateFiles({ pilotFiles, diffMap, mode, fileExists })
   return candidateSet;
 }
 
-// Loads merge-base and diff map for changed files including untracked additions.
 function loadChangedDiff(base, repoRoot, gitRunner) {
   const runner = gitRunner || git;
   const mergeBase = runner(["merge-base", base, "HEAD"], repoRoot).trim();
-  const diffText = runner(["diff", "-U0", "--no-color", mergeBase], repoRoot);
+  const diffText = runner(
+    ["diff", "-U0", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-ext-diff", mergeBase],
+    repoRoot,
+  );
   const diffMap = parseDiff(diffText);
   const untrackedText = runner(["ls-files", "--others", "--exclude-standard"], repoRoot);
   const untracked = parseUntrackedFiles(untrackedText);
@@ -1229,74 +1237,50 @@ function loadChangedDiff(base, repoRoot, gitRunner) {
   return { mergeBase, diffMap };
 }
 
-// Executes mutation suites for TS and Rust and checks for failures.
-function runMutationSuites(params) {
-  const tsFailed = runTsMutation(params);
-  const rustFailed = runRustMutation(params);
-  return tsFailed || rustFailed;
-}
-
-// Executes metrics gate workflow.
-async function executeMetricsWorkflow(params) {
-  return runMetricsGate({
-    candidateFiles: params.candidateFiles,
-    pilotSet: new Set(params.pilotFiles),
-    diffMap: params.diffMap,
-    mode: params.args.mode,
-    repoRoot: params.repoRoot,
-    complexityMax: params.config.complexityMax,
-    crapMax: params.config.crapMax,
-  });
-}
-
-// Executes mutation gate workflow.
-function executeMutationWorkflow(params) {
-  return runMutationSuites({
-    pilotFiles: params.pilotFiles,
-    diffMap: params.diffMap,
-    mode: params.args.mode,
-    repoRoot: params.repoRoot,
-    mergeBase: params.mergeBase,
-    mutationMin: params.config.mutationMin,
-  });
-}
-
-// Runs metrics check stage and reports status.
-async function checkMetricsStage(params) {
-  if (!params.args.metrics) {
-    return { ran: false, failed: false, empty: false };
-  }
-  const res = await executeMetricsWorkflow(params);
-  const empty = res.targetCount === 0 && !params.args.mutation;
-  return { ran: true, failed: res.failed, empty };
-}
-
-// Runs mutation check stage and reports status.
-function checkMutationStage(params) {
-  if (!params.args.mutation) return false;
-  return executeMutationWorkflow(params);
-}
-
-// Evaluates overall exit status from metrics and mutation results.
 export function evaluateRunFailure(metricsFailed, mutationFailed) {
   if (metricsFailed) return 1;
   if (mutationFailed) return 1;
   return 0;
 }
 
-// Runs metrics and mutation checks based on CLI arguments.
-async function runQualityChecks(params) {
-  const metricsResult = await checkMetricsStage(params);
-  if (metricsResult.empty) {
-    console.log("quality: nothing to check");
-    return 0;
+export async function runQualityChecks(params) {
+  let metricsFailed = false;
+  if (params.args.metrics) {
+    const res = await runMetricsGate({
+      candidateFiles: params.candidateFiles,
+      pilotSet: new Set(params.pilotFiles),
+      diffMap: params.diffMap,
+      mode: params.args.mode,
+      repoRoot: params.repoRoot,
+      complexityMax: params.config.complexityMax,
+      crapMax: params.config.crapMax,
+    });
+    metricsFailed = res.failed;
   }
 
-  const mutationFailed = checkMutationStage(params);
-  return evaluateRunFailure(metricsResult.failed, mutationFailed);
+  let mutationFailed = false;
+  if (params.args.mutation) {
+    const tsFailed = runTsMutation({
+      pilotFiles: params.pilotFiles,
+      diffMap: params.diffMap,
+      mode: params.args.mode,
+      repoRoot: params.repoRoot,
+      mutationMin: params.config.mutationMin,
+    });
+    const rustFailed = runRustMutation({
+      pilotFiles: params.pilotFiles,
+      diffMap: params.diffMap,
+      mode: params.args.mode,
+      repoRoot: params.repoRoot,
+      mergeBase: params.mergeBase,
+      mutationMin: params.config.mutationMin,
+    });
+    mutationFailed = tsFailed || rustFailed;
+  }
+
+  return evaluateRunFailure(metricsFailed, mutationFailed);
 }
 
-// Main entry point for quality gate enforcement.
 async function main() {
   const repoRoot = resolve(git(["rev-parse", "--show-toplevel"]).trim());
   const config = readQualityConfig(repoRoot);
@@ -1309,8 +1293,9 @@ async function main() {
   }
 
   const fileExists = (f) => existsSync(resolve(repoRoot, f));
+  const pilotFiles = config.pilotFiles.filter(fileExists);
   const candidateFiles = collectCandidateFiles({
-    pilotFiles: config.pilotFiles,
+    pilotFiles,
     diffMap,
     mode: args.mode,
     fileExists,
@@ -1323,7 +1308,7 @@ async function main() {
 
   const exitCode = await runQualityChecks({
     candidateFiles,
-    pilotFiles: config.pilotFiles,
+    pilotFiles,
     diffMap,
     mergeBase,
     args,

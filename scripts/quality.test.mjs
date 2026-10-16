@@ -9,16 +9,18 @@ import {
   collectCandidateFiles,
   collectTsFunctions,
   crap,
+  createQualityEslint,
   evaluateFunctionMetrics,
   evaluateMutationCounts,
   evaluateRunFailure,
-  evaluateRustMutationScore,
   evaluateStrykerScore,
+  execCargoMutants,
   fileGates,
   findOutcomesPath,
   findTsCrapFiles,
   formatFileScoreLine,
   formatReport,
+  hasGate,
   isFunctionFailing,
   isTargetFunction,
   istanbulCoverage,
@@ -33,10 +35,12 @@ import {
   parseRustFunctionsJson,
   parseTsCoverageJson,
   parseUntrackedFiles,
+  prepareMutantsDiff,
   quoteArg,
   readOutcomes,
   readQualityConfig,
   runCommand,
+  runQualityChecks,
   selectRustMutationTargets,
   selectTsMutationTargets,
   strykerCounts,
@@ -168,9 +172,9 @@ describe("lineCoverage", () => {
     expect(lineCoverage(undefined, 1, 10)).toBe(0);
   });
 
-  it("returns one when no lines are instrumented in range", () => {
+  it("returns zero when no lines are instrumented in range", () => {
     const lines = new Map([[20, 1]]);
-    expect(lineCoverage(lines, 1, 10)).toBe(1);
+    expect(lineCoverage(lines, 1, 10)).toBe(0);
   });
 
   it("computes partial coverage correctly", () => {
@@ -188,12 +192,12 @@ describe("istanbulCoverage", () => {
     expect(istanbulCoverage(undefined, 1, 10)).toBe(0);
   });
 
-  it("returns one when no statements start in range", () => {
+  it("returns zero when no statements start in range", () => {
     const fileCov = {
       statementMap: { 0: { start: { line: 25 } } },
       s: { 0: 0 },
     };
-    expect(istanbulCoverage(fileCov, 1, 10)).toBe(1);
+    expect(istanbulCoverage(fileCov, 1, 10)).toBe(0);
   });
 
   it("computes partial statement coverage in range", () => {
@@ -246,6 +250,18 @@ describe("suppression", () => {
       "fn complex_calc() {}",
     ];
     expect(suppression(lines, 5)).toBe("ok");
+  });
+
+  it("skips multi-line Rust expect attributes", () => {
+    const lines = [
+      "// quality-ignore: necessary complexity",
+      "#[expect(",
+      "    clippy::too_many_lines,",
+      '    reason = "...",',
+      ")]",
+      "fn f() {}",
+    ];
+    expect(suppression(lines, 6)).toBe("ok");
   });
 
   it("reports no-reason when reason is missing or empty", () => {
@@ -490,7 +506,7 @@ describe("evaluateMutationCounts", () => {
       },
     ];
 
-    const counts = cargoMutantsCounts(inDiffOutcomes, pilotOutcomes);
+    const counts = cargoMutantsCounts([...inDiffOutcomes, ...pilotOutcomes]);
     expect(counts.byFile.get("crates/core/src/audio_map.rs")).toEqual({
       detected: 1,
       undetected: 1,
@@ -504,7 +520,7 @@ describe("evaluateMutationCounts", () => {
   });
 });
 
-describe("aggregateMutantOutcomes and evaluateRustMutationScore", () => {
+describe("aggregateMutantOutcomes", () => {
   it("aggregates outcome calls and evaluates rust score", () => {
     const calls = [{ outDir: "mutants.out" }, { outDir: "mutants.out/pilot" }];
     const fakeReader = (path) => {
@@ -544,7 +560,7 @@ describe("aggregateMutantOutcomes and evaluateRustMutationScore", () => {
     });
 
     const lines = [];
-    const failed = evaluateRustMutationScore(totals, 80, (msg) => lines.push(msg));
+    const failed = evaluateMutationCounts("rust", totals, 80, (msg) => lines.push(msg));
     expect(failed).toBe(false);
     expect(lines).toEqual([
       "mutation rust crates/core/src/audio_map.rs: 1/1 detected = 100.0% (min 80)",
@@ -619,7 +635,11 @@ describe("quoteArg and buildCommandLine", () => {
     expect(quoteArg("a^b")).toBe('"a^b"');
     expect(quoteArg("a%b")).toBe('"a%b"');
     expect(quoteArg("(nested)")).toBe('"(nested)"');
-    expect(quoteArg('foo"bar')).toBe('"foo\\"bar"');
+  });
+
+  it("escapes inner double quotes with double quotes for cmd.exe", () => {
+    expect(quoteArg('a"b')).toBe('"a""b"');
+    expect(quoteArg('foo"bar')).toBe('"foo""bar"');
   });
 
   it("builds a single command line string from an executable and args", () => {
@@ -635,7 +655,42 @@ describe("quoteArg and buildCommandLine", () => {
   });
 });
 
-describe("fileGates", () => {
+describe("hasGate and fileGates", () => {
+  it("checks gates for each file kind", () => {
+    expect(hasGate("crates/core/src/lib.rs", "complexity")).toBe(true);
+    expect(hasGate("crates/core/src/lib.rs", "crap")).toBe(true);
+    expect(hasGate("crates/core/src/lib.rs", "mutation")).toBe(true);
+
+    expect(hasGate("src-tauri/src/main.rs", "complexity")).toBe(true);
+    expect(hasGate("src-tauri/src/main.rs", "crap")).toBe(false);
+    expect(hasGate("src-tauri/src/main.rs", "mutation")).toBe(false);
+
+    expect(hasGate("src/vitest-setup.ts", "complexity")).toBe(false);
+    expect(hasGate("src/types.d.ts", "complexity")).toBe(false);
+    expect(hasGate("src/button.test.ts", "complexity")).toBe(false);
+    expect(hasGate("src/button.spec.ts", "complexity")).toBe(false);
+
+    expect(hasGate("src/app.ts", "complexity")).toBe(true);
+    expect(hasGate("src/app.ts", "crap")).toBe(true);
+    expect(hasGate("src/app.ts", "mutation")).toBe(true);
+
+    expect(hasGate("src/App.svelte", "complexity")).toBe(true);
+    expect(hasGate("src/App.svelte", "crap")).toBe(false);
+    expect(hasGate("src/App.svelte", "mutation")).toBe(false);
+
+    expect(hasGate("package.json", "complexity")).toBe(false);
+  });
+
+  it("does not apply CRAP gate to .mjs without sibling test", () => {
+    const fileExists = (p) => p === "scripts/quality.test.mjs";
+    expect(hasGate("scripts/smoke.mjs", "complexity", fileExists)).toBe(true);
+    expect(hasGate("scripts/smoke.mjs", "crap", fileExists)).toBe(false);
+    expect(hasGate("scripts/smoke.mjs", "mutation", fileExists)).toBe(false);
+
+    expect(hasGate("scripts/quality.mjs", "complexity", fileExists)).toBe(true);
+    expect(hasGate("scripts/quality.mjs", "crap", fileExists)).toBe(true);
+  });
+
   it("assigns gate rules based on path conventions", () => {
     expect(fileGates("crates/core/src/lib.rs")).toEqual({
       type: "rust",
@@ -658,12 +713,6 @@ describe("fileGates", () => {
       complexity: true,
       crap: true,
       mutation: true,
-    });
-    expect(fileGates("scripts/quality.mjs")).toEqual({
-      type: "ts",
-      complexity: true,
-      crap: true,
-      mutation: false,
     });
     expect(fileGates("src/App.svelte")).toEqual({
       type: "ts",
@@ -765,24 +814,53 @@ describe("collectTsFunctions", () => {
   });
 });
 
+describe("createQualityEslint with inline directives and arrow functions", () => {
+  it("still reports complexity when inline disable comments are present", async () => {
+    const eslint = createQualityEslint();
+    const code = `
+// eslint-disable-next-line complexity
+function complexFn(a, b, c) {
+  if (a) return 1;
+  if (b) return 2;
+  if (c) return 3;
+  return 0;
+}
+`;
+    const [result] = await eslint.lintText(code, { filePath: "src/lib/inline_disable.ts" });
+    const complexityError = result.messages.find((m) => m.ruleId === "complexity");
+    expect(complexityError).toBeDefined();
+    expect(complexityError.message).toContain("complexity of 4");
+  });
+
+  it("names export const f = () => {...} as f and finds suppression comment", async () => {
+    const eslint = createQualityEslint();
+    const code = `// quality-ignore: known complexity
+export const f = (x) => {
+  if (x > 1) return 2;
+  return 1;
+};
+`;
+    const [result] = await eslint.lintText(code, { filePath: "src/lib/arrow.ts" });
+    const fns = collectTsFunctions([result], process.cwd());
+    expect(fns.length).toBe(1);
+    expect(fns[0].name).toBe("f");
+    expect(fns[0].startLine).toBe(2);
+
+    const sourceLines = code.split("\n");
+    const supp = suppression(sourceLines, fns[0].startLine);
+    expect(supp).toBe("ok");
+  });
+});
+
 describe("findOutcomesPath and readOutcomes", () => {
-  it("prefers mutants.out/outcomes.json over outcomes.json", () => {
+  it("locates mutants.out/outcomes.json", () => {
     const fakeExists = (path) => path.replace(/\\/g, "/").includes("mutants.out/outcomes.json");
     const p = findOutcomesPath("target", "C:/repo", fakeExists);
     expect(p).not.toBeNull();
     expect(p.replace(/\\/g, "/")).toContain("mutants.out");
   });
 
-  it("returns outcomes.json when nested file is absent", () => {
-    const fakeExists = (path) => {
-      const norm = path.replace(/\\/g, "/");
-      return norm.endsWith("outcomes.json") && !norm.includes("mutants.out");
-    };
-    const p = findOutcomesPath("target", "C:/repo", fakeExists);
-    expect(p).not.toBeNull();
-  });
-
-  it("reads outcomes data and throws when cargo-mutants wrote none", () => {
+  it("reads outcomes data and throws when cargo-mutants wrote none and status is non-zero", () => {
     const fakeExists = () => true;
     const fakeReader = () => JSON.stringify({ outcomes: [{ summary: "CaughtMutant" }], caught: 1 });
     const outcomes = readOutcomes("out", "C:/repo", fakeReader, fakeExists);
@@ -791,6 +869,129 @@ describe("findOutcomesPath and readOutcomes", () => {
     expect(() => readOutcomes("out", "C:/repo", fakeReader, () => false)).toThrow(
       "cargo-mutants wrote no outcomes.json under out",
     );
+  });
+
+  it("gives zero outcomes when status is 0 and no outcomes.json exists", () => {
+    const outcomes = readOutcomes(
+      "out",
+      "C:/repo",
+      () => "{}",
+      () => false,
+      0,
+    );
+    expect(outcomes).toEqual([]);
+  });
+
+  it("throws when status is 2 and no outcomes.json exists", () => {
+    expect(() =>
+      readOutcomes(
+        "out",
+        "C:/repo",
+        () => "{}",
+        () => false,
+        2,
+      ),
+    ).toThrow("cargo-mutants wrote no outcomes.json under out");
+  });
+
+  it("throws when a Baseline outcome indicates failure", () => {
+    const fakeReader = () =>
+      JSON.stringify({
+        outcomes: [{ scenario: "Baseline", summary: "Failure" }],
+      });
+    expect(() => readOutcomes("out", "C:/repo", fakeReader, () => true)).toThrow(
+      "cargo-mutants baseline failed",
+    );
+  });
+
+  it("throws when total_mutants is 3 and all are Unviable", () => {
+    const fakeReader = () =>
+      JSON.stringify({
+        total_mutants: 3,
+        outcomes: [
+          { scenario: { Mutant: { name: "m1" } }, summary: "Unviable" },
+          { scenario: { Mutant: { name: "m2" } }, summary: "Unviable" },
+          { scenario: { Mutant: { name: "m3" } }, summary: "Unviable" },
+        ],
+      });
+    expect(() => readOutcomes("out", "C:/repo", fakeReader, () => true)).toThrow(
+      "cargo-mutants tested no viable mutants",
+    );
+  });
+});
+
+describe("execCargoMutants", () => {
+  it("returns exit status for normal exit codes", () => {
+    expect(execCargoMutants(["mutants"], "C:/repo", () => {})).toBe(0);
+    const mockMissed = () => {
+      const err = new Error("mutants missed");
+      err.status = 2;
+      throw err;
+    };
+    expect(execCargoMutants(["mutants"], "C:/repo", mockMissed)).toBe(2);
+    const mockTimeout = () => {
+      const err = new Error("timeout");
+      err.status = 3;
+      throw err;
+    };
+    expect(execCargoMutants(["mutants"], "C:/repo", mockTimeout)).toBe(3);
+  });
+
+  it("throws when cargo-mutants exits with code other than 0, 2 or 3", () => {
+    const mockError = () => {
+      const err = new Error("crash");
+      err.status = 4;
+      throw err;
+    };
+    expect(() => execCargoMutants(["mutants"], "C:/repo", mockError)).toThrow(
+      "cargo-mutants exited with 4",
+    );
+  });
+});
+
+describe("prepareMutantsDiff", () => {
+  it("includes untracked crates files and excludes pilot files in diff", () => {
+    const executedCommands = [];
+    const mockGit = (args) => {
+      executedCommands.push(args);
+      if (args[0] === "diff" && args[1] === "--no-color") {
+        return "diff --git a/crates/core/src/lib.rs b/crates/core/src/lib.rs\n";
+      }
+      if (args[0] === "ls-files") {
+        return "crates/core/src/new_mod.rs\nsrc/lib/other.ts\n";
+      }
+      if (args[0] === "diff" && args[1] === "--no-index") {
+        const err = new Error("diff found");
+        err.status = 1;
+        err.stdout = "diff --git a/crates/core/src/new_mod.rs b/crates/core/src/new_mod.rs\n";
+        throw err;
+      }
+      return "";
+    };
+
+    prepareMutantsDiff("C:/repo", "origin/main", mockGit, ["crates/core/src/audio_map.rs"]);
+
+    const cratesDiffCall = executedCommands.find(
+      (cmd) => cmd[0] === "diff" && cmd[1] === "--no-color",
+    );
+    expect(cratesDiffCall).toContain(":(exclude)crates/core/src/audio_map.rs");
+    expect(cratesDiffCall).toContain("--src-prefix=a/");
+    expect(cratesDiffCall).toContain("--dst-prefix=b/");
+    expect(cratesDiffCall).toContain("--no-ext-diff");
+
+    const noIndexCall = executedCommands.find(
+      (cmd) => cmd[0] === "diff" && cmd[1] === "--no-index",
+    );
+    expect(noIndexCall).toEqual([
+      "diff",
+      "--no-index",
+      "--no-color",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
+      "--no-ext-diff",
+      "/dev/null",
+      "crates/core/src/new_mod.rs",
+    ]);
   });
 });
 
@@ -1014,5 +1215,20 @@ describe("evaluateRunFailure", () => {
     expect(evaluateRunFailure(false, true)).toBe(1);
     expect(evaluateRunFailure(true, true)).toBe(1);
     expect(evaluateRunFailure(false, false)).toBe(0);
+  });
+});
+
+describe("runQualityChecks", () => {
+  it("runs metrics and mutation stages and evaluates exit code", async () => {
+    const params = {
+      candidateFiles: new Set(),
+      pilotFiles: [],
+      diffMap: new Map(),
+      args: { metrics: true, mutation: true, mode: "changed" },
+      repoRoot: "C:/repo",
+      config: { complexityMax: 12, crapMax: 12, mutationMin: 80 },
+    };
+    const exitCode = await runQualityChecks(params);
+    expect(exitCode).toBe(0);
   });
 });

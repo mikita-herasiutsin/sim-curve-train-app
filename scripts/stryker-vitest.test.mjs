@@ -17,36 +17,27 @@ describe("stryker-vitest", () => {
     expect(readVitestResults("non-existent.json")).toBeNull();
   });
 
-  it("evaluates killed when tests or test suites fail", () => {
+  it("evaluates survived when vitest exits 0", () => {
+    expect(evaluateVitestResults({ numTotalTests: 5, numFailedTests: 0 }, 0)).toBe("survived");
+  });
+
+  it("evaluates killed when vitest fails after collecting tests", () => {
+    expect(evaluateVitestResults({ numTotalTests: 5, numFailedTests: 1 }, 1)).toBe("killed");
+    // A worker that runs out of memory leaves numFailedTests at 0 and success true.
     expect(
-      evaluateVitestResults({
-        numTotalTests: 5,
-        numFailedTests: 1,
-        numFailedTestSuites: 0,
-      }),
-    ).toBe("killed");
-    expect(
-      evaluateVitestResults({
-        numTotalTests: 5,
-        numFailedTests: 0,
-        numFailedTestSuites: 1,
-      }),
+      evaluateVitestResults({ numTotalTests: 86, numPassedTests: 67, numFailedTests: 0 }, 1),
     ).toBe("killed");
   });
 
-  it("evaluates survived when all tests pass", () => {
-    expect(
-      evaluateVitestResults({
-        numTotalTests: 5,
-        numFailedTests: 0,
-        numFailedTestSuites: 0,
-      }),
-    ).toBe("survived");
+  it("evaluates killed when every suite fails to load", () => {
+    expect(evaluateVitestResults({ numTotalTests: 0, numFailedTestSuites: 2 }, 1)).toBe("killed");
   });
 
-  it("evaluates no-results when results are null or total tests is zero", () => {
-    expect(evaluateVitestResults(null)).toBe("no-results");
-    expect(evaluateVitestResults({ numTotalTests: 0 })).toBe("no-results");
+  it("evaluates no-results when vitest fails without a report or tests", () => {
+    expect(evaluateVitestResults(null, 1)).toBe("no-results");
+    expect(evaluateVitestResults({ numTotalTests: 0, numFailedTestSuites: 0 }, 1)).toBe(
+      "no-results",
+    );
   });
 
   it("prints notice and stderr on no-results", () => {

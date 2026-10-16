@@ -33,18 +33,28 @@ fn fn_start_line(vis: Option<&syn::Visibility>, sig: &syn::Signature) -> u32 {
     to_u32(span.start().line)
 }
 
+fn cfg_predicate_requires_test(meta: &syn::Meta) -> bool {
+    match meta {
+        syn::Meta::Path(p) => p.is_ident("test"),
+        syn::Meta::List(list) if list.path.is_ident("all") => list
+            .parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::token::Comma>::parse_terminated,
+            )
+            .is_ok_and(|items| items.iter().any(cfg_predicate_requires_test)),
+        _ => false,
+    }
+}
+
 fn has_test_attr(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        let mut is_test = attr.path().is_ident("test");
-        if attr.path().is_ident("cfg") {
-            let _ = attr.parse_nested_meta(|m| {
-                if m.path.is_ident("test") {
-                    is_test = true;
-                }
-                Ok(())
-            });
-        }
-        is_test
+        attr.path()
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "test")
+            || (attr.path().is_ident("cfg")
+                && attr
+                    .parse_args::<syn::Meta>()
+                    .is_ok_and(|m| cfg_predicate_requires_test(&m)))
     })
 }
 
@@ -76,8 +86,7 @@ impl<'ast> Visit<'ast> for ComplexityVisitor {
             syn::Expr::If(_)
             | syn::Expr::While(_)
             | syn::Expr::ForLoop(_)
-            | syn::Expr::Loop(_)
-            | syn::Expr::Try(_) => self.complexity += 1,
+            | syn::Expr::Loop(_) => self.complexity += 1,
             syn::Expr::Binary(b) if matches!(b.op, syn::BinOp::And(_) | syn::BinOp::Or(_)) => {
                 self.complexity += 1;
             }
@@ -302,11 +311,11 @@ mod tests {
     }
 
     #[test]
-    fn two_try_operators_give_three() {
+    fn two_try_operators_give_one() {
         let src = "fn questions() -> Result<(), ()> { foo()?; bar()?; Ok(()) }";
         let entries = analyze_str("test.rs", src);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].complexity, 3);
+        assert_eq!(entries[0].complexity, 1);
     }
 
     #[test]
@@ -366,6 +375,38 @@ mod tests {
         let src = "#[cfg(test)] mod tests { fn helper() { if x {} } }\n#[test] fn t() {}";
         let entries = analyze_str("test.rs", src);
         assert_eq!(entries, &[]);
+    }
+
+    #[test]
+    fn skip_cfg_all_test_module() {
+        let src = "#[cfg(all(test, feature = \"x\"))] mod t { fn f() {} }";
+        let entries = analyze_str("test.rs", src);
+        assert_eq!(entries, &[]);
+    }
+
+    #[test]
+    fn skip_tokio_test_fn() {
+        let src = "#[tokio::test] fn t() {}";
+        let entries = analyze_str("test.rs", src);
+        assert_eq!(entries, &[]);
+    }
+
+    #[test]
+    fn measure_cfg_not_test_fn() {
+        let src = "#[cfg(not(test))] fn f() {}";
+        let entries = analyze_str("test.rs", src);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "f");
+        assert_eq!(entries[0].complexity, 1);
+    }
+
+    #[test]
+    fn measure_cfg_any_test_fn() {
+        let src = "#[cfg(any(test, feature = \"x\"))] fn f() {}";
+        let entries = analyze_str("test.rs", src);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "f");
+        assert_eq!(entries[0].complexity, 1);
     }
 
     #[test]

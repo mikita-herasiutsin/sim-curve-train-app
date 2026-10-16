@@ -98,7 +98,8 @@ crates/telemetry-extract/ dev-only CLI that turns Garage 61 CSV laps into draft 
 src-tauri/                Tauri app shell: commands wiring the core to the UI
 src/                      SvelteKit (SPA) + Svelte 5 frontend
 presets/                  bundled presets, compiled into the exe
-scripts/                  smoke test and docs check
+scripts/                  smoke test, docs check, quality gate, release scripts
+tools/complexity/         Rust complexity counter used by the quality gate
 docs/                     investigations, decisions, open questions, backlog
 ```
 

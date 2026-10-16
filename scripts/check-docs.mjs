@@ -537,7 +537,12 @@ function runImpact(baseRef, repoRoot) {
   process.exit(1);
 }
 
+// The source files the static checks scan.
+const CODE_FILE = /\.(rs|ts|svelte|js|mjs)$/;
+const CODE_DIR = /^(src\/|src-tauri\/src\/|crates\/|scripts\/|tools\/)/;
+
 // Gathers the tracked and new files, runs the static checks and prints the result.
+// quality-ignore: reads git and the disk; CI runs it on every pull request through npm run docs:check.
 function runStatic(repoRoot) {
   const read = (path) => readFileSync(resolve(repoRoot, path), "utf8");
   const exists = (path) => existsSync(resolve(repoRoot, path));
@@ -551,10 +556,7 @@ function runStatic(repoRoot) {
   const prose = docs.filter(
     (f) => !f.startsWith("docs/investigations/") && f !== "CODE_OF_CONDUCT.md",
   );
-  const code = tracked.filter(
-    (f) =>
-      /\.(rs|ts|svelte|js|mjs)$/.test(f) && /^(src\/|src-tauri\/src\/|crates\/|scripts\/)/.test(f),
-  );
+  const code = tracked.filter((f) => CODE_FILE.test(f) && CODE_DIR.test(f));
   const scripts = new Set(Object.keys(JSON.parse(read("package.json")).scripts ?? {}));
 
   const problems = checkFiles({ docs, prose, code, read, exists, scripts });

@@ -46,34 +46,42 @@ Formatting and linting are automated. Don't hand-tune style; run the tools.
 
 ## Quality gates
 
-CI enforces three gates on pull requests: cyclomatic complexity ≤ 12 per function, CRAP ≤ 12 per function, and mutation score ≥ 80% per file, configured in `quality.config.json`.
+CI enforces three gates on pull requests: cyclomatic complexity ≤ 12 per function, CRAP ≤ 12 per function, and mutation score ≥ 80% per file. The `quality.config.json` file configures the gates.
 
-`CRAP = complexity² × (1 - coverage)³ + complexity`, where coverage is the share of lines (Rust, from cargo-llvm-cov) or statements (TypeScript, from Vitest's v8 coverage) tests run. A function at complexity 12 needs full coverage; an untested function passes only up to complexity 3. Mutation score is `(killed + timed out) / (killed + timed out + survived + not covered)`, computed per file. Each file the gate mutates must reach 80%. Rust mutants that do not compile are omitted.
+`CRAP = complexity² × (1 - coverage)³ + complexity`, where coverage is the share of lines (Rust, from cargo-llvm-cov) or statements (TypeScript, from Vitest's v8 coverage) tests run. A function at complexity 12 needs full coverage; an untested function passes only up to complexity 3. Mutation score is `(killed + timed out) / (killed + timed out + survived + not covered)`. The gate computes the score per file, and each file it mutates must reach 80%. cargo-mutants omits mutants that do not compile.
 
-CI checks only functions a pull request adds or changes (overlapping a changed line against the merge base), plus the pilot files `crates/core/src/audio_map.rs` and `src/lib/pedals/history.ts`. Untouched code is not checked. To check another file, add it to `pilot` in `quality.config.json`.
+CI checks only functions a pull request adds or changes (overlapping a changed line against the merge base), plus the pilot files `crates/core/src/audio_map.rs` and `src/lib/pedals/history.ts`. CI does not check untouched code. To check another file, add it to `pilot` in `quality.config.json`.
 
-| Files              | Complexity | CRAP            | Mutation        |
-| ------------------ | ---------- | --------------- | --------------- |
-| `*.rs`             | yes        | under `crates/` | under `crates/` |
-| `src/**/*.ts`      | yes        | yes             | yes             |
-| `scripts/**/*.mjs` | yes        | yes             | no              |
-| `src/**/*.svelte`  | yes        | no              | no              |
+| Files              | Complexity | CRAP                            | Mutation        |
+| ------------------ | ---------- | ------------------------------- | --------------- |
+| `*.rs`             | yes        | under `crates/`                 | under `crates/` |
+| `src/**/*.ts`      | yes        | yes                             | yes             |
+| `scripts/**/*.mjs` | yes        | only with a sibling `.test.mjs` | no              |
+| `src/**/*.svelte`  | yes        | no                              | no              |
 
-Test files, `#[cfg(test)]` code and `*.d.ts` are not measured. `src-tauri` gets complexity only, because coverage and mutation testing need the WebView build and real pedals.
+Scripts without unit tests, such as `scripts/smoke.mjs`, get complexity only.
+
+The gate does not measure test files, `#[cfg(test)]` code, or `*.d.ts`. `src-tauri` gets complexity only, because coverage and mutation testing need the WebView build and real pedals.
 
 Rust complexity comes from `tools/complexity` (a `syn`-based counter), TS complexity from ESLint's `complexity` rule, Rust mutants from `cargo-mutants`, and TS mutants from StrykerJS.
 
-**Commands**
+### What counts toward complexity
 
-Run `cargo install --locked cargo-mutants cargo-llvm-cov` and `rustup component add llvm-tools-preview` once.
+Rust (`tools/complexity`): 1, plus 1 for each `if` (including `else if`), `while`, `for`, `loop`, each `match` arm after the first, each match guard, each `let ... else`, each `&&` and `||`. The `?` operator does not count. Closures count toward the enclosing function; the counter measures nested `fn` items on their own. The counter skips branches inside macro invocations (`assert!`, `matches!`, `macro_rules!`). The gate skips code under `#[test]`, `#[tokio::test]`-style attributes, or a `cfg` predicate that requires `test`.
+
+TypeScript uses ESLint's `complexity` rule, where every function and arrow counts on its own, so a nested arrow does not add to its parent. ESLint inline directives (`eslint-disable`) do not affect the gate.
+
+### Commands
+
+Run `cargo install --locked cargo-mutants@27.1.0 cargo-llvm-cov@0.9.1` and `rustup component add llvm-tools-preview` once.
 
 - `npm run quality`: complexity and CRAP on changed functions (compared with `origin/main`; pass another base with `npm run quality -- origin/<branch>`).
-- `npm run quality:mutation`: mutation tests on changed lines. Takes minutes. Stryker mutates TS files in place and restores them when it ends, so do not run this while a dev server watches the checkout.
+- `npm run quality:mutation`: mutation tests on changed lines. Takes minutes. Stryker mutates TS files in place and restores them when it ends, so do not run this while a dev server watches the checkout. A run killed part-way (closed terminal, Ctrl-C twice) can leave a mutated TS file in the tree. Restore it with `git checkout -- <file>` or copy it back from `.stryker-tmp/backup-*`, and check `git status` before committing. Stryker counts a test run that produced no results (a Vitest crash) as survived, not killed.
 - `npm run quality:pilot`: all gates on the pilot files.
 
 The gates are not part of `npm run verify` yet, because they run tests a second time with coverage.
 
-**Suppressions**
+### Suppressions
 
 Each suppression needs a reason:
 
@@ -81,9 +89,9 @@ Each suppression needs a reason:
 - TS mutant no test can catch: `// Stryker disable next-line <mutator>: <reason>`.
 - Rust mutant no test can catch: an `exclude_re` entry in `.cargo/mutants.toml` with a comment saying why.
 
-**CI**
+### CI
 
-The `quality` job in `.github/workflows/ci.yml` runs on Ubuntu. Pull requests run `npm run quality` and `npm run quality:mutation` against the base branch; pushes to `main` run `npm run quality:pilot`. When it fails it uploads mutation reports as an artifact.
+The `quality` job in `.github/workflows/ci.yml` runs on Ubuntu. Pull requests run `npm run quality` and `npm run quality:mutation` against the base branch; pushes to `main` run `npm run quality:pilot`. The mutation step runs even when the metrics step fails, so a pull request sees both results. When a run fails, CI uploads mutation reports as an artifact.
 
 ## Docs and writing
 

@@ -287,4 +287,4 @@ User README (install, SmartScreen note, first steps, screenshots), a CHANGELOG, 
 - **SCT-081** Import and export presets as files
 - **SCT-082** Career mode
 - **SCT-083** Online leaderboard (needs a separate privacy decision)
-- **SCT-084** Widen the quality gates: add more files to the pilot list, coverage and mutation for `.svelte` components and `src-tauri`, and moving `npm run quality` into `npm run verify` once its run time is known.
+- **SCT-084** Widen the quality gates: add more files to the pilot list, coverage and mutation for `.svelte` components and `src-tauri`, and move `npm run quality` into `npm run verify` once its run time is known.

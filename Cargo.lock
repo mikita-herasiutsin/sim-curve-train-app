@@ -369,6 +369,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "complexity"
+version = "0.0.0-dev"
+dependencies = [
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "cookie"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

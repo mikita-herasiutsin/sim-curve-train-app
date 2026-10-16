@@ -8,6 +8,10 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   plugins: [sveltekit(), svelteTesting()],
 
+  // Stryker runs several Vitest processes at once, and their renames in a shared cache clash
+  // (EPERM on Windows), so scripts/stryker-vitest.mjs gives each run its own cache.
+  cacheDir: process.env.QUALITY_VITE_CACHE_DIR || undefined,
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

@@ -1,0 +1,16 @@
+[package]
+name = "complexity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+serde.workspace = true
+serde_json.workspace = true
+syn = { version = "2", features = ["extra-traits", "full", "visit"] }
+
+[lints]
+workspace = true

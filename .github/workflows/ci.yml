@@ -58,6 +58,60 @@ jobs:
 
       - run: npm run check && npm run lint && npm run test
 
+  # Complexity, CRAP and mutation gates on the functions a pull request changes, plus the pilot
+  # files (quality.config.json). See "Quality gates" in CONTRIBUTING.md.
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-llvm-cov@0.9.1,cargo-mutants@27.1.0
+
+      - run: npm ci
+
+      - name: Metrics on changed functions
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: npm run quality -- "origin/$BASE_REF"
+
+      - name: Mutation tests on changed lines
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: npm run quality:mutation -- "origin/$BASE_REF"
+
+      - name: Pilot files
+        if: github.event_name != 'pull_request'
+        run: npm run quality:pilot
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: failure()
+        with:
+          name: quality-reports-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            mutants.out/
+            reports/mutation/
+          if-no-files-found: ignore
+          retention-days: 14
+
   build:
     name: Release build
     runs-on: windows-latest

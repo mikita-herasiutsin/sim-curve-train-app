@@ -1,0 +1,6 @@
+{
+  "complexityMax": 12,
+  "crapMax": 12,
+  "mutationMin": 80,
+  "pilot": ["crates/core/src/audio_map.rs", "src/lib/pedals/history.ts"]
+}

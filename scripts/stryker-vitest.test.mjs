@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   evaluateVitestResults,
+  executeVitest,
+  getCacheDir,
   getOutputFile,
   handleNoResults,
   readVitestResults,
@@ -8,9 +10,16 @@ import {
 } from "./stryker-vitest.mjs";
 
 describe("stryker-vitest", () => {
-  it("determines output file path using worker ID", () => {
-    expect(getOutputFile("3")).toBe(".stryker-tmp/vitest-3.json");
-    expect(getOutputFile("0")).toBe(".stryker-tmp/vitest-0.json");
+  it("keys the report file and the Vite cache on the process id", () => {
+    expect(getOutputFile(42)).toBe(".stryker-tmp/vitest-42.json");
+    expect(getOutputFile()).toBe(`.stryker-tmp/vitest-${process.pid}.json`);
+    expect(getCacheDir(42)).toBe(".stryker-tmp/vite-42");
+  });
+
+  it("passes the cache dir to vitest", () => {
+    let seen;
+    executeVitest(["a.ts"], "out.json", (_file, _args, opts) => (seen = opts), "cache-dir");
+    expect(seen.env.QUALITY_VITE_CACHE_DIR).toBe("cache-dir");
   });
 
   it("reads vitest results or returns null when missing", () => {

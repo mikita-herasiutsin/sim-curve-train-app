@@ -76,7 +76,7 @@ TypeScript uses ESLint's `complexity` rule, where every function and arrow count
 Run `cargo install --locked cargo-mutants@27.1.0 cargo-llvm-cov@0.9.1` and `rustup component add llvm-tools-preview` once.
 
 - `npm run quality`: complexity and CRAP on changed functions (compared with `origin/main`; pass another base with `npm run quality -- origin/<branch>`).
-- `npm run quality:mutation`: mutation tests on changed lines. Takes minutes. Stryker mutates TS files in place and restores them when it ends, so do not run this while a dev server watches the checkout. A run killed part-way (closed terminal, Ctrl-C twice) can leave a mutated TS file in the tree. Restore it with `git checkout -- <file>` or copy it back from `.stryker-tmp/backup-*`, and check `git status` before committing. Stryker counts a test run that produced no results (a Vitest crash) as survived, not killed.
+- `npm run quality:mutation`: mutation tests on changed lines. Takes minutes. Stryker mutates TS files in place and restores them when it ends, so do not run this while a dev server watches the checkout. A run killed part-way (closed terminal, Ctrl-C twice) can leave a mutated TS file in the tree. Restore it with `git checkout -- <file>` or copy it back from `.stryker-tmp/backup-*`, and check `git status` before committing. When Vitest crashes before it collects any test, the gate counts that mutant as survived, not killed. A crash after the tests start, such as a mutant that loops until the worker runs out of memory, counts as killed.
 - `npm run quality:pilot`: all gates on the pilot files.
 
 The gates are not part of `npm run verify` yet, because they run tests a second time with coverage.

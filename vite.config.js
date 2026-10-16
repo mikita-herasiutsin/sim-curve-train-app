@@ -8,11 +8,9 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(() => ({
   plugins: [sveltekit(), svelteTesting()],
 
-  // Stryker runs several Vitest workers at once; a shared deps cache makes their renames clash
-  // (EPERM on Windows), so each worker gets its own.
-  cacheDir: process.env.STRYKER_MUTATOR_WORKER
-    ? `node_modules/.vite-stryker-${process.env.STRYKER_MUTATOR_WORKER}`
-    : undefined,
+  // Stryker runs several Vitest processes at once, and their renames in a shared cache clash
+  // (EPERM on Windows), so scripts/stryker-vitest.mjs gives each run its own cache.
+  cacheDir: process.env.QUALITY_VITE_CACHE_DIR || undefined,
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

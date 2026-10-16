@@ -83,10 +83,9 @@ impl<'ast> Visit<'ast> for ComplexityVisitor {
 
     fn visit_expr(&mut self, node: &'ast syn::Expr) {
         match node {
-            syn::Expr::If(_)
-            | syn::Expr::While(_)
-            | syn::Expr::ForLoop(_)
-            | syn::Expr::Loop(_) => self.complexity += 1,
+            syn::Expr::If(_) | syn::Expr::While(_) | syn::Expr::ForLoop(_) | syn::Expr::Loop(_) => {
+                self.complexity += 1;
+            }
             syn::Expr::Binary(b) if matches!(b.op, syn::BinOp::And(_) | syn::BinOp::Or(_)) => {
                 self.complexity += 1;
             }

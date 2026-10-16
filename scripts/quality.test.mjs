@@ -45,6 +45,7 @@ import {
   selectTsMutationTargets,
   strykerCounts,
   suppression,
+  removeWrapperLeftovers,
 } from "./quality.mjs";
 
 describe("parseDiff", () => {
@@ -1230,5 +1231,17 @@ describe("runQualityChecks", () => {
     };
     const exitCode = await runQualityChecks(params);
     expect(exitCode).toBe(0);
+  });
+});
+
+describe("removeWrapperLeftovers", () => {
+  it("removes only the wrapper's per-process caches and reports", () => {
+    const removed = [];
+    removeWrapperLeftovers(
+      ".",
+      () => ["vite-123", "vitest-45.json", "backup-1", "vite-cache", "vitest-x.json"],
+      (p) => removed.push(p.replace(/\\/g, "/").split("/").pop()),
+    );
+    expect(removed).toEqual(["vite-123", "vitest-45.json"]);
   });
 });

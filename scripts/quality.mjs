@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
@@ -1034,7 +1034,19 @@ function runTsMutation({ pilotFiles, diffMap, mode, repoRoot, mutationMin }) {
   // A report left by an earlier run would be scored if Stryker fails to start.
   rmSync(resolve(repoRoot, "reports/mutation/mutation.json"), { force: true });
   execStryker(mutateList, targetFiles, repoRoot);
+  removeWrapperLeftovers(resolve(repoRoot, ".stryker-tmp"));
   return evaluateStrykerScore(targetFiles, repoRoot, mutationMin);
+}
+
+// Stryker kills scripts/stryker-vitest.mjs when a mutant times out, before the wrapper can
+// remove its Vite cache and report file.
+export function removeWrapperLeftovers(dir, list = readdirSync, remove = rmSync) {
+  if (!existsSync(dir)) return;
+  for (const name of list(dir)) {
+    if (/^(vite-\d+|vitest-\d+\.json)$/.test(name)) {
+      remove(resolve(dir, name), { recursive: true, force: true });
+    }
+  }
 }
 
 export function selectRustMutationTargets({ pilotFiles, diffMap, mode, fileExists }) {
